@@ -7,8 +7,9 @@ name: Release
 # Each platform gets installers, as Argentum (Windows setup .exe, macOS .dmg,
 # Linux .deb / .rpm / .AppImage), and the portable Shoebox folder (a zip or
 # .tar.gz). Both carry the app and shoebox-cli. Installed, Shoebox keeps its
-# catalog, models and shoebox.json in ~/.shoebox; portable, next to the app
-# (the folder ships a shoebox.json to say so). macOS and Linux builds open and
+# catalog and shoebox.json in ~/.shoebox and its models in the install folder
+# (~/.shoebox on macOS and Linux); portable, all of it next to the app (the
+# folder ships a shoebox.json to say so). macOS and Linux builds open and
 # browse, but can't add disks yet: disk recognition there is roadmap 6.
 #
 # The AI models are not in the download. Until the models screen (download

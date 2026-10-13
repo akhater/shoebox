@@ -16,10 +16,10 @@ pub struct DataDir {
     pub root: PathBuf,
 }
 
-/// The Shoebox folder, holding `shoebox.json` and `models`: the app's own
-/// folder when it runs portable, otherwise (installed) `~/.shoebox`. An
-/// installed app's folder belongs to its installer (replaced on update,
-/// removed on uninstall) or isn't writable at all (a .app, /usr/bin).
+/// The Shoebox folder, holding `shoebox.json`: the app's own folder when it
+/// runs portable, otherwise (installed) `~/.shoebox`. An installed app's
+/// folder belongs to its installer (replaced on update, removed on
+/// uninstall) or isn't writable at all (a .app, /usr/bin).
 pub fn app_home() -> PathBuf {
     portable_home().unwrap_or_else(installed_home)
 }
@@ -39,8 +39,17 @@ fn installed_home() -> PathBuf {
     std::env::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".shoebox")
 }
 
+/// The AI models: in the folder Shoebox runs from - the portable folder, or
+/// the install folder (Windows installs per user, so it's writable). A macOS
+/// .app and /usr/bin can't take them, so installed there they go in
+/// `~/.shoebox`.
 pub fn models_dir() -> PathBuf {
-    app_home().join("models")
+    let installed_dir = || std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+    match portable_home() {
+        Some(home) => home.join("models"),
+        None if cfg!(windows) => installed_dir().unwrap_or_else(installed_home).join("models"),
+        None => installed_home().join("models"),
+    }
 }
 
 const POINTER_FILE: &str = "shoebox.json";
