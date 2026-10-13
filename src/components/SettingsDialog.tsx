@@ -199,9 +199,10 @@ export function SettingsDialog({ dataDir, version, onRegenerateAll, onClose }: P
                   ) : (
                     <>
                       <p>
-                        Copy the catalog ({fmtBytes(check.bytes)}) to <b>{check.target}</b> and use it from now on?
-                        Any scan stops, Shoebox restarts when the copy is done. The old folder is left as it is: delete it
-                        yourself once you're happy.
+                        Move the catalog ({fmtBytes(check.bytes)}) to <b>{check.target}</b> and use it from now on? On
+                        the same disk it takes seconds (folders are moved, as in Explorer); to another disk it's copied.
+                        Any scan stops and Shoebox restarts when it's done. The old folder keeps only its old databases and
+                        a note saying where the catalog went: delete it when you like.
                       </p>
                       <div className="row end">
                         <button className="btn small ghost" onClick={() => setCheck(null)}>
@@ -215,13 +216,14 @@ export function SettingsDialog({ dataDir, version, onRegenerateAll, onClose }: P
                   )}
                 </div>
               )}
+              <BackupLine />
               {moving && !moving.error && (
                 <div className="confirm">
                   <p>
                     {moving.finished
                       ? "Done. Restarting…"
                       : moving.total
-                        ? `Copying ${fmtNum(moving.done)} of ${fmtNum(moving.total)} files…`
+                        ? `Moving… ${fmtNum(moving.done)} of ${fmtNum(moving.total)} files`
                         : "Stopping scans…"}
                   </p>
                   <span className="bar wide">
@@ -242,6 +244,51 @@ export function SettingsDialog({ dataDir, version, onRegenerateAll, onClose }: P
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Backup: consistent copies of the databases for Kopia (or any backup tool),
+ *  made now or by `shoebox-cli backup` before each snapshot. */
+function BackupLine() {
+  const [last, setLast] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => {
+    api.lastBackup().then(setLast).catch(() => {});
+  }, []);
+  const run = async () => {
+    setBusy(true);
+    try {
+      const r = await api.backup();
+      setLast(r.at);
+      setNote(`${r.files.length} databases copied (${fmtBytes(r.bytes)}) in ${r.ms} ms.`);
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="backup-line">
+      <div className="row">
+        <span className="grow">
+          <b>Backup</b>{" "}
+          <span className="muted">
+            {last ? `· copies made ${new Date(last * 1000).toLocaleString()}` : "· no copies made yet"}
+          </span>
+        </span>
+        <button className="btn small" onClick={run} disabled={busy}>
+          {busy ? "Copying…" : "Make backup copies now"}
+        </button>
+      </div>
+      <small>
+        For Kopia or any backup tool: back up this folder, and run <code>shoebox-cli backup</code> just before each
+        snapshot (Kopia: <i>before-snapshot action</i>). It writes consistent copies of the databases in{" "}
+        <code>backup\</code>, safe while Shoebox runs; the <code>.kopiaignore</code> it leaves skips the live ones.
+        Previews never change once made, so a daily snapshot only adds what's new.
+      </small>
+      {note && <small>{note}</small>}
     </div>
   );
 }

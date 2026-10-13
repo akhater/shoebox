@@ -317,6 +317,18 @@ pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Res<Sett
     state.cat.save_settings(settings).map_err(err)
 }
 
+/// Consistent copies of the databases in backup\ (for Kopia), and when that last ran.
+#[tauri::command]
+pub async fn backup_catalog(state: State<'_, AppState>) -> Res<crate::catalog::BackupReport> {
+    let cat = state.cat.clone();
+    tauri::async_runtime::spawn_blocking(move || cat.backup()).await.map_err(|e| e.to_string())?.map_err(err)
+}
+
+#[tauri::command]
+pub fn last_backup(state: State<'_, AppState>) -> Option<i64> {
+    state.cat.last_backup()
+}
+
 #[tauri::command]
 pub fn check_catalog_folder(state: State<'_, AppState>, path: String) -> Res<FolderCheck> {
     state.cat.check_catalog_folder(Path::new(&path)).map_err(err)
@@ -342,9 +354,10 @@ pub fn move_catalog(app: AppHandle, state: State<'_, AppState>, path: String) ->
     if check.has_catalog {
         return Err("That folder already has a catalog: switch to it instead.".into());
     }
-    let (cat, scans) = (state.cat.clone(), state.scans.clone());
+    let (cat, scans, ai) = (state.cat.clone(), state.scans.clone(), state.ai.clone());
     scans.paused.store(true, Ordering::Relaxed);
     scans.cancel_all();
+    ai.cancel.store(true, Ordering::Relaxed); // no face pictures written mid-move
     std::thread::spawn(move || {
         for _ in 0..600 {
             if scans.current.lock().unwrap().is_none() {
@@ -366,6 +379,7 @@ pub fn move_catalog(app: AppHandle, state: State<'_, AppState>, path: String) ->
             }
             Err(e) => {
                 scans.paused.store(false, Ordering::Relaxed);
+                ai.kick();
                 emit(MoveProgress { done: 0, total: 0, finished: true, error: Some(format!("{e:#}")) });
             }
         }

@@ -97,6 +97,28 @@ impl DataDir {
         shard(&self.root.join("faces"), face_id)
     }
 
+    /// Where `backup` puts its consistent copies of the databases.
+    pub fn backup_dir(&self) -> PathBuf {
+        self.root.join("backup")
+    }
+
+    /// A consistent snapshot of an SQLite database (open or not, through
+    /// `conn`) at `dst` inside the data folder. The previous snapshot is
+    /// replaced only once the new one is complete.
+    pub fn snapshot_into(&self, conn: &rusqlite::Connection, dst: &Path) -> anyhow::Result<()> {
+        if !inside(dst, &self.root) {
+            anyhow::bail!("Shoebox only writes inside {}, refused {}", self.root.display(), dst.display());
+        }
+        if let Some(dir) = dst.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = dst.with_extension("db.tmp");
+        let _ = std::fs::remove_file(&tmp);
+        conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy()])?;
+        std::fs::rename(&tmp, dst)?;
+        Ok(())
+    }
+
     pub fn has_catalog(&self) -> bool {
         self.db_path().is_file()
     }
@@ -134,8 +156,8 @@ impl DataDir {
             .fold((0, 0), |(n, b), e| (n + 1, b + e.metadata().map(|m| m.len()).unwrap_or(0)))
     }
 
-    /// Every file of the catalog except the database (copied separately, as a
-    /// consistent snapshot) and half-written temp files.
+    /// Every file of the catalog except its databases (open while Shoebox runs:
+    /// they are snapshotted instead) and half-written temp files.
     pub fn files(&self) -> Vec<PathBuf> {
         walkdir::WalkDir::new(&self.root)
             .into_iter()
@@ -147,27 +169,69 @@ impl DataDir {
             .map(|e| e.into_path())
             .filter(|p| {
                 let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-                !name.starts_with("catalog.db") && !name.ends_with(".tmp")
+                ![".db", ".db-wal", ".db-shm", ".db-journal", ".tmp"].iter().any(|end| name.ends_with(end))
             })
             .collect()
     }
 
-    /// Copies this catalog's files into `target` (another data folder),
-    /// skipping files already there with the same size.
-    pub fn copy_files_to(&self, target: &DataDir, progress: &dyn Fn(usize, usize)) -> io::Result<()> {
-        let files = self.files();
-        for (i, src) in files.iter().enumerate() {
-            let rel = src.strip_prefix(&self.root).map_err(io::Error::other)?;
-            let dst = target.root.join(rel);
-            let same = dst.metadata().ok().map(|m| m.len()) == src.metadata().ok().map(|m| m.len());
-            if !same {
-                target.write(&dst, &std::fs::read(src)?)?;
+    /// Moves this catalog's files into `target` (another, empty data folder).
+    /// The big folders (previews, thumbnails, faces) move whole, the way the
+    /// OS moves a folder: on the same disk an instant rename, nothing copied.
+    /// What is left (settings, logs - and everything, on another disk) is
+    /// copied. If the copying fails, the moved folders are put back. Returns
+    /// what was moved, for [`DataDir::unmove`] if a later step fails.
+    pub fn move_files_to(
+        &self,
+        target: &DataDir,
+        progress: &dyn Fn(usize, usize),
+    ) -> io::Result<Vec<(PathBuf, PathBuf)>> {
+        std::fs::create_dir_all(&target.root)?;
+        let mut moved = Vec::new();
+        for sub in ["previews", "thumbs", "faces"] {
+            let (from, to) = (self.root.join(sub), target.root.join(sub));
+            if !from.is_dir() || to.exists() || !inside(&to, &target.root) {
+                continue;
             }
-            if i % 50 == 0 || i + 1 == files.len() {
-                progress(i + 1, files.len());
+            // A preview being read this very moment can hold the folder briefly.
+            for attempt in 0..5 {
+                match std::fs::rename(&from, &to) {
+                    Ok(()) => {
+                        moved.push((from.clone(), to.clone()));
+                        break;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::CrossesDevices => break, // another disk: copied below
+                    Err(_) if attempt < 4 => std::thread::sleep(std::time::Duration::from_millis(200)),
+                    Err(_) => break,
+                }
             }
         }
-        Ok(())
+        let files = self.files();
+        let copy = || -> io::Result<()> {
+            for (i, src) in files.iter().enumerate() {
+                let rel = src.strip_prefix(&self.root).map_err(io::Error::other)?;
+                let dst = target.root.join(rel);
+                let same = dst.metadata().ok().map(|m| m.len()) == src.metadata().ok().map(|m| m.len());
+                if !same {
+                    target.write(&dst, &std::fs::read(src)?)?;
+                }
+                if i % 50 == 0 || i + 1 == files.len() {
+                    progress(i + 1, files.len());
+                }
+            }
+            Ok(())
+        };
+        if let Err(e) = copy() {
+            Self::unmove(&moved);
+            return Err(e);
+        }
+        Ok(moved)
+    }
+
+    /// Puts back folders [`DataDir::move_files_to`] moved (a later step failed).
+    pub fn unmove(moved: &[(PathBuf, PathBuf)]) {
+        for (from, to) in moved.iter().rev() {
+            let _ = std::fs::rename(to, from);
+        }
     }
 }
 
@@ -179,6 +243,19 @@ pub fn snapshot_db(conn: &rusqlite::Connection, target: &DataDir) -> anyhow::Res
         anyhow::bail!("{} already has a catalog", target.root.display());
     }
     std::fs::create_dir_all(&target.root)?;
+    conn.execute("VACUUM INTO ?1", [dst.to_string_lossy()])?;
+    Ok(())
+}
+
+/// A consistent copy of one of the catalog's other databases (faces, search)
+/// into `target` under the same name, safe while Shoebox has it open.
+pub fn snapshot_sqlite(src: &Path, target: &DataDir) -> anyhow::Result<()> {
+    let name = src.file_name().ok_or_else(|| anyhow::anyhow!("no file name in {}", src.display()))?;
+    let dst = target.root.join(name);
+    if !inside(&dst, &target.root) || dst.exists() {
+        anyhow::bail!("refused {}", dst.display());
+    }
+    let conn = rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.execute("VACUUM INTO ?1", [dst.to_string_lossy()])?;
     Ok(())
 }
