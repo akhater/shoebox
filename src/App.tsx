@@ -143,6 +143,13 @@ function loadSort(): Sort {
 
 function summarize(name: string, r: Report) {
   if (r.cancelled) return `${name}: stopped.`;
+  if (r.retry) {
+    const fixed = r.photosAdded + r.duplicates + r.linked + r.reread;
+    return (
+      `${name}: ${fmtNum(fixed)} ${fixed === 1 ? "photo that couldn't be read before is" : "photos that couldn't be read before are"} fine now` +
+      (r.errors ? `, ${fmtNum(r.errors)} still can't be read` : "")
+    );
+  }
   // Every file read is counted once, so the parts add up to the total.
   const read = [
     r.photosAdded && `${fmtNum(r.photosAdded)} new photos`,
@@ -348,7 +355,10 @@ export default function App() {
       }),
       listen<Report>("scan-done", (e) => {
         setProgress(null);
-        setMessage({ text: summarize(lastRootName.current, e.payload) });
+        // A disk just plugged in had files that couldn't be read: a word only if some are fine now.
+        const r = e.payload;
+        if (r.retry && r.errors === r.found) return;
+        setMessage({ text: summarize(lastRootName.current, r) });
       }),
       listen<{ rootId: number; message: string }>("scan-error", (e) => {
         setProgress(null);
