@@ -699,6 +699,8 @@ export default function App() {
   }, [scope, overview, peopleList, browse]);
 
   const empty = overview && overview.volumes.length === 0;
+  // The people People shows without asking: not ignored, not seen only once.
+  const shownPeople = peopleList.filter((p) => !p.ignored && (p.name || p.photos >= 2));
 
   return (
     <div className="app">
@@ -710,7 +712,8 @@ export default function App() {
         scanningRoot={progress?.rootId ?? null}
         onRegenerate={(id) => regenerate(id)}
         onRemove={removeFolder}
-        people={peopleList.filter((p) => !p.ignored && (p.name || p.photos >= 2)).length}
+        people={shownPeople.length}
+        peopleNew={shownPeople.filter((p) => p.isNew || p.newPhotos > 0).length}
         peopleOpen={view === "people"}
         onPeople={() => {
           setTrail([]);
