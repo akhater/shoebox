@@ -180,7 +180,7 @@ pub fn mounted() -> Vec<MountedVolume> {
 
 #[cfg(not(windows))]
 pub fn locate(_path: &Path) -> Result<(MountedVolume, String)> {
-    Err(anyhow!("Shoebox only runs on Windows"))
+    Err(anyhow!("Shoebox can't recognise disks on this system yet (Windows only for now)"))
 }
 
 /// Full path of a catalog folder on a mounted volume.

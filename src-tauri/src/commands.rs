@@ -261,23 +261,50 @@ pub fn scan_status(state: State<'_, AppState>) -> ScanStatus {
 #[tauri::command]
 pub fn reveal_file(state: State<'_, AppState>, file_id: i64) -> Res<()> {
     let path = state.cat.file_path(file_id).map_err(err)?;
-    explorer(&format!("/select,\"{path}\""))
+    shell_open(&path, true)
 }
 
 #[tauri::command]
 pub fn open_file(state: State<'_, AppState>, file_id: i64) -> Res<()> {
     let path = state.cat.file_path(file_id).map_err(err)?;
-    explorer(&format!("\"{path}\""))
+    shell_open(&path, false)
 }
 
-fn explorer(raw_args: &str) -> Res<()> {
-    let mut cmd = std::process::Command::new("explorer.exe");
+/// Opens a file or folder with its usual app, or (`select`) shows the file
+/// selected in its folder: Explorer, Finder, or the desktop's file manager.
+fn shell_open(path: &str, select: bool) -> Res<()> {
     #[cfg(windows)]
-    {
+    let mut cmd = {
         use std::os::windows::process::CommandExt;
-        cmd.raw_arg(raw_args);
-    }
-    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+        // Explorer parses its own command line: "/select," glued to the quoted path.
+        let mut cmd = std::process::Command::new("explorer.exe");
+        cmd.raw_arg(if select { format!("/select,\"{path}\"") } else { format!("\"{path}\"") });
+        cmd
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("open");
+        if select {
+            cmd.arg("-R");
+        }
+        cmd.arg(path);
+        cmd
+    };
+    // xdg-open can't select a file: it opens the file's folder instead.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let target = match Path::new(path).parent() {
+            Some(folder) if select => folder,
+            _ => Path::new(path),
+        };
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(target);
+        cmd
+    };
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    // Reaped in the background so no finished process lingers.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 #[tauri::command]
@@ -480,7 +507,7 @@ pub fn new_folder(app: AppHandle, state: State<'_, AppState>, volume_id: i64, pa
 #[tauri::command]
 pub fn show_folder(state: State<'_, AppState>, volume_id: i64, rel_path: String) -> Res<()> {
     let path = state.cat.folder_path(volume_id, &rel_path).map_err(err)?;
-    explorer(&format!("\"{path}\""))
+    shell_open(&path, false)
 }
 
 /// Every tag, most used first.

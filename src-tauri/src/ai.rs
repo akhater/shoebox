@@ -1,6 +1,6 @@
 //! Running the AI models: ONNX Runtime on the GPU (DirectML: Intel Arc, AMD,
-//! NVIDIA) when it can, on the CPU otherwise. The runtime DLL and the models
-//! live in `models\` next to the app and are never downloaded here.
+//! NVIDIA) when it can, on the CPU otherwise. The runtime library and the
+//! models live in `models\` next to the app and are never downloaded here.
 //!
 //! CLIP ViT-B-32 (Immich's export): preprocessing and tokenizing follow
 //! Immich's own code exactly, so search quality matches Immich's.
@@ -16,13 +16,22 @@ use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 static RUNTIME: OnceLock<Result<bool, String>> = OnceLock::new();
 
+/// ONNX Runtime's library file on this system.
+const RUNTIME_LIB: &str = if cfg!(windows) {
+    "onnxruntime.dll"
+} else if cfg!(target_os = "macos") {
+    "libonnxruntime.dylib"
+} else {
+    "libonnxruntime.so"
+};
+
 /// Loads ONNX Runtime once. Returns true when it's the GPU (DirectML) build.
 pub fn runtime() -> Result<bool> {
     RUNTIME
         .get_or_init(|| {
             let dir = crate::paths::models_dir();
-            let gpu = dir.join("onnxruntime-directml").join("onnxruntime.dll");
-            let cpu = dir.join("onnxruntime.dll");
+            let gpu = dir.join("onnxruntime-directml").join(RUNTIME_LIB);
+            let cpu = dir.join(RUNTIME_LIB);
             let (dll, is_gpu) = if cfg!(windows) && gpu.is_file() { (gpu, true) } else { (cpu, false) };
             if !dll.is_file() {
                 return Err(format!("The AI runtime isn't in {}", dir.display()));

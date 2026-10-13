@@ -184,6 +184,8 @@ fn rawler_meta(path: &Path) -> Result<Meta> {
     Ok(meta)
 }
 
+// Only the Windows codecs decode at a chosen size.
+#[cfg_attr(not(windows), allow(unused_variables))]
 fn load_image(path: &Path, long_edge: u32) -> Loaded {
     let meta = exif_meta(path).unwrap_or_default();
     let ext = crate::formats::extension(&path.to_string_lossy());

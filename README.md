@@ -51,7 +51,8 @@ npm run tauri dev
 ```
 
 The AI models are not in the repository. Shoebox looks for them in `models/`
-next to the app.
+in the Shoebox folder: next to the app when it runs from its own folder (dev,
+the portable download), `~/.shoebox` when installed.
 
 ```bash
 cd src-tauri
@@ -64,5 +65,6 @@ cargo run --bin shoebox-cli -- stats
 
 `main` is protected: every change goes through a pull request, and merges
 only when CI passes (format, lint, tests including the write guards,
-typecheck, build). Builds for download are made only when a release is
-published. See [CHANGELOG.md](CHANGELOG.md).
+typecheck, build). Builds for download (Windows, macOS, Linux; Intel/AMD
+and ARM) are made only when a release is published. See
+[CHANGELOG.md](CHANGELOG.md).
