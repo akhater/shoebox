@@ -52,9 +52,11 @@ export function StatusBar({ photo, selected, overview, progress, aiProgress, que
           <b>{progress.rootName}</b>
           {progress.phase === "listing"
             ? ` · looking for photos · ${fmtNum(progress.found)} found`
-            : progress.toRead === 0
-              ? ` · ${fmtNum(progress.found)} photos, nothing new`
-              : ` · reading ${fmtNum(progress.read)} of ${fmtNum(progress.toRead)} new photos`}
+            : progress.rootId === 0
+              ? ` · reading again ${fmtNum(progress.read)} of ${fmtNum(progress.toRead)} photos that couldn't be read before`
+              : progress.toRead === 0
+                ? ` · ${fmtNum(progress.found)} photos, nothing new`
+                : ` · reading ${fmtNum(progress.read)} of ${fmtNum(progress.toRead)} new photos`}
         </span>
         {progress.current && <span className="muted ellipsis">{progress.current}</span>}
         {queued > 0 && <span className="muted">· {queued} more queued</span>}

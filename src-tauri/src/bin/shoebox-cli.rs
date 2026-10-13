@@ -3,15 +3,23 @@
 //!
 //!   shoebox-cli add <folder>     add a folder and scan it
 //!   shoebox-cli scan [root-id]   rescan one folder, or every plugged-in one
+//!   shoebox-cli retry [disk-id]  read again only the files that couldn't be read, on one
+//!                                plugged-in disk or all of them (the window does it when a disk
+//!                                is plugged in)
 //!   shoebox-cli stats            catalog overview
 //!   shoebox-cli photo <id>       one photo's details
 //!   shoebox-cli backup           consistent copies of the databases in backup\ (run it
 //!                                before each Kopia snapshot; see .kopiaignore)
 //!   shoebox-cli list [oldest|newest|name|added] [limit] [filters]   photos in grid order (JSON)
 //!   shoebox-cli facets [filters]  what each filter offers, with counts (JSON)
+//!   shoebox-cli days [filters]    photos taken each day, as the calendar shows them (JSON)
 //!       filters = JSON, any of {"dates":["2026-09-26"],"cameras":[..],"lenses":[..],
 //!                               "types":["cr3"],"status":["online","offline","missing"],
 //!                               "people":[42],"tags":[3,7] (photos with all of these tags)}
+//!
+//! People found since the user last looked at them show "(new)" / "(+N new photos)" in
+//! `shoebox-cli faces`; the window marks a person read when the user leaves their page:
+//!   shoebox-cli people-read <person-id>... | --all
 //!
 //! Tags (catalog only, never written into photos):
 //!   shoebox-cli tags [photo-id...]              every tag, or those on some photos
@@ -64,6 +72,7 @@ fn main() -> anyhow::Result<()> {
     shoebox_lib::setup_logging(&data);
     let cat = Catalog::open(data)?;
     shoebox_lib::tidy_old_catalog(&cat.data);
+    scan::heal_saved_previews(&cat)?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cancel = AtomicBool::new(false);
     let show = |p: &Progress| {
@@ -86,6 +95,17 @@ fn main() -> anyhow::Result<()> {
                 match scan::scan_root(&cat, id, &cancel, args.get(2).is_some_and(|a| a == "--regenerate"), &show) {
                     Ok(report) => println!("{}", serde_json::to_string_pretty(&report)?),
                     Err(e) => println!("folder {id}: {e:#}"),
+                }
+            }
+        }
+        Some("retry") => {
+            let ids = match args.get(1) {
+                Some(id) => vec![id.parse()?],
+                None => cat.online_ids(),
+            };
+            for id in ids {
+                if scan::failed_count(&cat, id)? > 0 {
+                    println!("{}", serde_json::to_string_pretty(&scan::retry_failed(&cat, id, &cancel, &show)?)?);
                 }
             }
         }
@@ -151,6 +171,19 @@ fn main() -> anyhow::Result<()> {
                     if p.ignored { " (ignored)" } else { "" }
                 );
             }
+        }
+        Some("people-read") => {
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            let n = if args.get(1).is_some_and(|a| a == "--all") {
+                faces.mark_all_read(&cat)?
+            } else {
+                let ids = args[1..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+                if ids.is_empty() {
+                    anyhow::bail!("people-read <person-id>... | --all");
+                }
+                faces.mark_read(&cat, &ids)?
+            };
+            println!("{}", serde_json::json!({ "facesRead": n }));
         }
         Some("faces-reset") => {
             // Test catalogs only: forget every face, person and name.
@@ -307,6 +340,11 @@ fn main() -> anyhow::Result<()> {
             // What each filter offers, with counts: shoebox-cli facets [filters JSON]
             let filters: Filters = args.get(1).map(|f| serde_json::from_str(f)).transpose()?.unwrap_or_default();
             println!("{}", serde_json::to_string_pretty(&cat.facets(&Scope::All, &filters)?)?);
+        }
+        Some("days") => {
+            // Photos per day, as the calendar shows them: shoebox-cli days [filters JSON]
+            let filters: Filters = args.get(1).map(|f| serde_json::from_str(f)).transpose()?.unwrap_or_default();
+            println!("{}", serde_json::to_string_pretty(&cat.days(&Scope::All, &filters)?)?);
         }
         Some("models") => {
             use shoebox_lib::models;

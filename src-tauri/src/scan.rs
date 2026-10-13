@@ -62,6 +62,8 @@ pub struct Report {
     /// Known photos read again (regenerated previews, edited files, retried failures).
     pub reread: u64,
     pub errors: u64,
+    /// Only the files that couldn't be read before, on a disk just plugged in.
+    pub retry: bool,
     pub cancelled: bool,
     pub seconds: f64,
 }
@@ -183,9 +185,138 @@ pub fn scan_root(
     }
 
     // 3. Read.
+    read_all(cat, &jobs, cancel, &mut progress, on_progress, &mut report)?;
+
+    if !report.cancelled {
+        cat.db().execute("UPDATE roots SET last_scan = ?1 WHERE id = ?2", params![db::now(), root_id])?;
+    }
+    report.seconds = started.elapsed().as_secs_f64();
+    progress.phase = "done".into();
+    progress.current.clear();
+    on_progress(&progress);
+    log::info!("scan {root_id} done: {report:?}");
+    Ok(report)
+}
+
+/// Files on this disk whose photo couldn't be read (or that couldn't even be
+/// opened) last time.
+const FAILED_FILES: &str = "SELECT f.id, f.photo_id, fo.rel_path, f.name, f.size, f.mtime
+     FROM files f JOIN folders fo ON fo.id = f.folder_id LEFT JOIN photos p ON p.id = f.photo_id
+    WHERE fo.volume_id = ?1 AND f.state = ?2
+      AND (p.preview_state = ?3 OR (f.photo_id IS NULL AND f.error IS NOT NULL))";
+
+/// How many files on this disk are waiting to be read again.
+pub fn failed_count(cat: &Catalog, volume_id: i64) -> Result<u64> {
+    let n: i64 = cat.db().query_row(
+        &format!("SELECT COUNT(*) FROM ({FAILED_FILES})"),
+        params![volume_id, FILE_PRESENT, PREVIEW_FAILED],
+        |r| r.get(0),
+    )?;
+    Ok(n as u64)
+}
+
+/// Reads again, on a plugged-in disk, only the files that couldn't be read
+/// last time (the disk pulled out mid-read, a flaky cable...). Nothing is
+/// listed and nothing is marked missing: this is not a scan of the folder.
+pub fn retry_failed(
+    cat: &Catalog,
+    volume_id: i64,
+    cancel: &AtomicBool,
+    on_progress: &(dyn Fn(&Progress) + Sync),
+) -> Result<Report> {
+    let started = Instant::now();
+    let mount = cat.mount_of(volume_id).ok_or_else(|| anyhow!("disk {volume_id} is not plugged in"))?;
+    let label: String =
+        cat.db().query_row("SELECT label FROM volumes WHERE id = ?1", [volume_id], |r| r.get(0)).unwrap_or_default();
+    let failed: Vec<(i64, Option<i64>, String, String, i64, i64)> = cat
+        .db()
+        .prepare(FAILED_FILES)?
+        .query_map(params![volume_id, FILE_PRESENT, PREVIEW_FAILED], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut report = Report { retry: true, ..Default::default() };
+    let mut jobs = Vec::new();
+    for (file_id, photo_id, rel, name, size, mtime) in failed {
+        let Some(kind) = formats::kind_of(&name) else { continue };
+        let path = PathBuf::from(format!("{}\\{}", volumes::join(&mount, &rel).trim_end_matches('\\'), name));
+        // Not there right now: left as it is (only a full scan may call it missing).
+        let Ok(md) = std::fs::metadata(&path) else { continue };
+        let now_mtime =
+            md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
+        if md.len() as i64 != size || now_mtime != mtime {
+            cat.db().execute(
+                "UPDATE files SET size = ?1, mtime = ?2 WHERE id = ?3",
+                params![md.len() as i64, now_mtime, file_id],
+            )?;
+        }
+        report.found += 1;
+        jobs.push(Job {
+            file_id,
+            path,
+            size: md.len(),
+            mtime: now_mtime,
+            kind,
+            ext: formats::extension(&name),
+            prev_photo: photo_id,
+            force: false,
+        });
+    }
+    // root_id 0: not a folder scan (the window words it as a retry).
+    let mut progress = Progress { root_name: label, found: report.found, ..Default::default() };
+    read_all(cat, &jobs, cancel, &mut progress, on_progress, &mut report)?;
+    report.cancelled = cancel.load(Ordering::Relaxed);
+    report.seconds = started.elapsed().as_secs_f64();
+    progress.phase = "done".into();
+    progress.current.clear();
+    on_progress(&progress);
+    log::info!("retry on disk {volume_id} done: {report:?}");
+    Ok(report)
+}
+
+/// A photo marked unreadable only because saving its preview failed, while
+/// its preview and thumbnail are in fact there and open (two copies of it
+/// were read at once, before that was fixed): it is fine. Faces and word
+/// search work from those files, so no disk is needed. Returns how many.
+pub fn heal_saved_previews(cat: &Catalog) -> Result<usize> {
+    let suspects: Vec<i64> = cat
+        .db()
+        .prepare("SELECT id FROM photos WHERE preview_state = ?1 AND error LIKE 'saving preview:%'")?
+        .query_map([PREVIEW_FAILED], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut healed = 0;
+    for pid in suspects {
+        let (Ok(_), Ok((tw, th))) =
+            (image::image_dimensions(cat.data.preview_path(pid)), image::image_dimensions(cat.data.thumb_path(pid)))
+        else {
+            continue;
+        };
+        cat.db().execute(
+            "UPDATE photos SET preview_state = ?1, preview_rev = preview_rev + 1, thumb_w = ?2, thumb_h = ?3, error = NULL
+              WHERE id = ?4 AND preview_state = ?5",
+            params![PREVIEW_OK, tw, th, pid, PREVIEW_FAILED],
+        )?;
+        healed += 1;
+    }
+    if healed > 0 {
+        log::info!("{healed} photos marked unreadable have their preview after all: marked ready");
+    }
+    Ok(healed)
+}
+
+/// Reads the files of `jobs`: fingerprint, then link to a known photo or read
+/// it and make its preview. Copies of one photo are read once.
+fn read_all(
+    cat: &Catalog,
+    jobs: &[Job],
+    cancel: &AtomicBool,
+    progress: &mut Progress,
+    on_progress: &(dyn Fn(&Progress) + Sync),
+    report: &mut Report,
+) -> Result<()> {
     progress.phase = "reading".into();
     progress.to_read = jobs.len() as u64;
-    on_progress(&progress);
+    on_progress(progress);
     let settings = cat.settings();
     let read = AtomicU64::new(0);
     let added = AtomicU64::new(0);
@@ -251,21 +382,12 @@ pub fn scan_root(
     report.duplicates = duplicates.into_inner();
     report.reread = reread.into_inner();
     report.errors = errors.into_inner();
-
     // New names grouped, new photos without a lens given their twin's.
     if let Err(e) = crate::gear::after_scan(&cat.db()) {
-        log::warn!("gear names after scan {root_id}: {e:#}");
+        log::warn!("gear names after reading: {e:#}");
     }
-    if !report.cancelled {
-        cat.db().execute("UPDATE roots SET last_scan = ?1 WHERE id = ?2", params![db::now(), root_id])?;
-    }
-    report.seconds = started.elapsed().as_secs_f64();
-    progress.phase = "done".into();
     progress.read = read.into_inner();
-    progress.current.clear();
-    on_progress(&progress);
-    log::info!("scan {root_id} done: {report:?}");
-    Ok(report)
+    Ok(())
 }
 
 /// Path relative to the volume root, backslashes, no leading separator.

@@ -162,7 +162,26 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 6; COMMIT;"))?;
     }
     if version < 7 {
-        conn.execute_batch(&format!("BEGIN; {SCHEMA_V7} PRAGMA user_version = 7; COMMIT;"))?;
+        // Each face remembers whether the user has seen it: a person with unseen faces
+        // shows "New" or "+N" in People until the user has been on their page. Faces
+        // already shown as new (found since the visit to People before last) stay so.
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE faces ADD COLUMN seen INTEGER NOT NULL DEFAULT 0;
+             UPDATE faces SET seen = 1 WHERE id <= COALESCE(
+                 (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'people_new_after'), (SELECT MAX(id) FROM faces));
+             DELETE FROM meta WHERE key IN ('people_new_after', 'people_seen_upto');
+             PRAGMA user_version = 7;
+             COMMIT;",
+        )?;
+    }
+    if version < 8 {
+        // Safe to run again on a catalog that already has it (its version set back by hand).
+        let has_lens_read =
+            conn.prepare("SELECT 1 FROM pragma_table_info('photos') WHERE name = 'lens_read'")?.exists([])?;
+        let lens_read =
+            if has_lens_read { "" } else { "ALTER TABLE photos ADD COLUMN lens_read INTEGER NOT NULL DEFAULT 0;" };
+        conn.execute_batch(&format!("BEGIN; {SCHEMA_V8} {lens_read} PRAGMA user_version = 8; COMMIT;"))?;
     }
     Ok(())
 }
@@ -172,15 +191,14 @@ fn migrate(conn: &Connection) -> Result<()> {
 /// the catalog); the others are spellings grouped by Shoebox, rebuilt after
 /// every scan. `photos.lens_read`: which lens reader last read the photo, so
 /// photos read before it improved are read again (metadata only).
-const SCHEMA_V7: &str = r#"
-CREATE TABLE gear_names (
+const SCHEMA_V8: &str = r#"
+CREATE TABLE IF NOT EXISTS gear_names (
     kind        TEXT    NOT NULL,   -- 'camera' or 'lens'
     name        TEXT    NOT NULL,   -- as the files give it
     shown       TEXT    NOT NULL,
     by_hand     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (kind, name)
 ) WITHOUT ROWID;
-ALTER TABLE photos ADD COLUMN lens_read INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// Tags: the user's own keywords. They hang off the photo (its content), so they

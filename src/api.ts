@@ -182,6 +182,8 @@ export interface PhotoList {
   ext: string[];
   /** 1 = a RAW file. */
   raw: number[];
+  /** On a person's page: 1 = they were found in it since you last looked at them. */
+  fresh: number[];
 }
 
 export interface FileLoc {
@@ -245,6 +247,8 @@ export interface Report {
   /** Known photos read again (regenerated, edited, failed before). */
   reread: number;
   errors: number;
+  /** Only the files that couldn't be read before, on a disk just plugged in. */
+  retry: boolean;
   cancelled: boolean;
   seconds: number;
 }
@@ -472,6 +476,7 @@ export function headOf(l: PhotoList, n: number): PhotoList {
     marked: l.marked.slice(0, n),
     ext: l.ext.slice(0, n),
     raw: l.raw.slice(0, n),
+    fresh: l.fresh.slice(0, n),
   };
 }
 
@@ -484,9 +489,9 @@ export interface Person {
   cover: number;
   /** A stranger hidden from People. */
   ignored: boolean;
-  /** Found since the visit to People before this one. */
+  /** None of their faces looked at yet: someone new. */
   isNew: boolean;
-  /** Photos they were found in since then. */
+  /** Photos they were found in that you haven't looked at on their page yet. */
   newPhotos: number;
 }
 
@@ -509,8 +514,10 @@ export interface Stray {
 
 export const people = {
   list: () => invoke<Person[]>("people"),
-  /** People is opened: what was found since the last visit shows as new. */
-  visit: () => invoke<void>("visit_people"),
+  /** Their new photos have been seen (you left their page). */
+  read: (ids: number[]) => invoke<number>("read_people", { ids }),
+  /** "Mark all as read" in People. */
+  readAll: () => invoke<number>("read_all_people"),
   rename: (personId: number, name: string) => invoke<void>("rename_person", { personId, name }),
   merge: (ids: number[], into: number) => invoke<void>("merge_people", { ids, into }),
   ignore: (ids: number[], ignored: boolean) => invoke<void>("ignore_people", { ids, ignored }),

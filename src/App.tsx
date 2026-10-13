@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
+  CalendarDays,
   Eye,
   EyeOff,
   FileType,
@@ -49,6 +50,7 @@ import {
   SORTS,
   type Sort,
 } from "./api";
+import { CalendarView } from "./components/CalendarView";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
 import { StraysDialog } from "./components/StraysDialog";
@@ -60,7 +62,19 @@ import { Sidebar, type FolderTarget } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { Viewer } from "./components/Viewer";
 
-const EMPTY: PhotoList = { ids: [], taken: [], state: [], w: [], h: [], rev: [], preview: [], marked: [], ext: [], raw: [] };
+const EMPTY: PhotoList = {
+  ids: [],
+  taken: [],
+  state: [],
+  w: [],
+  h: [],
+  rev: [],
+  preview: [],
+  marked: [],
+  ext: [],
+  raw: [],
+  fresh: [],
+};
 
 /** A per-viewer on/off remembered between sessions (convenience only). */
 function useRemembered(key: string, initial: boolean) {
@@ -145,6 +159,13 @@ function loadSort(): Sort {
 
 function summarize(name: string, r: Report) {
   if (r.cancelled) return `${name}: stopped.`;
+  if (r.retry) {
+    const fixed = r.photosAdded + r.duplicates + r.linked + r.reread;
+    return (
+      `${name}: ${fmtNum(fixed)} ${fixed === 1 ? "photo that couldn't be read before is" : "photos that couldn't be read before are"} fine now` +
+      (r.errors ? `, ${fmtNum(r.errors)} still can't be read` : "")
+    );
+  }
   // Every file read is counted once, so the parts add up to the total.
   const read = [
     r.photosAdded && `${fmtNum(r.photosAdded)} new photos`,
@@ -229,6 +250,10 @@ export default function App() {
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   // Bumped to hand the keyboard back to the grid (viewer closed).
   const [gridFocus, setGridFocus] = useState(0);
+  // The calendar covers the grid; a day picked there jumps the grid to it.
+  const [calendar, setCalendar] = useState(false);
+  const [jump, setJump] = useState<{ index: number; seq: number } | null>(null);
+  const gridTop = useRef(0);
 
   // Filters narrow whatever is shown and stay on from folder to folder.
   const [filters, setFilters] = useState<Filters>(NO_FILTERS);
@@ -350,7 +375,10 @@ export default function App() {
       }),
       listen<Report>("scan-done", (e) => {
         setProgress(null);
-        setMessage({ text: summarize(lastRootName.current, e.payload) });
+        // A disk just plugged in had files that couldn't be read: a word only if some are fine now.
+        const r = e.payload;
+        if (r.retry && r.errors === r.found) return;
+        setMessage({ text: summarize(lastRootName.current, r) });
       }),
       listen<{ rootId: number; message: string }>("scan-error", (e) => {
         setProgress(null);
@@ -404,6 +432,7 @@ export default function App() {
   const drill = (to: Scope) => {
     setTrail((t) => [...t, { view, scope, focusId, viewerId }]);
     setViewerId(null);
+    setCalendar(false);
     setView("photos");
     setScope(to);
     setFocusId(null);
@@ -418,6 +447,17 @@ export default function App() {
     setFocusId(prev.viewerId ?? prev.focusId);
     setViewerId(prev.viewerId);
   }, [trail]);
+
+  // A person's new photos are read once you leave their page (like an email):
+  // they keep their "New" tag while you're there.
+  const personOpen = useRef<number | null>(null);
+  useEffect(() => {
+    const here = view === "photos" && scope.kind === "person" ? scope.id : null;
+    const left = personOpen.current;
+    personOpen.current = here;
+    const p = left != null && left !== here ? peopleList.find((x) => x.id === left) : undefined;
+    if (p && (p.isNew || p.newPhotos > 0)) run(people.read([p.id]).then(refresh));
+  }, [view, scope, peopleList, refresh]);
 
   /** From a person's page. Ignoring a stranger goes back to People, with Undo. */
   const ignorePerson = (p: Person) => {
@@ -438,8 +478,21 @@ export default function App() {
     );
   };
 
+  // Escape closes the calendar first.
   useEffect(() => {
-    if (!trail.length || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging) return;
+    if (!calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (e.key !== "Escape" || (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"))) return;
+      setCalendar(false);
+      setGridFocus((n) => n + 1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging]);
+
+  useEffect(() => {
+    if (!trail.length || calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const t = e.target as HTMLElement | null;
@@ -448,7 +501,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [trail, viewerId, deleteOpen, settingsOpen, straysFor, tagging, goBack]);
+  }, [trail, calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, goBack]);
 
   // Drag and drop of a folder. Same disk: done at once, with Undo. Another
   // disk: asked first, then copied, checked and the original removed in the
@@ -588,6 +641,8 @@ export default function App() {
     () => (query && !showPossible ? headOf(list, clearCount) : list),
     [list, query, showPossible, clearCount],
   );
+  // On a person's page: photos they were found in since you last looked at them.
+  const freshHere = useMemo(() => shown.fresh.filter((f) => f === 1).length, [shown]);
   const viewerIndex = useMemo(() => (viewerId == null ? -1 : shown.ids.indexOf(viewerId)), [viewerId, shown]);
   const focusIndex = useMemo(() => (focusId == null ? null : shown.ids.indexOf(focusId)), [focusId, shown]);
 
@@ -659,12 +714,12 @@ export default function App() {
         peopleOpen={view === "people"}
         onPeople={() => {
           setTrail([]);
+          setCalendar(false);
           setView("people");
-          // Faces found since the last visit show as new; Back from a person isn't a new visit.
-          run(people.visit().then(refresh));
         }}
         onScope={(s) => {
           setTrail([]);
+          setCalendar(false);
           setView("photos");
           setScope(s);
           setFocusId(null);
@@ -758,6 +813,7 @@ export default function App() {
             )}
             <span className="muted">
               {fmtNum(shown.ids.length)} {query ? "matches" : "photos"}
+              {view === "photos" && personHere && freshHere > 0 && <b className="new-count"> · {fmtNum(freshHere)} new</b>}
               {view === "photos" && selected.size > 1 && ` · ${fmtNum(selected.size)} selected`}
             </span>
             {"sub" in scopeInfo && scopeInfo.sub && <span className="muted path">{scopeInfo.sub}</span>}
@@ -812,6 +868,19 @@ export default function App() {
                 title="Tag the selected photos (T)"
               >
                 <TagIcon size={15} /> Tag{selected.size > 1 ? ` ${fmtNum(selected.size)}` : ""}…
+              </button>
+            )}
+            {view === "photos" && (
+              <button
+                className={`icon-btn type-toggle ${calendar ? "on" : ""}`}
+                onClick={() => {
+                  setCalendar(!calendar);
+                  if (calendar) setGridFocus((n) => n + 1);
+                }}
+                title={calendar ? "Back to the photos (Esc)" : "Calendar: every day you took photos; click a day to go there"}
+                aria-pressed={calendar}
+              >
+                <CalendarDays size={16} />
               </button>
             )}
             {view === "photos" && (
@@ -912,32 +981,50 @@ export default function App() {
             </div>
           </div>
         ) : (
-          <PhotoGrid
-            key={JSON.stringify(scope) + query + sort + JSON.stringify(filters)}
-            list={shown}
-            rowHeight={rowHeight}
-            onOpen={(i) => setViewerId(shown.ids[i])}
-            onSelect={(cursor, sel) => {
-              setFocusId(cursor >= 0 ? shown.ids[cursor] : null);
-              setSelected(sel);
-            }}
-            onMark={setMarked}
-            onTag={setTagging}
-            selected={selected}
-            keyboard={viewerIndex < 0 && !deleteOpen && !settingsOpen && !straysFor && !tagging}
-            focusRequest={gridFocus}
-            focusIndex={focusIndex}
-            showType={showType}
-            flatLabel={
-              query
-                ? `Best matches for "${query}"`
-                : sort === "name"
-                  ? "By file name"
-                  : sort === "added"
-                    ? "Most recently added first"
-                    : undefined
-            }
-          />
+          <div className="grid-stack">
+            <PhotoGrid
+              key={JSON.stringify(scope) + query + sort + JSON.stringify(filters)}
+              list={shown}
+              rowHeight={rowHeight}
+              onOpen={(i) => setViewerId(shown.ids[i])}
+              onSelect={(cursor, sel) => {
+                setFocusId(cursor >= 0 ? shown.ids[cursor] : null);
+                setSelected(sel);
+              }}
+              onMark={setMarked}
+              onTag={setTagging}
+              selected={selected}
+              keyboard={viewerIndex < 0 && !calendar && !deleteOpen && !settingsOpen && !straysFor && !tagging}
+              focusRequest={gridFocus}
+              focusIndex={focusIndex}
+              showType={showType}
+              flatLabel={
+                query
+                  ? `Best matches for "${query}"`
+                  : sort === "name"
+                    ? "By file name"
+                    : sort === "added"
+                      ? "Most recently added first"
+                      : undefined
+              }
+              jump={jump}
+              onTopPhoto={(i) => (gridTop.current = i)}
+            />
+            {calendar && (
+              <CalendarView
+                list={shown}
+                newestFirst={sort === "newest" && !query}
+                startIndex={focusIndex != null && focusIndex >= 0 ? focusIndex : gridTop.current}
+                onPick={(i) => {
+                  setCalendar(false);
+                  setFocusId(shown.ids[i]);
+                  setSelected(new Set([shown.ids[i]]));
+                  setJump((j) => ({ index: i, seq: (j?.seq ?? 0) + 1 }));
+                  setGridFocus((n) => n + 1);
+                }}
+              />
+            )}
+          </div>
         )}
 
         <StatusBar

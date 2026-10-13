@@ -1,4 +1,4 @@
-import { Check, ChevronRight, Eye, EyeOff, Merge, Pencil, Square, X } from "lucide-react";
+import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { faceUrl, fmtNum, modelsApi, people as peopleApi, type Person } from "../api";
 
@@ -125,12 +125,12 @@ export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }:
         >
           <img src={faceUrl(p.cover)} alt="" loading="lazy" draggable={false} />
           {p.isNew ? (
-            <span className="new-badge" title="Found since your last visit to People">
+            <span className="new-badge" title="Someone new: open them to see their photos">
               New
             </span>
           ) : (
             p.newPhotos > 0 && (
-              <span className="new-badge" title={`Found in ${fmtNum(p.newPhotos)} more photos since your last visit to People`}>
+              <span className="new-badge" title={`In ${fmtNum(p.newPhotos)} new photos: open them to see which`}>
                 +{fmtNum(p.newPhotos)}
               </span>
             )
@@ -223,6 +223,15 @@ export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }:
               <EyeOff size={14} /> Ignore everyone seen only once
             </button>
           </>
+        )}
+        {fresh(people) > 0 && (
+          <button
+            className="btn small ghost"
+            title="Clear every New and +N without opening each person"
+            onClick={() => act(() => peopleApi.readAll().then(() => {}))}
+          >
+            <CheckCheck size={14} /> Mark all as read
+          </button>
         )}
         <button
           className="btn small ghost"

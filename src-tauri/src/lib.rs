@@ -22,17 +22,25 @@ mod commands;
 use catalog::Catalog;
 use paths::DataDir;
 use scan::Progress;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
+/// What the scan worker does next.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ScanTask {
+    /// Scan a catalog folder (and regenerate its previews).
+    Folder(i64, bool),
+    /// Read again the files of this disk that couldn't be read before.
+    Retry(i64),
+}
+
 /// Folders waiting to be scanned, one scan at a time.
 #[derive(Default)]
 pub struct ScanQueue {
-    /// (folder id, regenerate previews)
-    queue: Mutex<VecDeque<(i64, bool)>>,
+    queue: Mutex<VecDeque<ScanTask>>,
     wake: Condvar,
     pub cancel: AtomicBool,
     pub current: Mutex<Option<Progress>>,
@@ -47,21 +55,43 @@ impl ScanQueue {
         }
         let mut q = self.queue.lock().unwrap();
         let running = self.current.lock().unwrap().as_ref().is_some_and(|p| p.root_id == root_id);
-        if let Some(item) = q.iter_mut().find(|(id, _)| *id == root_id) {
-            item.1 |= regenerate;
+        if let Some(ScanTask::Folder(_, regen)) =
+            q.iter_mut().find(|t| matches!(t, ScanTask::Folder(id, _) if *id == root_id))
+        {
+            *regen |= regenerate;
         } else if !running || regenerate {
-            q.push_back((root_id, regenerate));
+            q.push_back(ScanTask::Folder(root_id, regenerate));
+            self.wake.notify_one();
+        }
+    }
+
+    /// A disk holding files that couldn't be read was plugged in: read those again.
+    pub fn retry(&self, volume_id: i64) {
+        if self.paused.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut q = self.queue.lock().unwrap();
+        if !q.contains(&ScanTask::Retry(volume_id)) {
+            q.push_back(ScanTask::Retry(volume_id));
             self.wake.notify_one();
         }
     }
 
     /// Drops a folder's queued scans (it was removed from the catalog).
     pub fn forget(&self, root_id: i64) {
-        self.queue.lock().unwrap().retain(|(id, _)| *id != root_id);
+        self.queue.lock().unwrap().retain(|t| !matches!(t, ScanTask::Folder(id, _) if *id == root_id));
     }
 
     pub fn pending(&self) -> Vec<i64> {
-        self.queue.lock().unwrap().iter().map(|(id, _)| *id).collect()
+        self.queue
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|t| match t {
+                ScanTask::Folder(id, _) => Some(*id),
+                ScanTask::Retry(_) => None,
+            })
+            .collect()
     }
 
     /// Stops the running scan and drops the queued ones.
@@ -70,7 +100,7 @@ impl ScanQueue {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    fn next(&self) -> (i64, bool) {
+    fn next(&self) -> ScanTask {
         let mut q = self.queue.lock().unwrap();
         loop {
             if let Some(item) = q.pop_front() {
@@ -324,10 +354,10 @@ pub fn setup_logging(data: &DataDir) {
 
 fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQueue>, lenses: Arc<Kick>) {
     loop {
-        let (root_id, regenerate) = q.next();
+        let task = q.next();
         q.cancel.store(false, Ordering::Relaxed);
         let refresh_gate = Mutex::new(Instant::now());
-        let result = scan::scan_root(&cat, root_id, &q.cancel, regenerate, &|p: &Progress| {
+        let progress = |p: &Progress| {
             *q.current.lock().unwrap() = Some(p.clone());
             let _ = app.emit("scan-progress", p);
             // Let the grid fill in while a long scan runs.
@@ -336,7 +366,13 @@ fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQ
                 *gate = Instant::now();
                 let _ = app.emit("catalog-changed", ());
             }
-        });
+        };
+        let (root_id, result) = match task {
+            ScanTask::Folder(root_id, regenerate) => {
+                (root_id, scan::scan_root(&cat, root_id, &q.cancel, regenerate, &progress))
+            }
+            ScanTask::Retry(volume_id) => (0, scan::retry_failed(&cat, volume_id, &q.cancel, &progress)),
+        };
         *q.current.lock().unwrap() = None;
         // A scan is the moment a moved or deleted catalog folder shows up.
         let _ = cat.refresh_roots();
@@ -345,8 +381,11 @@ fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQ
                 let _ = app.emit("scan-done", report);
             }
             Err(e) => {
-                log::warn!("scan {root_id} failed: {e:#}");
-                let _ = app.emit("scan-error", ScanError { root_id, message: format!("{e:#}") });
+                log::warn!("scan {task:?} failed: {e:#}");
+                // A retry is quiet: the disk may have gone again; the next plug-in tries again.
+                if let ScanTask::Folder(..) = task {
+                    let _ = app.emit("scan-error", ScanError { root_id, message: format!("{e:#}") });
+                }
             }
         }
         let _ = app.emit("catalog-changed", ());
@@ -356,11 +395,21 @@ fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQ
 }
 
 /// Notices disks being plugged in or out. Polls the drive-letter mask every
-/// 2 s (free) and re-reads volume details on change or every 15 s.
-fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, lenses: Arc<Kick>) {
+/// 2 s (free) and re-reads volume details on change or every 15 s. A disk
+/// holding files that couldn't be read gets them read again when it shows up
+/// (and at start, for the disks already there); lenses not read yet too.
+fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lenses: Arc<Kick>) {
     let mut mask = volumes::drive_mask();
     let mut last_full = Instant::now();
+    let mut online: HashSet<i64> = HashSet::new();
     loop {
+        let now: HashSet<i64> = cat.online_ids().into_iter().collect();
+        for &v in now.difference(&online) {
+            if scan::failed_count(&cat, v).is_ok_and(|n| n > 0) {
+                scans.retry(v);
+            }
+        }
+        online = now;
         std::thread::sleep(Duration::from_secs(2));
         let m = volumes::drive_mask();
         if m == mask && last_full.elapsed() < Duration::from_secs(15) {
@@ -440,6 +489,9 @@ pub fn run() {
     setup_logging(&data);
     log::info!("Shoebox {} starting, data in {}", env!("CARGO_PKG_VERSION"), data.root.display());
     let cat = Arc::new(Catalog::open(data.clone()).expect("open catalog"));
+    if let Err(e) = scan::heal_saved_previews(&cat) {
+        log::warn!("checking previews of unreadable photos: {e:#}");
+    }
     let opened = data.clone();
     std::thread::spawn(move || tidy_old_catalog(&opened));
     let scans = Arc::new(ScanQueue::default());
@@ -493,8 +545,8 @@ pub fn run() {
             // Describe whatever isn't yet, from the start.
             ai.kick();
             let handle = app.handle().clone();
-            let (c, l) = (cat.clone(), lens_kick.clone());
-            std::thread::Builder::new().name("volumes".into()).spawn(move || volume_watcher(handle, c, l))?;
+            let (c, q, l) = (cat.clone(), scans.clone(), lens_kick.clone());
+            std::thread::Builder::new().name("volumes".into()).spawn(move || volume_watcher(handle, c, q, l))?;
             let handle = app.handle().clone();
             let (c, l) = (cat.clone(), lens_kick.clone());
             std::thread::Builder::new().name("lenses".into()).spawn(move || lens_worker(handle, c, l))?;
@@ -526,7 +578,8 @@ pub fn run() {
             commands::catalog_stats,
             commands::search_photos,
             commands::people,
-            commands::visit_people,
+            commands::read_people,
+            commands::read_all_people,
             commands::rename_person,
             commands::merge_people,
             commands::ignore_people,

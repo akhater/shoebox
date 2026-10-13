@@ -2,6 +2,7 @@ import { ImageOff, Trash2, TriangleAlert, Unplug } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { fmtNum, thumbUrl, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
+import { TimelineRail } from "./TimelineRail";
 
 const GAP = 4;
 const PAD = 20;
@@ -31,6 +32,10 @@ interface Props {
   flatLabel?: string;
   /** The file type (CR3, JPG...) in a corner of each thumbnail. */
   showType: boolean;
+  /** Brings this photo to the top of the grid (a day picked in the calendar); a new `seq` each time. */
+  jump?: { index: number; seq: number } | null;
+  /** The first photo on screen changed (where the calendar opens). */
+  onTopPhoto?: (index: number) => void;
 }
 
 type PhotosRow = Extract<Row, { kind: "photos" }>;
@@ -76,6 +81,20 @@ export function PhotoGrid(p: Props) {
     return m;
   }, [layout, list.ids.length]);
 
+  // A photo picked in the calendar goes to the top, under its month's header
+  // when it starts the month.
+  const jumped = useRef(p.jump?.seq ?? 0); // a grid that mounts later ignores an old jump
+  useEffect(() => {
+    const el = scroller.current;
+    if (!p.jump || p.jump.seq === jumped.current || !el) return;
+    const ri = rowOf[p.jump.index];
+    const row = layout.rows[ri];
+    if (!row) return;
+    jumped.current = p.jump.seq;
+    const above = layout.rows[ri - 1];
+    el.scrollTop = above?.kind === "header" ? above.top : row.top - MARGIN;
+  }, [p.jump, layout, rowOf]);
+
   // Keep the current photo on screen.
   useEffect(() => {
     if (focusIndex == null || focusIndex < 0 || !scroller.current) return;
@@ -92,7 +111,9 @@ export function PhotoGrid(p: Props) {
     cancelAnimationFrame(frame.current);
     frame.current = requestAnimationFrame(() => {
       const el = scroller.current;
-      if (el) setViewport({ top: el.scrollTop, height: el.clientHeight });
+      if (!el) return;
+      setViewport({ top: el.scrollTop, height: el.clientHeight });
+      p.onTopPhoto?.(firstPhotoAt(el.scrollTop));
     });
   };
 
@@ -137,14 +158,16 @@ export function PhotoGrid(p: Props) {
     return best ?? i;
   };
 
-  /** First photo on screen, where the keyboard starts when nothing is current. */
-  const firstOnScreen = () => {
-    for (let r = firstVisible(layout.rows, viewport.top); r < layout.rows.length; r++) {
+  /** First photo below `y`. */
+  const firstPhotoAt = (y: number) => {
+    for (let r = firstVisible(layout.rows, y); r < layout.rows.length; r++) {
       const row = layout.rows[r];
       if (row.kind === "photos") return row.tiles[0].index;
     }
     return 0;
   };
+  /** First photo on screen, where the keyboard starts when nothing is current. */
+  const firstOnScreen = () => firstPhotoAt(viewport.top);
 
   const onKeyDown = (e: ReactKeyboardEvent) => {
     if (!p.keyboard || !list.ids.length) return;
@@ -224,77 +247,109 @@ export function PhotoGrid(p: Props) {
   const bottom = viewport.top + viewport.height + OVERSCAN;
   for (let r = start; r < layout.rows.length && layout.rows[r].top < bottom; r++) visible.push(layout.rows[r]);
 
+  // The date rail, for lists in date order that don't fit on screen.
+  const marks = useMemo(
+    () => (flatLabel ? [] : layout.rows.flatMap((r) => (r.kind === "header" ? [{ top: r.top, ts: r.ts }] : []))),
+    [layout, flatLabel],
+  );
+  const rail = marks.length >= 2 && layout.height + PAD > viewport.height;
+
   return (
-    <div className="grid-scroller" ref={scroller} onScroll={onScroll} onKeyDown={onKeyDown} tabIndex={0}>
-      <div className="grid-canvas" style={{ height: layout.height + PAD }}>
-        {visible.map((row) =>
-          row.kind === "header" ? (
-            <div key={`h${row.top}`} className="grid-header" style={{ top: row.top, left: PAD, right: PAD }}>
-              <span>{row.label}</span>
-              <span className="muted">{fmtNum(row.count)}</span>
-            </div>
-          ) : (
-            row.tiles.map((t) => {
-              const id = list.ids[t.index];
-              const state = list.state[t.index];
-              const preview = list.preview[t.index];
-              const marked = list.marked[t.index] === 1;
-              return (
-                <button
-                  key={id}
-                  tabIndex={-1}
-                  className={`tile ${state === 1 ? "is-offline" : ""} ${state === 0 ? "is-missing" : ""} ${marked ? "is-marked" : ""} ${selected.has(id) ? "is-selected" : ""} ${t.index === focusIndex ? "is-focus" : ""}`}
-                  style={{ top: row.top, left: PAD + t.left, width: t.width, height: row.height }}
-                  // Tiles come and go as the grid scrolls, so the grid keeps the keyboard.
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    scroller.current?.focus({ preventScroll: true });
-                  }}
-                  onClick={(e) => moveTo(t.index, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey })}
-                  onDoubleClick={() => p.onOpen(t.index)}
-                  title={
-                    marked
-                      ? "Marked for deletion (Delete to unmark)"
-                      : state === 1
-                        ? "Not reachable now: disk unplugged or folder not found"
-                        : state === 0
-                          ? "Missing: not found where it was"
-                          : undefined
-                  }
-                >
-                  {preview === 1 ? (
-                    <img src={thumbUrl(id, list.rev[t.index])} loading="lazy" decoding="async" draggable={false} alt="" />
-                  ) : preview === 2 ? (
-                    <span className="tile-empty">
-                      <ImageOff size={22} />
-                    </span>
-                  ) : (
-                    <span className="tile-empty pending" />
-                  )}
-                  {state === 1 && (
-                    <span className="badge offline">
-                      <Unplug size={13} />
-                    </span>
-                  )}
-                  {state === 0 && (
-                    <span className="badge missing">
-                      <TriangleAlert size={13} />
-                    </span>
-                  )}
-                  {marked && (
-                    <span className="badge marked">
-                      <Trash2 size={13} />
-                    </span>
-                  )}
-                  {p.showType && list.ext[t.index] && (
-                    <span className={`type-tag ${list.raw[t.index] === 1 ? "raw" : ""}`}>{list.ext[t.index].toUpperCase()}</span>
-                  )}
-                </button>
-              );
-            })
-          ),
-        )}
+    <div className="grid-area">
+      <div
+        className={`grid-scroller ${rail ? "with-rail" : ""}`}
+        ref={scroller}
+        onScroll={onScroll}
+        onKeyDown={onKeyDown}
+        tabIndex={0}
+      >
+        <div className="grid-canvas" style={{ height: layout.height + PAD }}>
+          {visible.map((row) =>
+            row.kind === "header" ? (
+              <div key={`h${row.top}`} className="grid-header" style={{ top: row.top, left: PAD, right: PAD }}>
+                <span>{row.label}</span>
+                <span className="muted">{fmtNum(row.count)}</span>
+              </div>
+            ) : (
+              row.tiles.map((t) => {
+                const id = list.ids[t.index];
+                const state = list.state[t.index];
+                const preview = list.preview[t.index];
+                const marked = list.marked[t.index] === 1;
+                return (
+                  <button
+                    key={id}
+                    tabIndex={-1}
+                    className={`tile ${state === 1 ? "is-offline" : ""} ${state === 0 ? "is-missing" : ""} ${marked ? "is-marked" : ""} ${selected.has(id) ? "is-selected" : ""} ${t.index === focusIndex ? "is-focus" : ""}`}
+                    style={{ top: row.top, left: PAD + t.left, width: t.width, height: row.height }}
+                    // Tiles come and go as the grid scrolls, so the grid keeps the keyboard.
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      scroller.current?.focus({ preventScroll: true });
+                    }}
+                    onClick={(e) => moveTo(t.index, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey })}
+                    onDoubleClick={() => p.onOpen(t.index)}
+                    title={
+                      marked
+                        ? "Marked for deletion (Delete to unmark)"
+                        : state === 1
+                          ? "Not reachable now: disk unplugged or folder not found"
+                          : state === 0
+                            ? "Missing: not found where it was"
+                            : undefined
+                    }
+                  >
+                    {preview === 1 ? (
+                      <img src={thumbUrl(id, list.rev[t.index])} loading="lazy" decoding="async" draggable={false} alt="" />
+                    ) : preview === 2 ? (
+                      <span className="tile-empty">
+                        <ImageOff size={22} />
+                      </span>
+                    ) : (
+                      <span className="tile-empty pending" />
+                    )}
+                    {state === 1 && (
+                      <span className="badge offline">
+                        <Unplug size={13} />
+                      </span>
+                    )}
+                    {state === 0 && (
+                      <span className="badge missing">
+                        <TriangleAlert size={13} />
+                      </span>
+                    )}
+                    {list.fresh[t.index] === 1 && (
+                      <span className="new-badge" title="New: found since you last looked at this person">
+                        New
+                      </span>
+                    )}
+                    {marked && (
+                      <span className="badge marked">
+                        <Trash2 size={13} />
+                      </span>
+                    )}
+                    {p.showType && list.ext[t.index] && (
+                      <span className={`type-tag ${list.raw[t.index] === 1 ? "raw" : ""}`}>
+                        {list.ext[t.index].toUpperCase()}
+                      </span>
+                    )}
+                  </button>
+                );
+              })
+            ),
+          )}
+        </div>
       </div>
+      {rail && (
+        <TimelineRail
+          marks={marks}
+          content={layout.height + PAD}
+          viewport={viewport.height}
+          scrollTop={viewport.top}
+          onScrollTo={(top) => scroller.current && (scroller.current.scrollTop = top)}
+          onWheel={(dy) => scroller.current && (scroller.current.scrollTop += dy)}
+        />
+      )}
     </div>
   );
 }

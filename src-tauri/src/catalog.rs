@@ -382,11 +382,17 @@ impl Catalog {
             Sort::Name => format!("{name}, p.id"),
             Sort::Added => "p.added_at DESC, p.id DESC".to_string(),
         };
+        let fresh = match scope {
+            Scope::Person { .. } => {
+                "EXISTS (SELECT 1 FROM faces fx WHERE fx.photo_id = p.id AND fx.person_id = ?1 AND fx.seen = 0)"
+            }
+            _ => "0",
+        };
         let sql = format!(
             "WITH st AS ({}) SELECT p.id, COALESCE(p.taken_ts, 0), COALESCE(st.s, 0),
                     COALESCE(p.thumb_w, 0), COALESCE(p.thumb_h, 0), p.preview_rev, p.preview_state, p.marked,
                     COALESCE((SELECT {EXT_SQL} FROM files f WHERE f.photo_id = p.id ORDER BY f.state LIMIT 1), ''),
-                    p.kind = 'raw'
+                    p.kind = 'raw', {fresh}
                FROM photos p LEFT JOIN st ON st.pid = p.id
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
               ORDER BY {order}",
@@ -409,6 +415,34 @@ impl Catalog {
             out.marked.push(r.get(7)?);
             out.ext.push(r.get(8)?);
             out.raw.push(r.get(9)?);
+            out.fresh.push(r.get(10)?);
+        }
+        Ok(out)
+    }
+
+    /// Photos taken each day (camera local time) in a scope narrowed by
+    /// `filters`, oldest day first: the window's calendar, for agents.
+    pub fn days(&self, scope: &Scope, filters: &Filters) -> Result<Days> {
+        let (filter, p1, p2) = self.scope_sql(scope)?;
+        let sql = format!(
+            "WITH st AS ({}) SELECT CASE WHEN COALESCE(p.taken_ts, 0) > 0
+                    THEN strftime('%Y-%m-%d', p.taken_ts, 'unixepoch') END AS d, COUNT(*)
+               FROM photos p LEFT JOIN st ON st.pid = p.id
+              WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
+              GROUP BY d ORDER BY d",
+            state_cte(&self.online_sql()),
+            filters_sql()
+        );
+        let db = self.db();
+        let mut stmt = db.prepare(&sql)?;
+        let [d, c, l, t, s, pe, tg] = filters.params(None);
+        let mut rows = stmt.query(params![p1, p2, d, c, l, t, s, pe, tg])?;
+        let mut out = Days::default();
+        while let Some(r) = rows.next()? {
+            match r.get::<_, Option<String>>(0)? {
+                Some(day) => out.days.push(Day { day, photos: r.get(1)? }),
+                None => out.undated = r.get(1)?,
+            }
         }
         Ok(out)
     }
@@ -557,6 +591,7 @@ impl Catalog {
                 out.marked.push(all.marked[i]);
                 out.ext.push(all.ext[i].clone());
                 out.raw.push(all.raw[i]);
+                out.fresh.push(all.fresh[i]);
             }
         }
         Ok(out)
@@ -1327,6 +1362,24 @@ pub struct PhotoList {
     pub ext: Vec<String>,
     /// 1 = a RAW file.
     pub raw: Vec<i64>,
+    /// On a person's page: 1 = they were found in it since the user last looked at them.
+    pub fresh: Vec<i64>,
+}
+
+/// Photos per day, for the calendar.
+#[derive(Serialize, Default, Debug)]
+pub struct Days {
+    /// Days with photos, oldest first.
+    pub days: Vec<Day>,
+    /// Photos without a date.
+    pub undated: i64,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Day {
+    /// "2006-01-14"
+    pub day: String,
+    pub photos: i64,
 }
 
 #[derive(Serialize)]
