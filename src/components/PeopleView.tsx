@@ -9,15 +9,16 @@ interface Props {
   onError: (e: string) => void;
 }
 
-type Group = "named" | "toName";
+type Group = "named" | "toName" | "ignored";
 
-/** Which groups are folded, remembered between sessions (convenience only). */
+/** Which groups are folded, remembered between sessions (convenience only).
+ *  Ignored starts folded. */
 function useFolded() {
   const [folded, setFolded] = useState<Group[]>(() => {
     try {
-      return JSON.parse(localStorage.getItem("shoebox.people.folded") ?? "[]") as Group[];
+      return JSON.parse(localStorage.getItem("shoebox.people.folded") ?? '["ignored"]') as Group[];
     } catch {
-      return [];
+      return ["ignored"];
     }
   });
   useEffect(() => {
@@ -37,7 +38,6 @@ export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
   const [selected, setSelected] = useState<number[]>([]);
   const [editing, setEditing] = useState<number | null>(null);
   const [showOnce, setShowOnce] = useState(false);
-  const [showIgnored, setShowIgnored] = useState(false);
   const [folded, fold] = useFolded();
 
   const active = people.filter((p) => !p.ignored);
@@ -47,6 +47,8 @@ export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
   const named = active.filter((p) => p.name);
   const toName = active.filter((p) => !p.name && (showOnce || p.photos >= 2));
   const selecting = selected.length > 0;
+  // With only ignored people selected, the bar offers "Show again" instead of "Ignore".
+  const allIgnored = selecting && selected.every((id) => people.find((p) => p.id === id)?.ignored);
 
   const toggle = (id: number) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
@@ -158,25 +160,21 @@ export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
             <span>
               <b>{selected.length}</b> selected
             </span>
-            {!showIgnored && (
-              <button className="btn small primary" disabled={selected.length < 2} onClick={merge}>
-                <Merge size={14} /> Merge into one person
-              </button>
-            )}
-            <button className="btn small" onClick={() => act(() => peopleApi.ignore(selected, !showIgnored))}>
-              {showIgnored ? <Eye size={14} /> : <EyeOff size={14} />} {showIgnored ? "Show again" : "Ignore"}
+            <button className="btn small primary" disabled={selected.length < 2} onClick={merge}>
+              <Merge size={14} /> Merge into one person
+            </button>
+            <button className="btn small" onClick={() => act(() => peopleApi.ignore(selected, !allIgnored))}>
+              {allIgnored ? <Eye size={14} /> : <EyeOff size={14} />} {allIgnored ? "Show again" : "Ignore"}
             </button>
             <button className="btn small ghost" onClick={() => setSelected([])}>
               <X size={14} /> Cancel
             </button>
           </>
-        ) : showIgnored ? (
-          <span className="muted">Ignored people: hidden from People, their new faces still join them.</span>
         ) : (
           <span className="muted">Click a face for their photos · click the name to rename · tick to merge or ignore</span>
         )}
         <span className="grow" />
-        {!showIgnored && seenOnce.length > 0 && (
+        {seenOnce.length > 0 && (
           <>
             <button className="btn small ghost" onClick={() => setShowOnce(!showOnce)}>
               {showOnce ? "Hide" : "Show"} {fmtNum(seenOnce.length)} seen only once
@@ -190,35 +188,17 @@ export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
             </button>
           </>
         )}
-        {!showIgnored && (
-          <button
-            className="btn small ghost"
-            title="Sort again every face that isn't named, ignored or placed by hand"
-            onClick={() => act(() => peopleApi.regroup().then(() => {}))}
-          >
-            Regroup faces
-          </button>
-        )}
-        {(ignored.length > 0 || showIgnored) && (
-          <button
-            className="btn small ghost"
-            onClick={() => {
-              setSelected([]);
-              setShowIgnored(!showIgnored);
-            }}
-          >
-            {showIgnored ? "Back to people" : `Ignored (${fmtNum(ignored.length)})`}
-          </button>
-        )}
+        <button
+          className="btn small ghost"
+          title="Sort again every face that isn't named, ignored or placed by hand"
+          onClick={() => act(() => peopleApi.regroup().then(() => {}))}
+        >
+          Regroup faces
+        </button>
       </div>
-      {showIgnored ? (
-        <div className="people-grid">{ignored.map(card)}</div>
-      ) : (
-        <>
-          {group("named", "Named", named, "Nobody named yet. Click “Add a name” under a face.")}
-          {group("toName", "To name", toName, "Everyone found is named.")}
-        </>
-      )}
+      {group("named", "Named", named, "Nobody named yet. Click “Add a name” under a face.")}
+      {group("toName", "To name", toName, "Everyone found is named.")}
+      {group("ignored", "Ignored", ignored, "Nobody ignored. Strangers you ignore go here; their new faces still join them.")}
     </div>
   );
 }
