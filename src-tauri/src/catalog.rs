@@ -753,8 +753,10 @@ impl Catalog {
     /// Moves the catalog to `target` and makes it the catalog for the next
     /// start. Previews, thumbnails and faces move as folders (instant on the
     /// same disk, copied to another one); the databases are snapshotted. The
-    /// old folder keeps only its old databases and a note saying where the
-    /// catalog went. Any failure puts everything back. Scans must be stopped.
+    /// old folder keeps its old databases and a note saying where the catalog
+    /// went until Shoebox has started on the new one, which then sends them
+    /// to the Recycle Bin ([`paths::remove_old_catalog`]). Any failure puts
+    /// everything back. Scans must be stopped.
     pub fn move_catalog(&self, target: &Path, progress: &dyn Fn(usize, usize)) -> Result<()> {
         let to = DataDir { root: target.to_path_buf() };
         if to.has_catalog() {
@@ -769,7 +771,7 @@ impl Catalog {
                 }
             }
             paths::snapshot_db(&self.db(), &to)?;
-            paths::remember_data_dir(&to.root)?;
+            paths::remember_data_dir(&to.root, Some(&self.data.root))?;
             Ok(())
         };
         if let Err(e) = finish() {
@@ -778,7 +780,7 @@ impl Catalog {
         }
         log::info!("catalog moved to {} ({} folders moved whole)", to.root.display(), moved.len());
         let note = format!(
-            "Shoebox's catalog moved to {} on {}.\r\nIts previews went with it: this folder only holds the old databases and can be deleted.\r\n",
+            "Shoebox's catalog moved to {} on {}.\r\nThis folder only holds the old one: Shoebox sends it to the Recycle Bin the next time it starts. If it's still here, it can be deleted.\r\n",
             to.root.display(),
             chrono::Local::now().format("%Y-%m-%d %H:%M")
         );
@@ -835,7 +837,7 @@ impl Catalog {
         if !(DataDir { root: target.to_path_buf() }).has_catalog() {
             bail!("{} has no Shoebox catalog", target.display());
         }
-        paths::remember_data_dir(target)?;
+        paths::remember_data_dir(target, None)?;
         Ok(())
     }
 

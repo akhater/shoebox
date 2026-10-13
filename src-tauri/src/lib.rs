@@ -249,6 +249,16 @@ struct ScanError {
     message: String,
 }
 
+/// The folder a catalog move left behind goes to the Recycle Bin, now that
+/// the new catalog has opened.
+pub fn tidy_old_catalog(data: &DataDir) {
+    match paths::remove_old_catalog(data) {
+        Ok(Some(old)) => log::info!("old catalog folder {} sent to the Recycle Bin", old.display()),
+        Ok(None) => {}
+        Err(e) => log::warn!("couldn't remove the old catalog folder: {e:#}"),
+    }
+}
+
 pub fn setup_logging(data: &DataDir) {
     let file = match fern::log_file(data.log_path()) {
         Ok(f) => f,
@@ -388,6 +398,8 @@ pub fn run() {
     setup_logging(&data);
     log::info!("Shoebox {} starting, data in {}", env!("CARGO_PKG_VERSION"), data.root.display());
     let cat = Arc::new(Catalog::open(data.clone()).expect("open catalog"));
+    let opened = data.clone();
+    std::thread::spawn(move || tidy_old_catalog(&opened));
     let scans = Arc::new(ScanQueue::default());
     let index = Arc::new(search::SearchIndex::open(&cat).expect("open search index"));
     let face_index = Arc::new(faces::FaceIndex::open(&cat).expect("open face index"));
