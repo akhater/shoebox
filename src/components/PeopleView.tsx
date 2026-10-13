@@ -1,9 +1,13 @@
-import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Square, X } from "lucide-react";
+import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Search, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { faceUrl, fmtNum, modelsApi, people as peopleApi, type Person } from "../api";
 
 interface Props {
   people: Person[];
+  /** Whoever People's search box found, best first; null when it's empty. */
+  found: Person[] | null;
+  /** What's typed in it. */
+  query: string;
   onOpen: (p: Person) => void;
   onChanged: () => void;
   onError: (e: string) => void;
@@ -36,7 +40,7 @@ function useFolded() {
 
 /** Everyone the face recogniser found: open, name, merge, ignore strangers.
  *  Named people and people still to name are two groups that fold away. */
-export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }: Props) {
+export function PeopleView({ people, found, query, onOpen, onChanged, onError, onOpenModels }: Props) {
   const [selected, setSelected] = useState<number[]>([]);
   // With nobody yet: is the face model (and a runtime) here at all?
   const [facesReady, setFacesReady] = useState<boolean | null>(null);
@@ -52,12 +56,17 @@ export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }:
   const [showOnce, setShowOnce] = useState(false);
   const [folded, fold] = useFolded();
 
+  // Searching: only whoever's name matches, in the search's order. Nobody
+  // still to name has a name to match.
+  const rank = found && new Map(found.map((p, i) => [p.id, i]));
+  const only = (list: Person[]) =>
+    rank ? list.filter((p) => rank.has(p.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!) : list;
   const active = people.filter((p) => !p.ignored);
-  const ignored = people.filter((p) => p.ignored);
+  const ignored = only(people.filter((p) => p.ignored));
   // People seen in one photo only are mostly passers-by: hidden unless asked.
   const seenOnce = active.filter((p) => !p.name && p.photos < 2);
-  const named = active.filter((p) => p.name);
-  const toName = active.filter((p) => !p.name && (showOnce || p.photos >= 2));
+  const named = only(active.filter((p) => p.name));
+  const toName = rank ? [] : active.filter((p) => !p.name && (showOnce || p.photos >= 2));
   const selecting = selected.length > 0;
   // With only ignored people selected, the bar offers "Show again" instead of "Ignore".
   const allIgnored = selecting && selected.every((id) => people.find((p) => p.id === id)?.ignored);
@@ -174,18 +183,23 @@ export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }:
     );
   };
 
-  const group = (g: Group, title: string, list: Person[], empty: string) => (
-    <section className="people-group">
-      <button className="people-group-head" onClick={() => fold(g)} aria-expanded={!folded.includes(g)}>
-        <ChevronRight size={14} className={`chev ${folded.includes(g) ? "" : "open"}`} />
-        <span>{title}</span>
-        <span className="count">{fmtNum(list.length)}</span>
-        {fresh(list) > 0 && <span className="new-count">· {fmtNum(fresh(list))} new</span>}
-      </button>
-      {!folded.includes(g) &&
-        (list.length ? <div className="people-grid">{list.map(card)}</div> : <p className="muted small people-empty">{empty}</p>)}
-    </section>
-  );
+  // While searching, every group with a match is open and the others are gone.
+  const group = (g: Group, title: string, list: Person[], empty: string) => {
+    if (rank && !list.length) return null;
+    const open = !!rank || !folded.includes(g);
+    return (
+      <section className="people-group">
+        <button className="people-group-head" onClick={() => fold(g)} disabled={!!rank} aria-expanded={open}>
+          <ChevronRight size={14} className={`chev ${open ? "open" : ""}`} />
+          <span>{title}</span>
+          <span className="count">{fmtNum(list.length)}</span>
+          {fresh(list) > 0 && <span className="new-count">· {fmtNum(fresh(list))} new</span>}
+        </button>
+        {open &&
+          (list.length ? <div className="people-grid">{list.map(card)}</div> : <p className="muted small people-empty">{empty}</p>)}
+      </section>
+    );
+  };
 
   return (
     <div className="people-wrap">
@@ -241,6 +255,11 @@ export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }:
           Regroup faces
         </button>
       </div>
+      {found && !found.length && (
+        <p className="muted people-none">
+          No one named “{query.trim()}”. Only people with a name can be found: name them under their face.
+        </p>
+      )}
       {group("named", "Named", named, "Nobody named yet. Click “Add a name” under a face.")}
       {group("toName", "To name", toName, "Everyone found is named.")}
       {group("ignored", "Ignored", ignored, "Nobody ignored. Strangers you ignore go here; their new faces still join them.")}
@@ -316,6 +335,89 @@ export function NameEditor({
               </button>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** People's search box, in the toolbar: names are suggested as you type -
+ *  any part of the name, case and accents ignored, found by Shoebox itself
+ *  (as `shoebox-cli people <name>`). ↑↓ and Enter open someone; Esc clears. */
+export function PersonSearch({
+  value,
+  found,
+  onChange,
+  onOpen,
+}: {
+  value: string;
+  /** Best first; null while the box is empty. */
+  found: Person[] | null;
+  onChange: (text: string) => void;
+  onOpen: (p: Person) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  useEffect(() => setActive(0), [found]);
+  const shown = (found ?? []).slice(0, 8);
+  const pick = (p: Person) => {
+    setOpen(false);
+    onOpen(p);
+  };
+
+  return (
+    <div className="search person-search">
+      <Search size={15} />
+      <input
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            setOpen(true);
+            setActive((a) => Math.max(0, Math.min(shown.length - 1, a + (e.key === "ArrowDown" ? 1 : -1))));
+          } else if (e.key === "Enter" && open && shown[active]) pick(shown[active]);
+          else if (e.key === "Escape") onChange("");
+        }}
+        placeholder="Find a person by name…"
+        spellCheck={false}
+        role="combobox"
+        aria-expanded={open && !!found}
+        aria-autocomplete="list"
+      />
+      {value && (
+        <button className="icon-btn tiny-x" onClick={() => onChange("")} aria-label="Clear search">
+          <X size={14} />
+        </button>
+      )}
+      {open && found && (
+        <div className="name-suggest person-suggest" role="listbox" onMouseDown={(e) => e.preventDefault()}>
+          {shown.map((p, i) => (
+            <button
+              key={p.id}
+              role="option"
+              aria-selected={i === active}
+              className={`name-suggest-row ${i === active ? "active" : ""}`}
+              onMouseEnter={() => setActive(i)}
+              onClick={() => pick(p)}
+            >
+              <img src={faceUrl(p.cover)} alt="" />
+              <span className="grow ellipsis">{p.name}</span>
+              <span className="muted small">
+                {p.ignored && "ignored · "}
+                {fmtNum(p.photos)} photos
+              </span>
+            </button>
+          ))}
+          {found.length > shown.length && (
+            <p className="muted small person-suggest-note">{fmtNum(found.length - shown.length)} more in the list below</p>
+          )}
+          {!found.length && <p className="muted small person-suggest-note">No one by that name</p>}
         </div>
       )}
     </div>

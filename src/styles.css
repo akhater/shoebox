@@ -354,6 +354,34 @@ button {
 .icon-btn.tiny-x {
   padding: 2px;
 }
+/* On People the box finds a person: names suggested under it. */
+.person-search {
+  position: relative;
+}
+.person-suggest {
+  left: 0;
+  transform: none;
+  width: 100%;
+}
+.person-suggest .name-suggest-row {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.person-suggest .name-suggest-row.active {
+  background: var(--hover);
+}
+.person-suggest-note {
+  margin: 4px 6px 2px;
+}
+.people-none {
+  padding: 24px 20px;
+}
 .tools {
   display: flex;
   align-items: center;
@@ -1811,6 +1839,10 @@ button {
   font-weight: 600;
   text-align: left;
   cursor: pointer;
+}
+/* Searching: every group with a match stays open. */
+.people-group-head:disabled {
+  cursor: default;
 }
 .people-group-head .count {
   color: var(--muted);

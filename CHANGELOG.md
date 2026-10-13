@@ -57,6 +57,7 @@ Newest first. Same format and versioning as Argentum.
   original; Stop or any failure leaves the original untouched. The catalog
   follows; nothing is read again.
 - **People: named, to name, ignored.** Three groups that fold away (Ignored starts folded; no separate view any more). Naming someone (under their face, or by clicking the title of their page) suggests the people already named (face, name, photos); tick **Same person** to merge into them - a matching name alone never merges, two people can share a name.
+- **Find a person by name** on People: the toolbar's search box becomes "Find a person by name…". Names are suggested as you type (face, name, photos) and the cards below narrow to the matches; any part of the name works, in any order ("smi jan" finds Jane Smith), case and accents ignored ("zoe" finds Zoé). ↑↓ and Enter open someone, Esc clears; the search is still there when you come back from their page. Headless: `shoebox-cli people [name]` (JSON, best match first).
 - **Tags**: your own keywords on photos - T in the grid (one or many selected) or in the viewer; suggestions as you type. Tags stay with the photo through moves and copies, live in the catalog only, and filter in the bar (Tags: photos with all ticked tags).
 - **Filters**: one bar above the grid - People (with their faces), Date (years, months, days), Camera,
   Lens, File type (RAW and Images, each type with its count), Status (plugged
