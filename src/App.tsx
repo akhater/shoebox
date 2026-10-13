@@ -60,7 +60,19 @@ import { Sidebar, type FolderTarget } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { Viewer } from "./components/Viewer";
 
-const EMPTY: PhotoList = { ids: [], taken: [], state: [], w: [], h: [], rev: [], preview: [], marked: [], ext: [], raw: [] };
+const EMPTY: PhotoList = {
+  ids: [],
+  taken: [],
+  state: [],
+  w: [],
+  h: [],
+  rev: [],
+  preview: [],
+  marked: [],
+  ext: [],
+  raw: [],
+  fresh: [],
+};
 
 /** A per-viewer on/off remembered between sessions (convenience only). */
 function useRemembered(key: string, initial: boolean) {
@@ -434,6 +446,17 @@ export default function App() {
     setViewerId(prev.viewerId);
   }, [trail]);
 
+  // A person's new photos are read once you leave their page (like an email):
+  // they keep their "New" tag while you're there.
+  const personOpen = useRef<number | null>(null);
+  useEffect(() => {
+    const here = view === "photos" && scope.kind === "person" ? scope.id : null;
+    const left = personOpen.current;
+    personOpen.current = here;
+    const p = left != null && left !== here ? peopleList.find((x) => x.id === left) : undefined;
+    if (p && (p.isNew || p.newPhotos > 0)) run(people.read([p.id]).then(refresh));
+  }, [view, scope, peopleList, refresh]);
+
   /** From a person's page. Ignoring a stranger goes back to People, with Undo. */
   const ignorePerson = (p: Person) => {
     const ignored = !p.ignored;
@@ -573,6 +596,8 @@ export default function App() {
     () => (query && !showPossible ? headOf(list, clearCount) : list),
     [list, query, showPossible, clearCount],
   );
+  // On a person's page: photos they were found in since you last looked at them.
+  const freshHere = useMemo(() => shown.fresh.filter((f) => f === 1).length, [shown]);
   const viewerIndex = useMemo(() => (viewerId == null ? -1 : shown.ids.indexOf(viewerId)), [viewerId, shown]);
   const focusIndex = useMemo(() => (focusId == null ? null : shown.ids.indexOf(focusId)), [focusId, shown]);
 
@@ -642,8 +667,6 @@ export default function App() {
           setTrail([]);
           setCalendar(false);
           setView("people");
-          // Faces found since the last visit show as new; Back from a person isn't a new visit.
-          run(people.visit().then(refresh));
         }}
         onScope={(s) => {
           setTrail([]);
@@ -739,6 +762,7 @@ export default function App() {
             )}
             <span className="muted">
               {fmtNum(shown.ids.length)} {query ? "matches" : "photos"}
+              {view === "photos" && personHere && freshHere > 0 && <b className="new-count"> · {fmtNum(freshHere)} new</b>}
               {view === "photos" && selected.size > 1 && ` · ${fmtNum(selected.size)} selected`}
             </span>
             {"sub" in scopeInfo && scopeInfo.sub && <span className="muted path">{scopeInfo.sub}</span>}

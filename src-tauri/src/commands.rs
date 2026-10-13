@@ -183,10 +183,16 @@ pub fn people(state: State<'_, AppState>) -> Res<Vec<crate::faces::Person>> {
     state.faces.people(&state.cat).map_err(err)
 }
 
-/// People is opened: what was found since the last time shows as new.
+/// The user has seen these people's new photos (they left their page).
 #[tauri::command]
-pub fn visit_people(state: State<'_, AppState>) -> Res<()> {
-    state.faces.visit_people(&state.cat).map_err(err)
+pub fn read_people(state: State<'_, AppState>, ids: Vec<i64>) -> Res<usize> {
+    state.faces.mark_read(&state.cat, &ids).map_err(err)
+}
+
+/// "Mark all as read" in People.
+#[tauri::command]
+pub fn read_all_people(state: State<'_, AppState>) -> Res<usize> {
+    state.faces.mark_all_read(&state.cat).map_err(err)
 }
 
 #[tauri::command]

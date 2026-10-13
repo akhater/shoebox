@@ -161,6 +161,20 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version < 6 {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 6; COMMIT;"))?;
     }
+    if version < 7 {
+        // Each face remembers whether the user has seen it: a person with unseen faces
+        // shows "New" or "+N" in People until the user has been on their page. Faces
+        // already shown as new (found since the visit to People before last) stay so.
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE faces ADD COLUMN seen INTEGER NOT NULL DEFAULT 0;
+             UPDATE faces SET seen = 1 WHERE id <= COALESCE(
+                 (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'people_new_after'), (SELECT MAX(id) FROM faces));
+             DELETE FROM meta WHERE key IN ('people_new_after', 'people_seen_upto');
+             PRAGMA user_version = 7;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 

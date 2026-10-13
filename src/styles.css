@@ -1913,6 +1913,15 @@ button {
   line-height: 15px;
   pointer-events: none;
 }
+/* On a photo in the grid (a person's new photos). */
+.tile .new-badge {
+  top: 6px;
+  left: 6px;
+}
+.title .new-count {
+  color: var(--accent);
+  font-weight: 600;
+}
 .people-group-head .new-count {
   color: var(--accent);
   font-size: 12px;
