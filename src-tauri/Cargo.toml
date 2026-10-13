@@ -50,6 +50,15 @@ trash = "5"
 ort = { version = "=2.0.0-rc.10", features = ["ndarray", "load-dynamic"] }
 ndarray = "0.16"
 tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
+# Downloads AI models from their publishers (Settings > AI models), with the
+# system's own TLS and certificates.
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+# Checks downloaded models against the SHA-256 their publishers give.
+sha2 = "0.10"
+# The AI runtime comes inside Microsoft's zip / .tgz packages.
+zip = { version = "9.0.2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

@@ -1,12 +1,14 @@
 import { Check, ChevronRight, Eye, EyeOff, Merge, Pencil, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { faceUrl, fmtNum, people as peopleApi, type Person } from "../api";
+import { faceUrl, fmtNum, modelsApi, people as peopleApi, type Person } from "../api";
 
 interface Props {
   people: Person[];
   onOpen: (p: Person) => void;
   onChanged: () => void;
   onError: (e: string) => void;
+  /** Opens Settings > AI models (the face model isn't here). */
+  onOpenModels: () => void;
 }
 
 type Group = "named" | "toName" | "ignored";
@@ -34,8 +36,18 @@ function useFolded() {
 
 /** Everyone the face recogniser found: open, name, merge, ignore strangers.
  *  Named people and people still to name are two groups that fold away. */
-export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
+export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }: Props) {
   const [selected, setSelected] = useState<number[]>([]);
+  // With nobody yet: is the face model (and a runtime) here at all?
+  const [facesReady, setFacesReady] = useState<boolean | null>(null);
+  const none = people.length === 0;
+  useEffect(() => {
+    if (!none) return;
+    modelsApi
+      .list()
+      .then((o) => setFacesReady(o.runtimeReady && o.models.some((m) => m.id === "faces" && m.state === "ready")))
+      .catch(() => {});
+  }, [none]);
   const [editing, setEditing] = useState<number | null>(null);
   const [showOnce, setShowOnce] = useState(false);
   const [folded, fold] = useFolded();
@@ -85,7 +97,16 @@ export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
       <div className="empty">
         <div className="empty-card">
           <h2>No people yet</h2>
-          <p>Faces are found in the background after each scan. They'll appear here as they're grouped.</p>
+          {facesReady === false ? (
+            <>
+              <p>Finding faces needs its AI model, which isn't on this computer yet.</p>
+              <button className="btn primary" onClick={onOpenModels}>
+                Get it in Settings › AI models
+              </button>
+            </>
+          ) : (
+            <p>Faces are found in the background after each scan. They'll appear here as they're grouped.</p>
+          )}
         </div>
       </div>
     );

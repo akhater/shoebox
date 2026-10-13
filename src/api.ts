@@ -484,3 +484,53 @@ export const people = {
   moveOut: (personId: number, faceIds: number[]) => invoke<number>("move_faces_out", { personId, faceIds }),
   inPhoto: (photoId: number) => invoke<PhotoFace[]>("photo_faces", { photoId }),
 };
+
+/** One AI model in Settings > AI models. */
+export interface ModelStatus {
+  id: string;
+  /** The feature it gives Shoebox: "Word search", "Faces"... */
+  feature: string;
+  name: string;
+  about: string;
+  publisher: string;
+  licence: string;
+  /** "partial": some files missing or wrong (a download fetches only those). */
+  state: "ready" | "partial" | "missing";
+  bytesHere: number;
+  size: number;
+  /** What a download fetches now. */
+  downloadBytes: number;
+  /** Not used by Shoebox yet: can be deleted, not downloaded. */
+  later: boolean;
+  /** The runtime Shoebox has loaded (can't be deleted until a restart). */
+  inUse: boolean;
+}
+
+export interface ModelsOverview {
+  dir: string;
+  /** Word search and faces need one runtime. */
+  runtimeReady: boolean;
+  models: ModelStatus[];
+}
+
+/** A model being downloaded (`model-download` events). */
+export interface ModelProgress {
+  id: string;
+  done: number;
+  total: number;
+  finished: boolean;
+  error: string | null;
+  /** Waiting their turn. */
+  queued: string[];
+}
+
+/** AI models: downloaded from their publishers on request, checked by SHA-256. */
+export const modelsApi = {
+  list: () => invoke<ModelsOverview>("models_list"),
+  download: (id: string) => invoke<void>("model_download", { id }),
+  stop: (id: string) => invoke<void>("model_stop", { id }),
+  progress: () => invoke<ModelProgress | null>("model_progress"),
+  /** Returns the bytes freed. */
+  delete: (id: string) => invoke<number>("model_delete", { id }),
+  showFolder: () => invoke<void>("show_models_folder"),
+};

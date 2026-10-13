@@ -51,7 +51,7 @@ import { StraysDialog } from "./components/StraysDialog";
 import { TagEditor } from "./components/Tags";
 import { NameEditor, PeopleView } from "./components/PeopleView";
 import { PhotoGrid } from "./components/PhotoGrid";
-import { SettingsDialog } from "./components/SettingsDialog";
+import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
 import { Sidebar, type FolderTarget } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { Viewer } from "./components/Viewer";
@@ -165,7 +165,18 @@ export default function App() {
   // A folder on its way to another disk, and where it came from.
   const [folderMove, setFolderMove] = useState<FolderMoveEvent | null>(null);
   const movingFrom = useRef<FolderTarget | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
+  const settingsOpen = settingsTab !== null;
+  // A message about a missing AI model offers to open Settings > AI models.
+  // (Its shoebox-cli hint is for agents, not the window.)
+  const modelHint = (text: string): Message =>
+    text.includes("Settings > AI models")
+      ? {
+          text: text.replace(/ \(or: shoebox-cli [^)]*\)/, ""),
+          warn: true,
+          action: { label: "AI models…", run: () => setSettingsTab("models") },
+        }
+      : { text, warn: true };
   const [rowHeight, setRowHeight] = useState(loadRowHeight);
   const [sort, setSort] = useState<Sort>(loadSort);
   // File type (CR3, JPG...) on each thumbnail.
@@ -243,7 +254,7 @@ export default function App() {
       setFacets(fc);
     } catch (e) {
       // The folder or disk shown may have been absorbed into another one.
-      if (queryRef.current) setMessage({ text: `Search: ${e}`, warn: true });
+      if (queryRef.current) setMessage(modelHint(`Search: ${e}`));
       else if (scopeRef.current.kind !== "all") setScope({ kind: "all" });
       else setMessage({ text: String(e), warn: true });
     }
@@ -288,7 +299,7 @@ export default function App() {
       listen("catalog-changed", refreshSoon),
       listen("volumes-changed", refreshSoon),
       listen<AiProgress>("ai-progress", (e) => {
-        if (e.payload.error) setMessage({ text: `Word search: ${e.payload.error}`, warn: true });
+        if (e.payload.error) setMessage(modelHint(`Word search: ${e.payload.error}`));
         setAiProgress(e.payload.finished ? null : e.payload);
       }),
       listen<Progress>("scan-progress", (e) => {
@@ -601,7 +612,7 @@ export default function App() {
         }}
         onShowFolder={(vid, rel) => run(api.showFolder(vid, rel))}
         onMoveFolder={moveFolder}
-        onSettings={() => setSettingsOpen(true)}
+        onSettings={() => setSettingsTab("general")}
       />
 
       <main className="main">
@@ -787,6 +798,7 @@ export default function App() {
             onOpen={(p) => drill({ kind: "person", id: p.id })}
             onChanged={refresh}
             onError={(e) => setMessage({ text: e, warn: true })}
+            onOpenModels={() => setSettingsTab("models")}
           />
         ) : empty ? (
           <div className="empty">
@@ -900,12 +912,13 @@ export default function App() {
           }}
         />
       )}
-      {settingsOpen && (
+      {settingsTab && (
         <SettingsDialog
+          initialTab={settingsTab}
           dataDir={overview?.dataDir ?? ""}
           version={version}
           onRegenerateAll={() => regenerate(null)}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => setSettingsTab(null)}
         />
       )}
     </div>

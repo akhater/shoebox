@@ -5,6 +5,7 @@ pub mod embedded;
 pub mod faces;
 pub mod formats;
 pub mod imaging;
+pub mod models;
 pub mod organize;
 pub mod paths;
 pub mod scan;
@@ -81,6 +82,7 @@ impl ScanQueue {
 
 pub struct AppState {
     pub cat: Arc<Catalog>,
+    pub models: Arc<ModelQueue>,
     pub scans: Arc<ScanQueue>,
     pub search: Arc<search::SearchIndex>,
     pub faces: Arc<faces::FaceIndex>,
@@ -114,8 +116,103 @@ impl AiQueue {
     }
 }
 
+/// AI models waiting to be downloaded (Settings > AI models), one at a time.
+#[derive(Default)]
+pub struct ModelQueue {
+    queue: Mutex<VecDeque<String>>,
+    wake: Condvar,
+    cancel: AtomicBool,
+    pub current: Mutex<Option<ModelProgress>>,
+}
+
+#[derive(Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProgress {
+    pub id: String,
+    /// Bytes downloaded, of `total`.
+    pub done: u64,
+    pub total: u64,
+    pub finished: bool,
+    pub error: Option<String>,
+    /// Waiting their turn.
+    pub queued: Vec<String>,
+}
+
+impl ModelQueue {
+    pub fn push(&self, id: &str) {
+        let mut q = self.queue.lock().unwrap();
+        let running = self.current.lock().unwrap().as_ref().is_some_and(|p| p.id == id);
+        if !running && !q.iter().any(|q| q == id) {
+            q.push_back(id.to_string());
+            self.wake.notify_one();
+        }
+    }
+
+    /// Stops this model's download, or takes it out of the queue.
+    pub fn stop(&self, id: &str) {
+        self.queue.lock().unwrap().retain(|q| q != id);
+        if self.current.lock().unwrap().as_ref().is_some_and(|p| p.id == id) {
+            self.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn pending(&self) -> Vec<String> {
+        self.queue.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Downloading now or waiting.
+    pub fn busy_with(&self, id: &str) -> bool {
+        let waiting = self.pending().iter().any(|q| q == id);
+        waiting || self.current.lock().unwrap().as_ref().is_some_and(|p| p.id == id)
+    }
+
+    fn next(&self) -> String {
+        let mut q = self.queue.lock().unwrap();
+        loop {
+            if let Some(id) = q.pop_front() {
+                return id;
+            }
+            q = self.wake.wait(q).unwrap();
+        }
+    }
+}
+
+/// Downloads the models asked for, reporting `model-download` events, and
+/// wakes the AI worker when one arrives.
+fn model_worker(app: AppHandle, q: Arc<ModelQueue>, ai: Arc<AiQueue>) {
+    loop {
+        let id = q.next();
+        q.cancel.store(false, Ordering::Relaxed);
+        let progress = |done: u64, total: u64, finished: bool, error: Option<String>| {
+            let p = ModelProgress { id: id.clone(), done, total, finished, error, queued: q.pending() };
+            *q.current.lock().unwrap() = (!finished).then(|| p.clone());
+            let _ = app.emit("model-download", p);
+        };
+        let shown = Mutex::new(Instant::now() - Duration::from_secs(1));
+        progress(0, 0, false, None);
+        let result = models::download(&id, &q.cancel, &|done, total| {
+            let mut last = shown.lock().unwrap();
+            if last.elapsed() > Duration::from_millis(200) || done == total {
+                *last = Instant::now();
+                progress(done, total, false, None);
+            }
+        });
+        match result {
+            Ok(bytes) => {
+                progress(bytes, bytes, true, None);
+                ai.kick();
+            }
+            Err(e) => {
+                log::warn!("models: {id}: {e:#}");
+                progress(0, 0, true, Some(format!("{e:#}")));
+            }
+        }
+    }
+}
+
 /// Describes new photos for word search, then finds and groups their faces,
-/// on the GPU, from Shoebox's previews.
+/// on the GPU, from Shoebox's previews. A feature whose model isn't here
+/// (Settings > AI models) is skipped.
 fn ai_worker(
     app: AppHandle,
     cat: Arc<Catalog>,
@@ -130,8 +227,10 @@ fn ai_worker(
             *q.current.lock().unwrap() = Some(p.clone());
             let _ = app.emit("ai-progress", p);
         };
-        let result =
-            index.index_pending(&cat, &q.cancel, &report).and_then(|_| faces.index_pending(&cat, &q.cancel, &report));
+        let usable = |id| models::ready(id) && models::runtime_ready();
+        let searched = if usable(models::CLIP) { index.index_pending(&cat, &q.cancel, &report) } else { Ok(()) };
+        let found = if usable(models::FACES) { faces.index_pending(&cat, &q.cancel, &report) } else { Ok(()) };
+        let result = searched.and(found);
         let last = q.current.lock().unwrap().take();
         let mut done = last.unwrap_or_else(|| search::AiProgress { task: "search".into(), ..Default::default() });
         done.finished = true;
@@ -293,6 +392,7 @@ pub fn run() {
     let index = Arc::new(search::SearchIndex::open(&cat).expect("open search index"));
     let face_index = Arc::new(faces::FaceIndex::open(&cat).expect("open face index"));
     let ai = Arc::new(AiQueue::default());
+    let model_queue = Arc::new(ModelQueue::default());
     let protocol_data = data.clone();
     let protocol_cat = cat.clone();
 
@@ -320,6 +420,7 @@ pub fn run() {
         })
         .manage(AppState {
             cat: cat.clone(),
+            models: model_queue.clone(),
             scans: scans.clone(),
             search: index.clone(),
             faces: face_index.clone(),
@@ -339,6 +440,9 @@ pub fn run() {
             let handle = app.handle().clone();
             let c = cat.clone();
             std::thread::Builder::new().name("volumes".into()).spawn(move || volume_watcher(handle, c))?;
+            let handle = app.handle().clone();
+            let (m, a) = (model_queue.clone(), ai.clone());
+            std::thread::Builder::new().name("models".into()).spawn(move || model_worker(handle, m, a))?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -391,6 +495,12 @@ pub fn run() {
             commands::unmark_all,
             commands::delete_plan,
             commands::delete_marked,
+            commands::models_list,
+            commands::model_download,
+            commands::model_stop,
+            commands::model_progress,
+            commands::model_delete,
+            commands::show_models_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Shoebox");

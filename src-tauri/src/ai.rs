@@ -1,6 +1,7 @@
 //! Running the AI models: ONNX Runtime on the GPU (DirectML: Intel Arc, AMD,
 //! NVIDIA) when it can, on the CPU otherwise. The runtime library and the
-//! models live in `models\` next to the app and are never downloaded here.
+//! models live in `models\`; `models.rs` lists them and downloads missing
+//! ones when asked (Settings > AI models).
 //!
 //! CLIP ViT-B-32 (Immich's export): preprocessing and tokenizing follow
 //! Immich's own code exactly, so search quality matches Immich's.
@@ -11,13 +12,16 @@ use ort::session::Session;
 use ort::tensor::TensorElementType;
 use ort::value::{Tensor, ValueType};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
-static RUNTIME: OnceLock<Result<bool, String>> = OnceLock::new();
+/// The runtime library loaded into Shoebox, and whether it's the GPU build.
+/// Loaded once; until then every use tries again (it may have just been
+/// downloaded).
+static RUNTIME: Mutex<Option<(PathBuf, bool)>> = Mutex::new(None);
 
 /// ONNX Runtime's library file on this system.
-const RUNTIME_LIB: &str = if cfg!(windows) {
+pub(crate) const RUNTIME_LIB: &str = if cfg!(windows) {
     "onnxruntime.dll"
 } else if cfg!(target_os = "macos") {
     "libonnxruntime.dylib"
@@ -27,23 +31,29 @@ const RUNTIME_LIB: &str = if cfg!(windows) {
 
 /// Loads ONNX Runtime once. Returns true when it's the GPU (DirectML) build.
 pub fn runtime() -> Result<bool> {
-    RUNTIME
-        .get_or_init(|| {
-            let dir = crate::paths::models_dir();
-            let gpu = dir.join("onnxruntime-directml").join(RUNTIME_LIB);
-            let cpu = dir.join(RUNTIME_LIB);
-            let (dll, is_gpu) = if cfg!(windows) && gpu.is_file() { (gpu, true) } else { (cpu, false) };
-            if !dll.is_file() {
-                return Err(format!("The AI runtime isn't in {}", dir.display()));
-            }
-            ort::init_from(dll.to_string_lossy())
-                .with_name("Shoebox")
-                .commit()
-                .map(|_| is_gpu)
-                .map_err(|e| format!("Couldn't start the AI runtime: {e}"))
-        })
-        .clone()
-        .map_err(|e| anyhow!(e))
+    let mut loaded = RUNTIME.lock().unwrap();
+    if let Some((_, gpu)) = &*loaded {
+        return Ok(*gpu);
+    }
+    let dir = crate::paths::models_dir();
+    let gpu = dir.join("onnxruntime-directml").join(RUNTIME_LIB);
+    let cpu = dir.join(RUNTIME_LIB);
+    let (dll, is_gpu) = if cfg!(windows) && gpu.is_file() { (gpu, true) } else { (cpu, false) };
+    if !dll.is_file() {
+        return Err(anyhow!(crate::models::RUNTIME_MISSING));
+    }
+    ort::init_from(dll.to_string_lossy())
+        .with_name("Shoebox")
+        .commit()
+        .map_err(|e| anyhow!("Couldn't start the AI runtime: {e}"))?;
+    *loaded = Some((dll, is_gpu));
+    Ok(is_gpu)
+}
+
+/// The runtime library Shoebox has loaded (it can't be deleted until Shoebox
+/// restarts).
+pub fn runtime_in_use() -> Option<PathBuf> {
+    RUNTIME.lock().unwrap().as_ref().map(|(p, _)| p.clone())
 }
 
 /// A model session, on the GPU when available. DirectML needs memory patterns
@@ -92,6 +102,7 @@ pub struct ClipVisual {
 
 impl ClipVisual {
     pub fn load() -> Result<Self> {
+        crate::models::require(crate::models::CLIP)?;
         let (session, on_gpu) = session(&clip_dir().join("visual").join("model.onnx"))?;
         let input = session.inputs.first().map(|i| i.name.clone()).unwrap_or_else(|| "image".into());
         Ok(Self { session: Mutex::new(session), input, on_gpu })
@@ -118,6 +129,7 @@ pub struct ClipText {
 
 impl ClipText {
     pub fn load() -> Result<Self> {
+        crate::models::require(crate::models::CLIP)?;
         let dir = clip_dir().join("textual");
         let (session, _) = session(&dir.join("model.onnx"))?;
         let first = session.inputs.first().ok_or_else(|| anyhow!("text model has no input"))?;

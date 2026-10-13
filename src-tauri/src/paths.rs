@@ -42,8 +42,11 @@ fn installed_home() -> PathBuf {
 /// The AI models: in the folder Shoebox runs from - the portable folder, or
 /// the install folder (Windows installs per user, so it's writable). A macOS
 /// .app and /usr/bin can't take them, so installed there they go in
-/// `~/.shoebox`.
+/// `~/.shoebox`. `SHOEBOX_MODELS` points elsewhere (tests use it).
 pub fn models_dir() -> PathBuf {
+    if let Some(p) = std::env::var_os("SHOEBOX_MODELS") {
+        return PathBuf::from(p);
+    }
     let installed_dir = || std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
     match portable_home() {
         Some(home) => home.join("models"),
@@ -275,6 +278,80 @@ pub fn remember_data_dir(root: &Path) -> io::Result<()> {
     atomic_write(&app_home().join(POINTER_FILE), serde_json::to_string_pretty(&p)?.as_bytes())
 }
 
+/// An AI model file being downloaded, written as `<name>.part` beside where it
+/// goes. It takes its place only through [`ModelFile::keep`] (once its SHA-256
+/// matched); dropped without that, the part file is removed.
+pub struct ModelFile {
+    part: PathBuf,
+    dst: PathBuf,
+    kept: bool,
+}
+
+impl ModelFile {
+    /// The part file, complete, to check or unpack before keeping it.
+    pub fn part(&self) -> &Path {
+        &self.part
+    }
+
+    pub fn keep(mut self) -> io::Result<()> {
+        std::fs::rename(&self.part, &self.dst)?;
+        self.kept = true;
+        Ok(())
+    }
+}
+
+impl Drop for ModelFile {
+    fn drop(&mut self) {
+        if !self.kept {
+            let _ = std::fs::remove_file(&self.part);
+        }
+    }
+}
+
+/// Streams `src` into the models folder for `dst` (see [`ModelFile`]).
+/// Refused anywhere else.
+pub fn model_file(dst: &Path, src: &mut dyn io::Read) -> io::Result<ModelFile> {
+    let dir = models_dir();
+    let name = dst.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if !inside(dst, &dir) || dst == dir || name.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("Shoebox only puts models inside {}, refused {}", dir.display(), dst.display()),
+        ));
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = ModelFile { part: dst.with_file_name(format!("{name}.part")), dst: dst.to_path_buf(), kept: false };
+    let mut out = std::fs::File::create(&file.part)?;
+    io::copy(src, &mut out)?;
+    out.sync_all()?;
+    Ok(file)
+}
+
+/// Deletes an AI model's file or folder (Settings > AI models), then any
+/// folder it leaves empty. Refused outside the models folder, and on the
+/// models folder itself.
+pub fn remove_model_path(path: &Path) -> io::Result<()> {
+    let dir = models_dir();
+    if !inside(path, &dir) || path.components().count() <= dir.components().count() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("refused {}", path.display())));
+    }
+    let gone = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    match gone {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut parent = path.parent();
+    while let Some(p) = parent {
+        if p.components().count() <= dir.components().count() || std::fs::remove_dir(p).is_err() {
+            break;
+        }
+        parent = p.parent();
+    }
+    Ok(())
+}
+
 /// `path` is inside `root` and does not climb out with `..`.
 pub fn inside(path: &Path, root: &Path) -> bool {
     path.starts_with(root) && !path.components().any(|c| c == Component::ParentDir)
@@ -306,6 +383,33 @@ mod tests {
         assert!(data.write(&data.root.join("..").join("escape.jpg"), b"x").is_err());
         assert!(data.write(&data.root.join("thumbs").join("ok.jpg"), b"x").is_ok());
         let _ = std::fs::remove_dir_all(&data.root);
+    }
+
+    /// Downloaded models only ever land in (and leave from) the models folder,
+    /// and a download not kept leaves nothing behind.
+    #[test]
+    fn model_files_stay_in_the_models_folder() {
+        let models = models_dir();
+        let mut src: &[u8] = b"x";
+        assert!(model_file(Path::new(r"C:\Photos\IMG_0001.CR3"), &mut src).is_err());
+        assert!(model_file(&models.join("..").join("escape.onnx"), &mut src).is_err());
+        assert!(remove_model_path(&models).is_err());
+        assert!(remove_model_path(Path::new(r"C:\Photos")).is_err());
+
+        let dst = models.join(".guard-test").join("ok.onnx");
+        let dropped = model_file(&dst, &mut src).unwrap();
+        let part = dropped.part().to_path_buf();
+        assert!(part.is_file() && !dst.exists());
+        drop(dropped);
+        assert!(!part.exists());
+        // A stopped download leaves its folder empty: tidied away.
+        remove_model_path(&part).unwrap();
+        assert!(!part.parent().unwrap().exists());
+
+        model_file(&dst, &mut &b"x"[..]).unwrap().keep().unwrap();
+        assert!(dst.is_file());
+        remove_model_path(&dst).unwrap();
+        assert!(!dst.parent().unwrap().exists());
     }
 
     /// Installed, `~/.shoebox` holds the models and `shoebox.json` beside the

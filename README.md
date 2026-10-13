@@ -53,14 +53,17 @@ npm run tauri dev
 The AI models are not in the repository. Shoebox looks for them in `models/`
 next to the app: the repository root in dev, the portable folder, or the
 install folder on Windows. Installed on macOS or Linux, where the app's folder
-can't be written, they go in `~/.shoebox/models`.
+can't be written, they go in `~/.shoebox/models`. Settings > AI models (or
+`shoebox-cli models download <id>`) fetches the missing ones from their
+publishers and checks each file's SHA-256.
 
 ```bash
 cd src-tauri
 cargo run --bin shoebox-cli -- stats
 ```
 
-`SHOEBOX_DATA=<folder>` points the app or the CLI at a throwaway catalog.
+`SHOEBOX_DATA=<folder>` points the app or the CLI at a throwaway catalog,
+`SHOEBOX_MODELS=<folder>` at a throwaway models folder.
 
 ## Working on it
 
