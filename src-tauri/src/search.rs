@@ -64,6 +64,13 @@ impl SearchIndex {
         })
     }
 
+    /// Lets go of CLIP (it is being deleted). Waits for describing in
+    /// progress: cancel it first.
+    pub fn unload(&self) {
+        *self.visual.lock().unwrap() = None;
+        *self.text.lock().unwrap() = None;
+    }
+
     pub fn indexed(&self) -> usize {
         self.ids.read().unwrap().len()
     }

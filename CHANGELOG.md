@@ -70,6 +70,7 @@ Newest first. Same format and versioning as Argentum.
 
 - **Moving the catalog takes seconds on the same disk**: previews, thumbnails and faces move as whole folders, the way Explorer moves them; the databases are copied consistently; anything failing puts it all back. To another disk it still copies. The old folder keeps only its old databases and a note saying where the catalog went.
 - **Backup, Kopia-ready**: `shoebox-cli backup` (or Settings > Make backup copies now) writes consistent copies of the databases into `backup` while Shoebox runs, and a `.kopiaignore` that skips the live ones. Run it as Kopia's before-snapshot action; daily snapshots only add new previews plus a few MB.
+- **Settings > AI models**: which AI models Shoebox can use (word search, faces, and the AI runtime for the graphics card or the processor), whether each is here, and its size. **Download** fetches only what is missing, from the original publishers (Immich's Hugging Face pages, Microsoft), and keeps a file only if its SHA-256 matches; Stop at any time. **Delete** frees the space; what was already found (descriptions, faces, people) stays. Models copied in for later features can be deleted too. Word search and People say when their model is missing and open the tab. Headless: `shoebox-cli models`, `models download <id>`, `models delete <id>`, `models verify [id]`.
 
 ### Internal
 
@@ -80,7 +81,14 @@ Newest first. Same format and versioning as Argentum.
   people too: `mark`, `unmark`, `marked` (the plan, with a token),
   `delete-marked <token>`, `person-strays <id> [--apply]`.
 - Models for search, faces and text copied from Immich's install and the
-  ONNX runtime from Argentum into `models/` - nothing downloaded.
+  ONNX runtime from Argentum into `models/`. The SHA-256 of every file
+  Shoebox can download is pinned in `models.rs`: Hugging Face's own for
+  the models, and for ONNX Runtime 1.22.0 those of Microsoft's packages and
+  of the library inside, for each system (Windows, macOS, Linux; Intel/AMD
+  and ARM). Downloads are written only inside the models folder (write
+  guard in `paths.rs`, tested). An AI runtime downloaded while Shoebox runs
+  is picked up without a restart. `SHOEBOX_MODELS` points at a throwaway
+  models folder.
 - Release builds for Windows, macOS and Linux, each on Intel/AMD and ARM,
   made on GitHub only when a release is published, as in Argentum:
   installers (Windows setup .exe, per user, no admin prompt; macOS .dmg;

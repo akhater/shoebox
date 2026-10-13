@@ -60,6 +60,7 @@ struct Models {
 
 impl Models {
     fn load() -> Result<Self> {
+        crate::models::require(crate::models::FACES)?;
         let (det, g1) = crate::ai::session(&model_dir().join("detection").join("model.onnx"))?;
         let (rec, g2) = crate::ai::session(&model_dir().join("recognition").join("model.onnx"))?;
         let det_in = det.inputs.first().map(|i| i.name.clone()).ok_or_else(|| anyhow!("detector has no input"))?;
@@ -304,6 +305,12 @@ pub struct FaceIndex {
 }
 
 impl FaceIndex {
+    /// Lets go of the face models (they are being deleted). Waits for a
+    /// face search in progress: cancel it first.
+    pub fn unload(&self) {
+        *self.models.lock().unwrap() = None;
+    }
+
     pub fn open(cat: &Catalog) -> Result<Self> {
         let conn = Connection::open(cat.data.root.join("faces.db"))?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;

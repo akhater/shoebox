@@ -1829,3 +1829,118 @@ button {
   padding-top: 12px;
   border-top: 1px solid var(--border);
 }
+
+/* Settings: tabs, and the AI models tab */
+.modal.settings {
+  width: 580px;
+}
+.tabs {
+  display: flex;
+  gap: 2px;
+  margin-top: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.tabs button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 8px 12px;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+.tabs button:hover:not(:disabled) {
+  color: var(--text);
+}
+.tabs button.on {
+  color: var(--text);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+.models {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin: 16px 0;
+}
+.models small {
+  line-height: 1.45;
+}
+.models .note {
+  margin: 0;
+}
+.models code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  word-break: break-all;
+}
+.model-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.model {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.model-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--muted);
+}
+.model.ready .model-icon {
+  color: var(--accent);
+}
+.model-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.model-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.model-state {
+  font-size: 12px;
+}
+.model-state.ok,
+.ok-text {
+  color: var(--on);
+}
+.muted-text {
+  color: var(--muted);
+}
+.model-tag {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.model-act {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.model-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}

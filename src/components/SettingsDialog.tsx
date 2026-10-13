@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { FolderInput, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, fmtBytes, fmtNum, type FolderCheck, type MoveProgress, type Settings, type Stats } from "../api";
+import { ModelsTab } from "./ModelsTab";
 
 const SIZES = [720, 1080, 1440, 2048, 2560, 3840];
 const QUALITIES: [number, string][] = [
@@ -12,14 +13,22 @@ const QUALITIES: [number, string][] = [
   [90, "90 - largest"],
 ];
 
+export type SettingsTab = "general" | "models";
+const TABS: [SettingsTab, string][] = [
+  ["general", "General"],
+  ["models", "AI models"],
+];
+
 interface Props {
+  initialTab: SettingsTab;
   dataDir: string;
   version: string;
   onRegenerateAll: () => void;
   onClose: () => void;
 }
 
-export function SettingsDialog({ dataDir, version, onRegenerateAll, onClose }: Props) {
+export function SettingsDialog({ initialTab, dataDir, version, onRegenerateAll, onClose }: Props) {
+  const [tab, setTab] = useState(initialTab);
   const [stats, setStats] = useState<Stats | null>(null);
   const [s, setS] = useState<Settings | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +87,7 @@ export function SettingsDialog({ dataDir, version, onRegenerateAll, onClose }: P
 
   return (
     <div className="modal-back" onClick={busy ? undefined : onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal settings" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <h2>
             Settings <span className="muted small">Shoebox {version && `v${version}`}</span>
@@ -87,7 +96,22 @@ export function SettingsDialog({ dataDir, version, onRegenerateAll, onClose }: P
             <X size={18} />
           </button>
         </div>
-        {s && (
+        <div className="tabs" role="tablist">
+          {TABS.map(([t, label]) => (
+            <button
+              key={t}
+              role="tab"
+              aria-selected={tab === t}
+              className={tab === t ? "on" : ""}
+              onClick={() => setTab(t)}
+              disabled={busy}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {tab === "models" && <ModelsTab />}
+        {tab === "general" && s && (
           <div className="form">
             <label>
               <span>Preview size</span>
@@ -236,12 +260,20 @@ export function SettingsDialog({ dataDir, version, onRegenerateAll, onClose }: P
         )}
         {error && <p className="note warn">{error}</p>}
         <div className="modal-foot">
-          <button className="btn ghost" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button className="btn primary" onClick={save} disabled={!s || busy}>
-            Save
-          </button>
+          {tab === "general" ? (
+            <>
+              <button className="btn ghost" onClick={onClose} disabled={busy}>
+                Cancel
+              </button>
+              <button className="btn primary" onClick={save} disabled={!s || busy}>
+                Save
+              </button>
+            </>
+          ) : (
+            <button className="btn" onClick={onClose}>
+              Close
+            </button>
+          )}
         </div>
       </div>
     </div>

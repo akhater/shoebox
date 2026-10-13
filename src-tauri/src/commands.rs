@@ -4,6 +4,7 @@ use crate::AppState;
 use crate::catalog::{
     Browse, Facets, Filters, FolderCheck, Overview, PhotoDetail, PhotoList, RemoveReport, Scope, Sort, Stats,
 };
+use crate::models;
 use crate::organize::{self, DeletePlan, DeleteReport};
 use crate::scan::Progress;
 use crate::settings::Settings;
@@ -578,4 +579,69 @@ pub async fn delete_marked(
         .map_err(err)?;
     let _ = app.emit("catalog-changed", ());
     Ok(report)
+}
+
+/// Settings > AI models: what Shoebox can use, and what is here.
+#[tauri::command]
+pub async fn models_list() -> Res<models::ModelsOverview> {
+    tauri::async_runtime::spawn_blocking(models::overview).await.map_err(|e| e.to_string())
+}
+
+/// Queues a model's download (from its publisher, checked by SHA-256).
+/// Progress comes as `model-download` events.
+#[tauri::command]
+pub fn model_download(state: State<'_, AppState>, id: String) {
+    state.models.push(&id);
+}
+
+/// Stops a model's download, or takes it out of the queue.
+#[tauri::command]
+pub fn model_stop(state: State<'_, AppState>, id: String) {
+    state.models.stop(&id);
+}
+
+/// The download running now (and those waiting), for a window opened midway.
+#[tauri::command]
+pub fn model_progress(state: State<'_, AppState>) -> Option<crate::ModelProgress> {
+    let mut p = state.models.current.lock().unwrap().clone()?;
+    p.queued = state.models.pending();
+    Some(p)
+}
+
+/// Deletes a model. Its feature lets go of it first; what it already did
+/// (descriptions, faces, people) stays. Returns the bytes freed.
+#[tauri::command]
+pub async fn model_delete(state: State<'_, AppState>, id: String) -> Res<u64> {
+    if state.models.busy_with(&id) {
+        return Err("It's downloading. Stop the download first.".into());
+    }
+    let (search, faces, ai) = (state.search.clone(), state.faces.clone(), state.ai.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let in_use = id == models::CLIP || id == models::FACES;
+        if in_use {
+            ai.cancel.store(true, Ordering::Relaxed); // it lets go after the photo it's on
+            if id == models::CLIP {
+                search.unload();
+            } else {
+                faces.unload();
+            }
+        }
+        let freed = models::delete(&id);
+        if in_use {
+            ai.kick(); // the other feature carries on
+        }
+        freed
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(err)
+}
+
+#[tauri::command]
+pub fn show_models_folder() -> Res<()> {
+    let dir = crate::paths::models_dir();
+    if !dir.is_dir() {
+        return Err(format!("{} doesn't exist yet: it's made with the first download.", dir.display()));
+    }
+    shell_open(&dir.to_string_lossy(), false)
 }

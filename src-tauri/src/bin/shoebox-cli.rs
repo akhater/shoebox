@@ -25,6 +25,12 @@
 //!   shoebox-cli move-folder <volume-id> <folder> <to-volume-id> <into folder>
 //!       same disk: moved at once; another disk: copied, checked byte for byte, original removed
 //!
+//! AI models (JSON out; as Settings > AI models):
+//!   shoebox-cli models                    which models Shoebox can use, and which are here
+//!   shoebox-cli models download <id>      fetch what is missing from its publisher, checked by SHA-256
+//!   shoebox-cli models delete <id>
+//!   shoebox-cli models verify [id]        hash the files here against the pinned SHA-256
+//!
 //! Culling (JSON out). Marking is catalog-only; files are deleted only by
 //! `delete-marked` quoting the token of the plan a person was shown:
 //!   shoebox-cli mark <photo-id>...             mark for deletion
@@ -265,6 +271,40 @@ fn main() -> anyhow::Result<()> {
             let filters: Filters = args.get(1).map(|f| serde_json::from_str(f)).transpose()?.unwrap_or_default();
             println!("{}", serde_json::to_string_pretty(&cat.facets(&Scope::All, &filters)?)?);
         }
+        Some("models") => {
+            use shoebox_lib::models;
+            let id = || args.get(2).map(String::as_str).ok_or_else(|| anyhow::anyhow!("models download|delete <id>"));
+            match args.get(1).map(String::as_str) {
+                None | Some("list") => println!("{}", serde_json::to_string_pretty(&models::overview())?),
+                Some("download") => {
+                    let bytes = models::download(id()?, &cancel, &|done, total| {
+                        eprint!("\r  {} of {} MB   ", done >> 20, total >> 20)
+                    })?;
+                    eprintln!();
+                    println!("{}", serde_json::json!({ "downloaded": id()?, "bytes": bytes }));
+                }
+                Some("delete") => {
+                    println!("{}", serde_json::json!({ "deleted": id()?, "bytesFreed": models::delete(id()?)? }))
+                }
+                Some("verify") => {
+                    let ids: Vec<String> = match args.get(2) {
+                        Some(id) => vec![id.clone()],
+                        None => models::overview()
+                            .models
+                            .into_iter()
+                            .filter(|m| !m.later && m.state != "missing")
+                            .map(|m| m.id)
+                            .collect(),
+                    };
+                    let mut out = serde_json::Map::new();
+                    for id in ids {
+                        out.insert(id.clone(), serde_json::to_value(models::verify(&id)?)?);
+                    }
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                Some(other) => anyhow::bail!("models: unknown {other:?} (list, download, delete, verify)"),
+            }
+        }
         Some("photo") => {
             let id: i64 = args.get(1).ok_or_else(|| anyhow::anyhow!("photo <id>"))?.parse()?;
             println!("{}", serde_json::to_string_pretty(&cat.photo_detail(id)?)?);
@@ -321,7 +361,7 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&organize::delete_confirmed(&cat, token, &disks)?)?);
         }
         _ => eprintln!(
-            "usage: shoebox-cli add <folder> | scan [root-id] | stats | photo <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...]"
+            "usage: shoebox-cli add <folder> | scan [root-id] | stats | photo <id> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...]"
         ),
     }
     Ok(())
