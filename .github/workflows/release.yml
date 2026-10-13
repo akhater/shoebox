@@ -6,14 +6,16 @@ name: Release
 # touches the build itself: the same builds, kept on the run, no release
 # touched.
 #
-# Each download is the Shoebox folder: the app and shoebox-cli, no installer,
-# because the catalog lives next to the app (never in AppData). macOS and
-# Linux builds open and browse, but can't add disks yet: disk recognition
-# there is roadmap 6.
+# Each platform gets installers, as Argentum (Windows setup .exe, macOS .dmg,
+# Linux .deb / .rpm / .AppImage), and the portable Shoebox folder (a zip or
+# .tar.gz). Both carry the app and shoebox-cli. Installed, Shoebox keeps its
+# catalog, models and shoebox.json in ~/.shoebox; portable, next to the app
+# (the folder ships a shoebox.json to say so). macOS and Linux builds open and
+# browse, but can't add disks yet: disk recognition there is roadmap 6.
 #
 # The AI models are not in the download. Until the models screen (download
 # from the original publishers, SHA-256 checked) lands, they go in `models/`
-# next to the app by hand.
+# by hand.
 on:
   release:
     types: [published]
@@ -32,26 +34,34 @@ jobs:
           - name: windows_x64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
+            bundles: nsis
           - name: windows_arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
+            bundles: nsis
           - name: macos_arm64
             runner: macos-14
             target: aarch64-apple-darwin
+            bundles: app,dmg
           - name: macos_x64
             runner: macos-15-intel
             target: x86_64-apple-darwin
+            bundles: app,dmg
           # The oldest supported Ubuntu, so the builds run on newer ones too.
           - name: linux_x64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            bundles: deb,rpm,appimage
           - name: linux_arm64
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            bundles: deb,rpm,appimage
     runs-on: ${{ matrix.runner }}
     env:
       NAME: Shoebox_${{ github.event.release.tag_name || format('dev{0}', github.run_number) }}_${{ matrix.name }}
       BIN: src-tauri/target/${{ matrix.target }}/release
+      # The AppImage tool's own strip breaks on today's binaries (as in Argentum).
+      NO_STRIP: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -60,7 +70,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev build-essential pkg-config
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev build-essential pkg-config file patchelf
 
       - uses: actions/setup-node@v4
         with:
@@ -75,41 +85,50 @@ jobs:
           rustflags: ''
           cache-workspaces: src-tauri
 
+      # Builds both binaries; every [[bin]] in Cargo.toml goes in the installers.
       - name: Build
-        run: npx tauri build --no-bundle --target ${{ matrix.target }}
+        run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
-      # Same features as the window's build, so nothing is compiled twice.
-      - name: Build shoebox-cli
-        working-directory: src-tauri
-        run: cargo build --release --target ${{ matrix.target }} --bin shoebox-cli --features tauri/custom-protocol
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force out/Shoebox | Out-Null
-          Copy-Item "$env:BIN/shoebox.exe", "$env:BIN/shoebox-cli.exe" out/Shoebox/
-          Compress-Archive -Path out/Shoebox -DestinationPath "$env:NAME.zip"
-
-      - name: Package (macOS, Linux)
-        if: runner.os != 'Windows'
+      - name: Check shoebox-cli is in the installers
         shell: bash
         run: |
-          mkdir -p out/Shoebox
-          cp "$BIN/shoebox" "$BIN/shoebox-cli" out/Shoebox/
-          tar -czf "$NAME.tar.gz" -C out Shoebox
+          case "$RUNNER_OS" in
+            Windows) grep -q 'shoebox-cli.exe' "$BIN"/nsis/*/installer.nsi ;;
+            macOS) test -x "$BIN/bundle/macos/Shoebox.app/Contents/MacOS/shoebox-cli" ;;
+            Linux) dpkg-deb -c "$BIN"/bundle/deb/*.deb | grep -q 'usr/bin/shoebox-cli' ;;
+          esac
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out portable/Shoebox
+          case "$RUNNER_OS" in
+            Windows) cp "$BIN"/bundle/nsis/*.exe out/ ;;
+            macOS) cp "$BIN"/bundle/dmg/*.dmg out/ ;;
+            Linux) cp "$BIN"/bundle/deb/*.deb "$BIN"/bundle/rpm/*.rpm "$BIN"/bundle/appimage/*.AppImage out/ ;;
+          esac
+          ext=$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+          cp "$BIN/shoebox$ext" "$BIN/shoebox-cli$ext" portable/Shoebox/
+          # Portable: Shoebox keeps its catalog and models in this folder.
+          echo '{}' > portable/Shoebox/shoebox.json
+          if [ "$RUNNER_OS" = Windows ]; then
+            pwsh -NoProfile -Command "Compress-Archive -Path portable/Shoebox -DestinationPath out/$NAME.zip"
+          else
+            tar -czf "out/$NAME.tar.gz" -C portable Shoebox
+          fi
+          ls -la out
 
       - name: Attach to the release
         if: github.event_name == 'release'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "$NAME".* --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" out/* --clobber
 
       - name: Keep on the run
         if: github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.NAME }}
-          path: ${{ env.NAME }}.*
+          path: out/
           retention-days: 7

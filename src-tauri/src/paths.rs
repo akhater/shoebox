@@ -1,10 +1,11 @@
 //! Where Shoebox keeps its catalog, and **every file write Shoebox makes**.
 //!
-//! The catalog is one folder (default `<Shoebox folder>\data`, movable from
-//! Settings), never AppData. Its location is remembered in `shoebox.json` next to
-//! the app. All writes live in this file and are refused outside Shoebox's own
-//! folders, so no bug can ever write next to a photo; a test enforces that no
-//! other source file writes at all.
+//! The catalog is one folder (default `<Shoebox folder>\data`, or `~/.shoebox`
+//! itself once installed; movable from Settings), never AppData. Its location
+//! is remembered in `shoebox.json` in the Shoebox folder. All writes live in
+//! this file and are refused outside Shoebox's own folders, so no bug can ever
+//! write next to a photo; a test enforces that no other source file writes at
+//! all.
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -15,16 +16,26 @@ pub struct DataDir {
     pub root: PathBuf,
 }
 
-/// The Shoebox folder: the repository root in dev builds, the exe's folder otherwise.
+/// The Shoebox folder, holding `shoebox.json` and `models`: the app's own
+/// folder when it runs portable, otherwise (installed) `~/.shoebox`, since
+/// Program Files, a .app or /usr/bin isn't Shoebox's to write in.
 pub fn app_home() -> PathBuf {
+    portable_home().unwrap_or_else(installed_home)
+}
+
+/// The folder Shoebox runs from, when it keeps everything beside itself: the
+/// repository root in dev builds, the app's folder when `shoebox.json` sits
+/// next to it (the portable download ships one).
+fn portable_home() -> Option<PathBuf> {
     if cfg!(debug_assertions) {
-        Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("src-tauri has a parent").to_path_buf()
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("."))
+        return Some(Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("src-tauri has a parent").to_path_buf());
     }
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    dir.join(POINTER_FILE).is_file().then_some(dir)
+}
+
+fn installed_home() -> PathBuf {
+    std::env::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".shoebox")
 }
 
 pub fn models_dir() -> PathBuf {
@@ -41,7 +52,7 @@ struct Pointer {
 
 impl DataDir {
     /// `SHOEBOX_DATA` wins (tests use it), then the folder chosen in Settings,
-    /// then `<Shoebox folder>\data`.
+    /// then `<Shoebox folder>\data` - or, installed, `~/.shoebox` itself.
     pub fn locate() -> Self {
         if let Some(p) = std::env::var_os("SHOEBOX_DATA") {
             return Self { root: PathBuf::from(p) };
@@ -50,7 +61,8 @@ impl DataDir {
             .ok()
             .and_then(|s| serde_json::from_str::<Pointer>(&s).ok())
             .and_then(|p| p.data_dir);
-        Self { root: chosen.unwrap_or_else(|| app_home().join("data")) }
+        let default = || portable_home().map_or_else(installed_home, |home| home.join("data"));
+        Self { root: chosen.unwrap_or_else(default) }
     }
 
     pub fn ensure(&self) -> io::Result<()> {
@@ -126,6 +138,9 @@ impl DataDir {
     pub fn files(&self) -> Vec<PathBuf> {
         walkdir::WalkDir::new(&self.root)
             .into_iter()
+            // Shoebox's own, not the catalog's: installed, `~/.shoebox` is both
+            // the Shoebox folder and the first catalog.
+            .filter_entry(|e| e.depth() != 1 || !matches!(e.file_name().to_str(), Some("models" | POINTER_FILE)))
             .flatten()
             .filter(|e| e.file_type().is_file())
             .map(|e| e.into_path())
@@ -203,6 +218,22 @@ mod tests {
         assert!(data.write(photo, b"x").is_err());
         assert!(data.write(&data.root.join("..").join("escape.jpg"), b"x").is_err());
         assert!(data.write(&data.root.join("thumbs").join("ok.jpg"), b"x").is_ok());
+        let _ = std::fs::remove_dir_all(&data.root);
+    }
+
+    /// Installed, `~/.shoebox` holds the models and `shoebox.json` beside the
+    /// first catalog; moving the catalog must not take them along.
+    #[test]
+    fn catalog_files_leave_out_models_and_pointer() {
+        let data = DataDir { root: std::env::temp_dir().join("shoebox-own-files") };
+        let _ = std::fs::remove_dir_all(&data.root);
+        for f in ["previews/01/1.jpg", "settings.json", "models/clip/model.onnx", "shoebox.json"] {
+            data.write(&data.root.join(f), b"x").unwrap();
+        }
+        let mut files: Vec<PathBuf> =
+            data.files().iter().map(|p| p.strip_prefix(&data.root).unwrap().to_path_buf()).collect();
+        files.sort();
+        assert_eq!(files, [Path::new("previews").join("01").join("1.jpg"), PathBuf::from("settings.json")]);
         let _ = std::fs::remove_dir_all(&data.root);
     }
 
