@@ -1177,6 +1177,17 @@ button {
 .field-label {
   font-weight: 600;
 }
+.form label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.form label.check input {
+  accent-color: var(--accent);
+}
+.update-text {
+  color: var(--accent);
+}
 .row {
   display: flex;
   align-items: center;
@@ -1444,6 +1455,12 @@ button {
 .version {
   color: var(--muted);
   font-size: 11px;
+}
+.nav-item.update {
+  color: var(--accent);
+}
+.nav-item.update:hover {
+  background: var(--accent-soft);
 }
 .menu-anchor {
   position: relative;

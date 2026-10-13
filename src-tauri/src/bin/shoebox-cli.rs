@@ -7,6 +7,8 @@
 //!                                plugged-in disk or all of them (the window does it when a disk
 //!                                is plugged in)
 //!   shoebox-cli stats            catalog overview
+//!   shoebox-cli version          this version and the latest published release (JSON; asks
+//!                                GitHub - a commit on a branch never counts)
 //!   shoebox-cli photo <id>       one photo's details
 //!   shoebox-cli backup           consistent copies of the databases in backup\ (run it
 //!                                before each Kopia snapshot; see .kopiaignore)
@@ -104,6 +106,9 @@ fn main() -> anyhow::Result<()> {
             let list = cat.list_photos(&Scope::All, Sort::default(), &Filters::default())?;
             let failed = list.preview.iter().filter(|&&s| s == 2).count();
             println!("photos listed: {}, without preview: {failed}", list.ids.len());
+        }
+        Some("version") => {
+            println!("{}", serde_json::to_string_pretty(&shoebox_lib::updates::check(None))?);
         }
         Some("backup") => {
             // Consistent copies of the databases in backup\ - Kopia's before-snapshot action.
@@ -405,7 +410,7 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&organize::delete_confirmed(&cat, token, &disks)?)?);
         }
         _ => eprintln!(
-            "usage: shoebox-cli add <folder> | scan [root-id] | stats | photo <id> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...]"
+            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...]"
         ),
     }
     Ok(())

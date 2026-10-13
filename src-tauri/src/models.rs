@@ -444,18 +444,7 @@ pub fn download(id: &str, cancel: &AtomicBool, progress: &dyn Fn(u64, u64)) -> R
     let dir = models_dir();
     let todo: Vec<&FileSpec> = m.files.iter().filter(|f| !file_ok(&dir, f)).collect();
     let total = download_size(&todo);
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .provider(ureq::tls::TlsProvider::NativeTls)
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .timeout_connect(Some(std::time::Duration::from_secs(30)))
-        .timeout_recv_response(Some(std::time::Duration::from_secs(60)))
-        .user_agent(concat!("Shoebox/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into();
+    let agent = http_agent(30, 60);
     let mut done = 0u64;
     progress(0, total);
     for f in todo {
@@ -499,6 +488,23 @@ pub fn download(id: &str, cancel: &AtomicBool, progress: &dyn Fn(u64, u64)) -> R
     }
     log::info!("models: {id} downloaded ({} MB)", done >> 20);
     Ok(done)
+}
+
+/// Shoebox's HTTP client, with the system's own TLS and certificates (HTTP/1.1
+/// only, which every proxy understands). Timeouts in seconds.
+pub(crate) fn http_agent(connect: u64, response: u64) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .provider(ureq::tls::TlsProvider::NativeTls)
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .timeout_connect(Some(std::time::Duration::from_secs(connect)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(response)))
+        .user_agent(concat!("Shoebox/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into()
 }
 
 /// Downloads `url` as a part file for `dst`, checked against `sha256`.

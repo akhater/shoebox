@@ -1,5 +1,6 @@
 import {
   ChevronRight,
+  CircleArrowUp,
   Ellipsis,
   Folder,
   FolderPlus,
@@ -40,6 +41,10 @@ interface Props {
   scope: Scope;
   scanningRoot: number | null;
   version: string;
+  /** A newer published release ("26.43.1"), or null. */
+  update: string | null;
+  /** Opens its release page. */
+  onUpdate: () => void;
   /** People shown in the People view. */
   people: number;
   peopleOpen: boolean;
@@ -420,6 +425,12 @@ export function Sidebar(p: Props) {
       </div>
 
       <div className="sidebar-foot">
+        {p.update && (
+          <button className="nav-item update" onClick={p.onUpdate} title="Open its release page to download it">
+            <CircleArrowUp size={16} />
+            <span className="grow">Shoebox {p.update} is out</span>
+          </button>
+        )}
         <button className="nav-item" onClick={p.onAddFolder}>
           <FolderPlus size={16} />
           <span className="grow">Add folder</span>

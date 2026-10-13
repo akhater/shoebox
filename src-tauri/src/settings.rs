@@ -13,11 +13,13 @@ pub struct Settings {
     pub thumb_height: u32,
     /// Photos read in parallel during a scan.
     pub workers: usize,
+    /// Ask GitHub at start and every few hours whether a newer release is out.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { preview_size: 1080, preview_quality: 84, thumb_height: 320, workers: 4 }
+        Self { preview_size: 1080, preview_quality: 84, thumb_height: 320, workers: 4, check_updates: true }
     }
 }
 

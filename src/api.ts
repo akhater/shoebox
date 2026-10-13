@@ -230,6 +230,8 @@ export interface Settings {
   previewQuality: number;
   thumbHeight: number;
   workers: number;
+  /** Ask GitHub at start and every few hours whether a newer release is out. */
+  checkUpdates: boolean;
 }
 
 export interface FolderCheck {
@@ -541,6 +543,28 @@ export interface ModelProgress {
   /** Waiting their turn. */
   queued: string[];
 }
+
+/** A newer Shoebox: the latest published release on GitHub (a commit on a branch never counts). */
+export interface UpdateStatus {
+  current: string;
+  /** None until a release is published. */
+  latest: string | null;
+  newer: boolean;
+  url: string;
+  published: string | null;
+  /** When GitHub was last asked, unix seconds. */
+  checked: number;
+  /** Why the last check failed; what an earlier one found is kept. */
+  error: string | null;
+}
+
+export const updatesApi = {
+  /** What the last check found; null before the first one. */
+  status: () => invoke<UpdateStatus | null>("update_status"),
+  check: () => invoke<UpdateStatus>("check_updates"),
+  /** Opens the release page in the browser. Nothing is downloaded by Shoebox. */
+  openPage: () => invoke<void>("open_releases"),
+};
 
 /** AI models: downloaded from their publishers on request, checked by SHA-256. */
 export const modelsApi = {
