@@ -411,6 +411,33 @@ impl Catalog {
         Ok(out)
     }
 
+    /// Photos taken each day (camera local time) in a scope narrowed by
+    /// `filters`, oldest day first: the window's calendar, for agents.
+    pub fn days(&self, scope: &Scope, filters: &Filters) -> Result<Days> {
+        let (filter, p1, p2) = self.scope_sql(scope)?;
+        let sql = format!(
+            "WITH st AS ({}) SELECT CASE WHEN COALESCE(p.taken_ts, 0) > 0
+                    THEN strftime('%Y-%m-%d', p.taken_ts, 'unixepoch') END AS d, COUNT(*)
+               FROM photos p LEFT JOIN st ON st.pid = p.id
+              WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
+              GROUP BY d ORDER BY d",
+            state_cte(&self.online_sql()),
+            filters_sql()
+        );
+        let db = self.db();
+        let mut stmt = db.prepare(&sql)?;
+        let [d, c, l, t, s, pe, tg] = filters.params(None);
+        let mut rows = stmt.query(params![p1, p2, d, c, l, t, s, pe, tg])?;
+        let mut out = Days::default();
+        while let Some(r) = rows.next()? {
+            match r.get::<_, Option<String>>(0)? {
+                Some(day) => out.days.push(Day { day, photos: r.get(1)? }),
+                None => out.undated = r.get(1)?,
+            }
+        }
+        Ok(out)
+    }
+
     /// What each filter can offer in a scope, with counts. Each filter is
     /// counted with every *other* filter applied, so ticking a second camera
     /// stays possible after ticking the first.
@@ -1336,6 +1363,22 @@ pub struct PhotoList {
     pub ext: Vec<String>,
     /// 1 = a RAW file.
     pub raw: Vec<i64>,
+}
+
+/// Photos per day, for the calendar.
+#[derive(Serialize, Default, Debug)]
+pub struct Days {
+    /// Days with photos, oldest first.
+    pub days: Vec<Day>,
+    /// Photos without a date.
+    pub undated: i64,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Day {
+    /// "2006-01-14"
+    pub day: String,
+    pub photos: i64,
 }
 
 #[derive(Serialize)]
