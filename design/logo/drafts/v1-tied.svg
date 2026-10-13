@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Shoebox, vintage option 1: tied-up kraft shoebox, tarnished silver lid, tag, prints. -->
+  <defs>
+  <filter id="aged" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+    <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="4" result="f"/>
+    <feColorMatrix in="f" type="matrix" values="0.32 0 0 0 0.76  0.32 0 0 0 0.76  0.32 0 0 0 0.76  0 0 0 0 1" result="fine"/>
+    <feTurbulence type="fractalNoise" baseFrequency="0.008 0.016" numOctaves="3" seed="11" result="b"/>
+    <feColorMatrix in="b" type="matrix" values="0.42 0 0 0 0.79  0.5 0 0 0 0.74  0.6 0 0 0 0.68  0 0 0 0 1" result="blot"/>
+    <feBlend in="fine" in2="blot" mode="multiply" result="tex"/>
+    <feBlend in="SourceGraphic" in2="tex" mode="multiply" result="mix"/>
+    <feComposite in="mix" in2="SourceAlpha" operator="in"/>
+  </filter>
+  <filter id="worn" x="-4%" y="-4%" width="108%" height="108%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="2" seed="3" result="t"/>
+    <feDisplacementMap in="SourceGraphic" in2="t" scale="6" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+  <filter id="inky" x="-5%" y="-5%" width="110%" height="110%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.12" numOctaves="2" seed="8" result="t"/>
+    <feDisplacementMap in="SourceGraphic" in2="t" scale="5" xChannelSelector="R" yChannelSelector="G" result="d"/>
+    <feTurbulence type="fractalNoise" baseFrequency="0.5" numOctaves="1" seed="5" result="g"/>
+    <feColorMatrix in="g" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -2.2 1.7" result="holes"/>
+    <feComposite in="d" in2="holes" operator="in"/>
+  </filter>
+  <linearGradient id="kraft" x1="0" y1="0" x2="0.2" y2="1">
+    <stop offset="0%" stop-color="#cf9f62"/>
+    <stop offset="55%" stop-color="#bb8a50"/>
+    <stop offset="100%" stop-color="#94643a"/>
+  </linearGradient>
+  <linearGradient id="bodyShade" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0%" stop-color="#ffffff" stop-opacity="0.12"/>
+    <stop offset="7%" stop-color="#ffffff" stop-opacity="0"/>
+    <stop offset="90%" stop-color="#000000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0.22"/>
+  </linearGradient>
+  <linearGradient id="under" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#2a1a0c" stop-opacity="0.55"/>
+    <stop offset="100%" stop-color="#2a1a0c" stop-opacity="0"/>
+  </linearGradient>
+  <!-- Old silver: warm, tarnished, not chrome -->
+  <linearGradient id="tin" x1="0" y1="0" x2="1" y2="0.35">
+    <stop offset="0%" stop-color="#a9a69c"/>
+    <stop offset="18%" stop-color="#dcd9cf"/>
+    <stop offset="32%" stop-color="#f1eee4"/>
+    <stop offset="55%" stop-color="#a6a398"/>
+    <stop offset="78%" stop-color="#d3d0c5"/>
+    <stop offset="100%" stop-color="#8a877d"/>
+  </linearGradient>
+  <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#ffffff" stop-opacity="0.3"/>
+    <stop offset="45%" stop-color="#ffffff" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#2a1a0c" stop-opacity="0.3"/>
+  </linearGradient>
+  <radialGradient id="ground" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0%" stop-color="#000000" stop-opacity="0.5"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="sepia" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#e6d3a9"/>
+    <stop offset="100%" stop-color="#bf9f6c"/>
+  </linearGradient>
+  <linearGradient id="faded" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#a9c2bb"/>
+    <stop offset="100%" stop-color="#eadbbb"/>
+  </linearGradient>
+  <linearGradient id="paper" x1="0" y1="0" x2="0.7" y2="1">
+    <stop offset="0%" stop-color="#f3e9d0"/>
+    <stop offset="100%" stop-color="#dcc7a0"/>
+  </linearGradient>
+  <radialGradient id="vignette" cx="0.5" cy="0.45" r="0.62">
+    <stop offset="60%" stop-color="#7a5a32" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#7a5a32" stop-opacity="0.38"/>
+  </radialGradient>
+  <linearGradient id="tile" x1="0" y1="0" x2="0.85" y2="1">
+    <stop offset="0%" stop-color="#3a3f46"/>
+    <stop offset="45%" stop-color="#23262b"/>
+    <stop offset="100%" stop-color="#15171a"/>
+  </linearGradient>
+  <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#8e979f" stop-opacity="0.9"/>
+    <stop offset="50%" stop-color="#5a6169" stop-opacity="0.35"/>
+    <stop offset="100%" stop-color="#c9d1d9" stop-opacity="0.55"/>
+  </linearGradient>
+  <pattern id="hatch" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
+    <rect width="12" height="4" fill="#3a2a1c"/>
+  </pattern>
+  <pattern id="twist" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(40)">
+    <rect width="9" height="9" fill="#cdb07c"/>
+    <rect width="3.5" height="9" fill="#8d6f45"/>
+  </pattern>
+  <pattern id="lines" width="10" height="10" patternUnits="userSpaceOnUse">
+    <rect width="10" height="3" fill="#3a2a1c"/>
+  </pattern>
+  <g id="printA">
+    <path d="M0 0 Q6.4 -4 12.8 0 Q19.2 -4 25.6 0 Q31.9 -4 38.3 0 Q44.7 -4 51.1 0 Q57.5 -4 63.9 0 Q70.3 -4 76.7 0 Q83.1 -4 89.4 0 Q95.8 -4 102.2 0 Q108.6 -4 115 0 Q121.4 -4 127.8 0 Q134.2 -4 140.6 0 Q146.9 -4 153.3 0 Q159.7 -4 166.1 0 Q172.5 -4 178.9 0 Q185.3 -4 191.7 0 Q198.1 -4 204.4 0 Q210.8 -4 217.2 0 Q223.6 -4 230 0 Q234 6.5 230 13.1 Q234 19.6 230 26.2 Q234 32.7 230 39.2 Q234 45.8 230 52.3 Q234 58.8 230 65.4 Q234 71.9 230 78.5 Q234 85 230 91.5 Q234 98.1 230 104.6 Q234 111.2 230 117.7 Q234 124.2 230 130.8 Q234 137.3 230 143.8 Q234 150.4 230 156.9 Q234 163.5 230 170 Q223.6 174 217.2 170 Q210.8 174 204.4 170 Q198.1 174 191.7 170 Q185.3 174 178.9 170 Q172.5 174 166.1 170 Q159.7 174 153.3 170 Q146.9 174 140.6 170 Q134.2 174 127.8 170 Q121.4 174 115 170 Q108.6 174 102.2 170 Q95.8 174 89.4 170 Q83.1 174 76.7 170 Q70.3 174 63.9 170 Q57.5 174 51.1 170 Q44.7 174 38.3 170 Q31.9 174 25.6 170 Q19.2 174 12.8 170 Q6.4 174 0 170 Q-4 163.5 0 156.9 Q-4 150.4 0 143.8 Q-4 137.3 0 130.8 Q-4 124.2 0 117.7 Q-4 111.2 0 104.6 Q-4 98.1 0 91.5 Q-4 85 0 78.5 Q-4 71.9 0 65.4 Q-4 58.8 0 52.3 Q-4 45.8 0 39.2 Q-4 32.7 0 26.2 Q-4 19.6 0 13.1 Q-4 6.5 0 0 Z" fill="#efe6d0" stroke="#bfa97f" stroke-width="2"/>
+    <rect x="16" y="16" width="198" height="138" fill="url(#sepia)"/>
+    <circle cx="158.6" cy="57.4" r="17.9" fill="#f3e6c4"/>
+    <path d="M16 154 L16 112.6 L59.6 78.1 L95.2 107.1 L138.8 71.2 L214 123.6 L214 154 Z" fill="#7a5a38"/>
+    <rect x="16" y="16" width="198" height="138" fill="#8a6a3a" fill-opacity="0.12"/>
+  </g>
+  <g id="printB">
+    <path d="M0 0 Q6.4 -4 12.8 0 Q19.2 -4 25.6 0 Q31.9 -4 38.3 0 Q44.7 -4 51.1 0 Q57.5 -4 63.9 0 Q70.3 -4 76.7 0 Q83.1 -4 89.4 0 Q95.8 -4 102.2 0 Q108.6 -4 115 0 Q121.4 -4 127.8 0 Q134.2 -4 140.6 0 Q146.9 -4 153.3 0 Q159.7 -4 166.1 0 Q172.5 -4 178.9 0 Q185.3 -4 191.7 0 Q198.1 -4 204.4 0 Q210.8 -4 217.2 0 Q223.6 -4 230 0 Q234 6.5 230 13.1 Q234 19.6 230 26.2 Q234 32.7 230 39.2 Q234 45.8 230 52.3 Q234 58.8 230 65.4 Q234 71.9 230 78.5 Q234 85 230 91.5 Q234 98.1 230 104.6 Q234 111.2 230 117.7 Q234 124.2 230 130.8 Q234 137.3 230 143.8 Q234 150.4 230 156.9 Q234 163.5 230 170 Q223.6 174 217.2 170 Q210.8 174 204.4 170 Q198.1 174 191.7 170 Q185.3 174 178.9 170 Q172.5 174 166.1 170 Q159.7 174 153.3 170 Q146.9 174 140.6 170 Q134.2 174 127.8 170 Q121.4 174 115 170 Q108.6 174 102.2 170 Q95.8 174 89.4 170 Q83.1 174 76.7 170 Q70.3 174 63.9 170 Q57.5 174 51.1 170 Q44.7 174 38.3 170 Q31.9 174 25.6 170 Q19.2 174 12.8 170 Q6.4 174 0 170 Q-4 163.5 0 156.9 Q-4 150.4 0 143.8 Q-4 137.3 0 130.8 Q-4 124.2 0 117.7 Q-4 111.2 0 104.6 Q-4 98.1 0 91.5 Q-4 85 0 78.5 Q-4 71.9 0 65.4 Q-4 58.8 0 52.3 Q-4 45.8 0 39.2 Q-4 32.7 0 26.2 Q-4 19.6 0 13.1 Q-4 6.5 0 0 Z" fill="#efe6d0" stroke="#bfa97f" stroke-width="2"/>
+    <rect x="16" y="16" width="198" height="138" fill="url(#faded)"/>
+    <circle cx="158.6" cy="57.4" r="17.9" fill="#f4e3b8"/>
+    <path d="M16 154 L16 112.6 L59.6 78.1 L95.2 107.1 L138.8 71.2 L214 123.6 L214 154 Z" fill="#9a5d3e"/>
+    <rect x="16" y="16" width="198" height="138" fill="#8a6a3a" fill-opacity="0.12"/>
+  </g>
+</defs>
+
+  <ellipse cx="512" cy="786" rx="430" ry="32" fill="url(#ground)"/>
+
+  <use href="#printA" transform="translate(40 322) rotate(-16)"/>
+  <use href="#printB" transform="translate(776 296) rotate(14)"/>
+
+  <g filter="url(#worn)">
+    <rect x="132" y="420" width="760" height="360" rx="14" fill="url(#kraft)" filter="url(#aged)"/>
+    <rect x="132" y="420" width="760" height="360" rx="14" fill="url(#bodyShade)"/>
+    <rect x="132" y="426" width="760" height="56" fill="url(#under)"/>
+    <path d="M146 764 H878" stroke="#6e4826" stroke-width="4" stroke-opacity="0.5"/>
+    <path d="M150 770 Q140 740 146 700 M876 690 Q884 730 878 768" stroke="#e7c48e" stroke-width="5" stroke-opacity="0.55" fill="none"/>
+  </g>
+
+  <g transform="rotate(-7 268 620)" filter="url(#inky)" opacity="0.6">
+    <rect x="186" y="572" width="164" height="92" rx="12" fill="none" stroke="#5a2a18" stroke-width="6"/>
+    <text x="268" y="637" text-anchor="middle" font-family="Georgia, serif" font-weight="700" font-size="50" fill="#5a2a18">Nº 47</text>
+  </g>
+
+  <g filter="url(#worn)">
+    <rect x="100" y="280" width="824" height="150" rx="16" fill="url(#tin)" filter="url(#aged)"/>
+    <rect x="100" y="280" width="824" height="150" rx="16" fill="url(#sheen)"/>
+    <rect x="100" y="280" width="824" height="150" rx="16" fill="none" stroke="#5f5a50" stroke-opacity="0.75" stroke-width="4"/>
+    <rect x="122" y="288" width="780" height="6" rx="3" fill="#ffffff" fill-opacity="0.6"/>
+  </g>
+
+  <g filter="url(#worn)">
+    <path d="M104 352 H920" fill="none" stroke="url(#twist)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M104 352 H920" fill="none" stroke="#efdcb3" stroke-width="3.1" stroke-opacity="0.55" stroke-linecap="round"/>
+    <path d="M604 284 V778" fill="none" stroke="url(#twist)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M604 284 V778" fill="none" stroke="#efdcb3" stroke-width="3.1" stroke-opacity="0.55" stroke-linecap="round"/>
+    <path d="M606 356 C 646 420 690 470 692 559" fill="none" stroke="#8d6f45" stroke-width="3.5"/>
+    <path d="M604 352 C 548 292 492 318 520 366 C 540 398 586 384 604 352" fill="none" stroke="url(#twist)" stroke-width="12" stroke-linecap="round"/>
+    <path d="M604 352 C 548 292 492 318 520 366 C 540 398 586 384 604 352" fill="none" stroke="#efdcb3" stroke-width="2.6" stroke-opacity="0.55" stroke-linecap="round"/>
+    <path d="M604 352 C 660 292 716 318 688 366 C 668 398 622 384 604 352" fill="none" stroke="url(#twist)" stroke-width="12" stroke-linecap="round"/>
+    <path d="M604 352 C 660 292 716 318 688 366 C 668 398 622 384 604 352" fill="none" stroke="#efdcb3" stroke-width="2.6" stroke-opacity="0.55" stroke-linecap="round"/>
+    <path d="M604 352 C 596 400 574 432 552 470" fill="none" stroke="url(#twist)" stroke-width="12" stroke-linecap="round"/>
+    <path d="M604 352 C 596 400 574 432 552 470" fill="none" stroke="#efdcb3" stroke-width="2.6" stroke-opacity="0.55" stroke-linecap="round"/>
+    <path d="M604 352 C 618 398 640 428 660 462" fill="none" stroke="url(#twist)" stroke-width="12" stroke-linecap="round"/>
+    <path d="M604 352 C 618 398 640 428 660 462" fill="none" stroke="#efdcb3" stroke-width="2.6" stroke-opacity="0.55" stroke-linecap="round"/>
+    <circle cx="604" cy="352" r="15" fill="#b8986a" stroke="#8d6f45" stroke-width="3"/>
+  </g>
+
+  <g transform="rotate(9 760 580)" filter="url(#worn)">
+    <path d="M690 500 H880 V640 H690 L660 604 V536 Z" fill="url(#paper)" filter="url(#aged)"/>
+    <path d="M690 500 H880 V640 H690 L660 604 V536 Z" fill="none" stroke="#a88c5c" stroke-width="2.5"/>
+    <circle cx="690" cy="570" r="16" fill="#c9b386"/>
+    <circle cx="690" cy="570" r="8" fill="#5a4026"/>
+    <text x="784" y="590" text-anchor="middle" font-family="Ink Free, Segoe Print, cursive" font-size="54" fill="#3a2a1c">photos</text>
+  </g>
+
+</svg>

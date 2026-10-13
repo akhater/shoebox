@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Shoebox, vintage option 3: printed label on a tarnished lid, aged paper card. -->
+  <defs>
+  <filter id="aged" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+    <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="4" result="f"/>
+    <feColorMatrix in="f" type="matrix" values="0.32 0 0 0 0.76  0.32 0 0 0 0.76  0.32 0 0 0 0.76  0 0 0 0 1" result="fine"/>
+    <feTurbulence type="fractalNoise" baseFrequency="0.008 0.016" numOctaves="3" seed="11" result="b"/>
+    <feColorMatrix in="b" type="matrix" values="0.42 0 0 0 0.79  0.5 0 0 0 0.74  0.6 0 0 0 0.68  0 0 0 0 1" result="blot"/>
+    <feBlend in="fine" in2="blot" mode="multiply" result="tex"/>
+    <feBlend in="SourceGraphic" in2="tex" mode="multiply" result="mix"/>
+    <feComposite in="mix" in2="SourceAlpha" operator="in"/>
+  </filter>
+  <filter id="worn" x="-4%" y="-4%" width="108%" height="108%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="2" seed="3" result="t"/>
+    <feDisplacementMap in="SourceGraphic" in2="t" scale="6" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+  <filter id="inky" x="-5%" y="-5%" width="110%" height="110%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.12" numOctaves="2" seed="8" result="t"/>
+    <feDisplacementMap in="SourceGraphic" in2="t" scale="5" xChannelSelector="R" yChannelSelector="G" result="d"/>
+    <feTurbulence type="fractalNoise" baseFrequency="0.5" numOctaves="1" seed="5" result="g"/>
+    <feColorMatrix in="g" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -2.2 1.7" result="holes"/>
+    <feComposite in="d" in2="holes" operator="in"/>
+  </filter>
+  <linearGradient id="kraft" x1="0" y1="0" x2="0.2" y2="1">
+    <stop offset="0%" stop-color="#cf9f62"/>
+    <stop offset="55%" stop-color="#bb8a50"/>
+    <stop offset="100%" stop-color="#94643a"/>
+  </linearGradient>
+  <linearGradient id="bodyShade" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0%" stop-color="#ffffff" stop-opacity="0.12"/>
+    <stop offset="7%" stop-color="#ffffff" stop-opacity="0"/>
+    <stop offset="90%" stop-color="#000000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0.22"/>
+  </linearGradient>
+  <linearGradient id="under" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#2a1a0c" stop-opacity="0.55"/>
+    <stop offset="100%" stop-color="#2a1a0c" stop-opacity="0"/>
+  </linearGradient>
+  <!-- Old silver: warm, tarnished, not chrome -->
+  <linearGradient id="tin" x1="0" y1="0" x2="1" y2="0.35">
+    <stop offset="0%" stop-color="#a9a69c"/>
+    <stop offset="18%" stop-color="#dcd9cf"/>
+    <stop offset="32%" stop-color="#f1eee4"/>
+    <stop offset="55%" stop-color="#a6a398"/>
+    <stop offset="78%" stop-color="#d3d0c5"/>
+    <stop offset="100%" stop-color="#8a877d"/>
+  </linearGradient>
+  <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#ffffff" stop-opacity="0.3"/>
+    <stop offset="45%" stop-color="#ffffff" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#2a1a0c" stop-opacity="0.3"/>
+  </linearGradient>
+  <radialGradient id="ground" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0%" stop-color="#000000" stop-opacity="0.5"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="sepia" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#e6d3a9"/>
+    <stop offset="100%" stop-color="#bf9f6c"/>
+  </linearGradient>
+  <linearGradient id="faded" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#a9c2bb"/>
+    <stop offset="100%" stop-color="#eadbbb"/>
+  </linearGradient>
+  <linearGradient id="paper" x1="0" y1="0" x2="0.7" y2="1">
+    <stop offset="0%" stop-color="#f3e9d0"/>
+    <stop offset="100%" stop-color="#dcc7a0"/>
+  </linearGradient>
+  <radialGradient id="vignette" cx="0.5" cy="0.45" r="0.62">
+    <stop offset="60%" stop-color="#7a5a32" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#7a5a32" stop-opacity="0.38"/>
+  </radialGradient>
+  <linearGradient id="tile" x1="0" y1="0" x2="0.85" y2="1">
+    <stop offset="0%" stop-color="#3a3f46"/>
+    <stop offset="45%" stop-color="#23262b"/>
+    <stop offset="100%" stop-color="#15171a"/>
+  </linearGradient>
+  <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#8e979f" stop-opacity="0.9"/>
+    <stop offset="50%" stop-color="#5a6169" stop-opacity="0.35"/>
+    <stop offset="100%" stop-color="#c9d1d9" stop-opacity="0.55"/>
+  </linearGradient>
+  <pattern id="hatch" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
+    <rect width="12" height="4" fill="#3a2a1c"/>
+  </pattern>
+  <pattern id="twist" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(40)">
+    <rect width="9" height="9" fill="#cdb07c"/>
+    <rect width="3.5" height="9" fill="#8d6f45"/>
+  </pattern>
+  <pattern id="lines" width="10" height="10" patternUnits="userSpaceOnUse">
+    <rect width="10" height="3" fill="#3a2a1c"/>
+  </pattern>
+  <g id="printA">
+    <path d="M0 0 Q6.4 -4 12.8 0 Q19.2 -4 25.6 0 Q31.9 -4 38.3 0 Q44.7 -4 51.1 0 Q57.5 -4 63.9 0 Q70.3 -4 76.7 0 Q83.1 -4 89.4 0 Q95.8 -4 102.2 0 Q108.6 -4 115 0 Q121.4 -4 127.8 0 Q134.2 -4 140.6 0 Q146.9 -4 153.3 0 Q159.7 -4 166.1 0 Q172.5 -4 178.9 0 Q185.3 -4 191.7 0 Q198.1 -4 204.4 0 Q210.8 -4 217.2 0 Q223.6 -4 230 0 Q234 6.5 230 13.1 Q234 19.6 230 26.2 Q234 32.7 230 39.2 Q234 45.8 230 52.3 Q234 58.8 230 65.4 Q234 71.9 230 78.5 Q234 85 230 91.5 Q234 98.1 230 104.6 Q234 111.2 230 117.7 Q234 124.2 230 130.8 Q234 137.3 230 143.8 Q234 150.4 230 156.9 Q234 163.5 230 170 Q223.6 174 217.2 170 Q210.8 174 204.4 170 Q198.1 174 191.7 170 Q185.3 174 178.9 170 Q172.5 174 166.1 170 Q159.7 174 153.3 170 Q146.9 174 140.6 170 Q134.2 174 127.8 170 Q121.4 174 115 170 Q108.6 174 102.2 170 Q95.8 174 89.4 170 Q83.1 174 76.7 170 Q70.3 174 63.9 170 Q57.5 174 51.1 170 Q44.7 174 38.3 170 Q31.9 174 25.6 170 Q19.2 174 12.8 170 Q6.4 174 0 170 Q-4 163.5 0 156.9 Q-4 150.4 0 143.8 Q-4 137.3 0 130.8 Q-4 124.2 0 117.7 Q-4 111.2 0 104.6 Q-4 98.1 0 91.5 Q-4 85 0 78.5 Q-4 71.9 0 65.4 Q-4 58.8 0 52.3 Q-4 45.8 0 39.2 Q-4 32.7 0 26.2 Q-4 19.6 0 13.1 Q-4 6.5 0 0 Z" fill="#efe6d0" stroke="#bfa97f" stroke-width="2"/>
+    <rect x="16" y="16" width="198" height="138" fill="url(#sepia)"/>
+    <circle cx="158.6" cy="57.4" r="17.9" fill="#f3e6c4"/>
+    <path d="M16 154 L16 112.6 L59.6 78.1 L95.2 107.1 L138.8 71.2 L214 123.6 L214 154 Z" fill="#7a5a38"/>
+    <rect x="16" y="16" width="198" height="138" fill="#8a6a3a" fill-opacity="0.12"/>
+  </g>
+  <g id="printB">
+    <path d="M0 0 Q6.4 -4 12.8 0 Q19.2 -4 25.6 0 Q31.9 -4 38.3 0 Q44.7 -4 51.1 0 Q57.5 -4 63.9 0 Q70.3 -4 76.7 0 Q83.1 -4 89.4 0 Q95.8 -4 102.2 0 Q108.6 -4 115 0 Q121.4 -4 127.8 0 Q134.2 -4 140.6 0 Q146.9 -4 153.3 0 Q159.7 -4 166.1 0 Q172.5 -4 178.9 0 Q185.3 -4 191.7 0 Q198.1 -4 204.4 0 Q210.8 -4 217.2 0 Q223.6 -4 230 0 Q234 6.5 230 13.1 Q234 19.6 230 26.2 Q234 32.7 230 39.2 Q234 45.8 230 52.3 Q234 58.8 230 65.4 Q234 71.9 230 78.5 Q234 85 230 91.5 Q234 98.1 230 104.6 Q234 111.2 230 117.7 Q234 124.2 230 130.8 Q234 137.3 230 143.8 Q234 150.4 230 156.9 Q234 163.5 230 170 Q223.6 174 217.2 170 Q210.8 174 204.4 170 Q198.1 174 191.7 170 Q185.3 174 178.9 170 Q172.5 174 166.1 170 Q159.7 174 153.3 170 Q146.9 174 140.6 170 Q134.2 174 127.8 170 Q121.4 174 115 170 Q108.6 174 102.2 170 Q95.8 174 89.4 170 Q83.1 174 76.7 170 Q70.3 174 63.9 170 Q57.5 174 51.1 170 Q44.7 174 38.3 170 Q31.9 174 25.6 170 Q19.2 174 12.8 170 Q6.4 174 0 170 Q-4 163.5 0 156.9 Q-4 150.4 0 143.8 Q-4 137.3 0 130.8 Q-4 124.2 0 117.7 Q-4 111.2 0 104.6 Q-4 98.1 0 91.5 Q-4 85 0 78.5 Q-4 71.9 0 65.4 Q-4 58.8 0 52.3 Q-4 45.8 0 39.2 Q-4 32.7 0 26.2 Q-4 19.6 0 13.1 Q-4 6.5 0 0 Z" fill="#efe6d0" stroke="#bfa97f" stroke-width="2"/>
+    <rect x="16" y="16" width="198" height="138" fill="url(#faded)"/>
+    <circle cx="158.6" cy="57.4" r="17.9" fill="#f4e3b8"/>
+    <path d="M16 154 L16 112.6 L59.6 78.1 L95.2 107.1 L138.8 71.2 L214 123.6 L214 154 Z" fill="#9a5d3e"/>
+    <rect x="16" y="16" width="198" height="138" fill="#8a6a3a" fill-opacity="0.12"/>
+  </g>
+</defs>
+
+  <g filter="url(#worn)">
+    <rect x="72" y="72" width="880" height="880" rx="150" fill="url(#paper)" filter="url(#aged)"/>
+    <rect x="72" y="72" width="880" height="880" rx="150" fill="url(#vignette)"/>
+    <rect x="72" y="72" width="880" height="880" rx="150" fill="none" stroke="#a88c5c" stroke-width="8"/>
+  </g>
+
+  <ellipse cx="512" cy="716" rx="380" ry="28" fill="url(#ground)" opacity="0.55"/>
+  <use href="#printA" transform="translate(112 352) rotate(-14) scale(0.8)"/>
+
+  <g filter="url(#worn)">
+    <rect x="192" y="446" width="640" height="252" rx="12" fill="url(#kraft)" filter="url(#aged)"/>
+    <rect x="192" y="446" width="640" height="252" rx="12" fill="url(#bodyShade)"/>
+    <rect x="192" y="450" width="640" height="50" fill="url(#under)"/>
+    <path d="M204 684 H820" stroke="#6e4826" stroke-width="4" stroke-opacity="0.5"/>
+  </g>
+  <g transform="rotate(-4 730 600)" filter="url(#worn)">
+    <rect x="664" y="560" width="134" height="80" fill="url(#paper)" filter="url(#aged)"/>
+    <rect x="664" y="560" width="134" height="80" fill="none" stroke="#a88c5c" stroke-width="2"/>
+    <text x="731" y="612" text-anchor="middle" font-family="Courier New, monospace" font-weight="700" font-size="36" fill="#3a2a1c">Nº47</text>
+  </g>
+
+  <g filter="url(#worn)">
+    <rect x="168" y="328" width="688" height="132" rx="14" fill="url(#tin)" filter="url(#aged)"/>
+    <rect x="168" y="328" width="688" height="132" rx="14" fill="url(#sheen)"/>
+    <rect x="168" y="328" width="688" height="132" rx="14" fill="none" stroke="#5f5a50" stroke-opacity="0.75" stroke-width="4"/>
+    <rect x="188" y="335" width="648" height="5" rx="2.5" fill="#ffffff" fill-opacity="0.6"/>
+  </g>
+  <g filter="url(#worn)">
+    <rect x="342" y="344" width="340" height="100" rx="4" fill="url(#paper)" filter="url(#aged)"/>
+    <rect x="342" y="344" width="340" height="100" rx="4" fill="none" stroke="#3a2a1c" stroke-width="3"/>
+    <rect x="351" y="353" width="322" height="82" rx="2" fill="none" stroke="#3a2a1c" stroke-width="1.5"/>
+    <text x="512" y="405" text-anchor="middle" font-family="Georgia, serif" font-weight="700" font-size="46" letter-spacing="7" fill="#3a2a1c">SHOEBOX</text>
+    <text x="512" y="427" text-anchor="middle" font-family="Courier New, monospace" font-weight="700" font-size="15" letter-spacing="5" fill="#3a2a1c">PHOTOGRAPHS</text>
+  </g>
+</svg>

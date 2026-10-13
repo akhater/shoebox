@@ -1,0 +1,97 @@
+# Changelog
+
+Newest first. Same format and versioning as Argentum.
+
+## 26.42.1 - unreleased
+
+### Added
+
+- **The catalog.** Add a folder; Shoebox lists every photo in it - every RAW
+  format plus JPEG, HEIC/HIF, TIFF, PNG, WebP, AVIF - and keeps a preview
+  (1080 px by default, changeable in Settings) and a grid thumbnail of each,
+  in `data/`. Browsing works with the disk unplugged; those photos are
+  marked offline, never removed.
+- **Disks are known by serial + filesystem + size**, not drive letter, so a
+  disk that comes back as another letter is the same disk.
+- **Photos are known by content.** A fingerprint (size + BLAKE3 of the first
+  and last 256 KB) identifies each photo. A file moved or copied, inside a
+  folder or to another disk, is recognised on the next scan and keeps its
+  photo, with no re-reading. A file moved *and* rewritten by another app is
+  matched by its capture (camera, serial, time to the 1/100 s, extension).
+- **Missing means confirmed missing.** Only a complete scan of a plugged-in
+  disk can mark a file missing, and only in folders it could read. Missing
+  photos stay in the catalog (their own view) and are relinked when found.
+- Reading: rawler's embedded full-size JPEG (same rawler revision as
+  Argentum), then the Windows codecs (Microsoft RAW extension, which is
+  LibRaw, and HEIF), then a full RAW develop. Photos are opened read-only.
+- Justified grid by month, viewer with camera details and every copy's
+  location (Show in Explorer / Open when the disk is plugged in), live disk
+  plug/unplug detection, rename a disk by double-clicking it.
+- **Cull after a shoot.** Delete marks a photo (catalog only; in the viewer it
+  then moves to the next photo, and Delete again unmarks). Marked photos are
+  dimmed and listed under "Marked for deletion". "Delete marked files…" shows
+  what would go, disk by disk with a tickbox each, and sends it to the Recycle
+  Bin - or says plainly that a memory card or USB stick has none. A RAW takes
+  its camera JPEG twin and Argentum's edits with it. Marked photos on
+  unplugged disks wait until the disk is back. The only code allowed to delete
+  is `organize.rs`, enforced by test.
+- **Back** (button or Escape) from a person's page to where you came from,
+  including the photo you were looking at.
+- **Clean up a person**: finds faces that don't look like the rest of them and
+  moves the ones you tick to whoever they resemble, or someone new.
+- **Keyboard in the sidebar**: arrows move and open/close folders, Enter shows,
+  Home/End, F2 renames, the Menu key opens a folder's menu.
+- **Select in the grid** as in Explorer: click selects, double-click or Enter
+  opens, Ctrl+click and Shift+click, arrows / Shift+arrows / Page Up-Down /
+  Home-End, Ctrl+A. Delete marks or unmarks everything selected. The status bar\r
+  shows the selected photo's name, type, date, resolution and size. A toolbar\r
+  button puts the file type (CR3, JPG, TIF...) on every thumbnail.
+- **Oldest first**, everywhere: grid, folders (A-Z, numbers by value) and
+  dates; bursts follow the camera's 1/100 s. A sort menu switches to newest
+  first, file name or recently added.
+- **Folder menu** on right-click: Show in Explorer, New folder, Rename (on the
+  disk and in the catalog at once), Scan again. The browser's own menu is gone.
+- **Drag a folder onto another** to move it, photos and everything else in it.
+  On the same disk it's instant and can be undone from the status bar. To
+  another disk Shoebox asks first, copies, checks every byte, then removes the
+  original; Stop or any failure leaves the original untouched. The catalog
+  follows; nothing is read again.
+- **Tags**: your own keywords on photos - T in the grid (one or many selected) or in the viewer; suggestions as you type. Tags stay with the photo through moves and copies, live in the catalog only, and filter in the bar (Tags: photos with all ticked tags).
+- **Filters**: one bar above the grid - People (with their faces), Date (years, months, days), Camera,
+  Lens, File type (RAW and Images, each type with its count), Status (plugged
+  in / unplugged / missing). Tick any values; filters combine, narrow whatever
+  is shown (search included) and stay on from folder to folder. Counts follow
+  the other filters. Replaces the Dates and Cameras sections of the sidebar.
+- **Viewer fills the screen**, sharp when the disk is plugged in (a picture from the original sized to the screen swaps in under a second); click or Z zooms to 100%, drag to look around. A **filmstrip** under the photo.
+- **Sources** instead of Disks: each folder you add is the top of its tree.
+  Disks mounted in a folder (`C:\Mounts\Disk1`) are recognised, not
+  just drive letters.
+
+### Internal
+
+- Renamed from OtO (working name) to Shoebox: window, app id
+  `co.shoebox.catalog`, `shoebox-cli`, `SHOEBOX_DATA`, `shoebox.json`.
+- `shoebox-cli` (add | scan | stats | photo) runs the catalog without the
+  window; `SHOEBOX_DATA` points it at a throwaway catalog. Culling and
+  people too: `mark`, `unmark`, `marked` (the plan, with a token),
+  `delete-marked <token>`, `person-strays <id> [--apply]`.
+- Models for search, faces and text copied from Immich's install and the
+  ONNX runtime from Argentum into `models/` - nothing downloaded.
+
+## Versioning: `yy.isoWeek.release`
+
+```
+26.42.1
+ |  |  +-- release within that week, counting from 1
+ |  +----- ISO week number
+ +-------- ISO year, two digits
+```
+
+Identical to Argentum (see its CHANGELOG for the full reasoning): the version
+says when it was built; two digits because Windows installers cap the major
+version at 255; **bump immediately after releasing, never before**, so a
+number one ahead of the last release means "built from source". The release
+commit sets the true `yy.ww.n`. Current week: `date +%g.%V`.
+
+The version lives in three places that must match: `package.json`,
+`src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`.

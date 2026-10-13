@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shoebox Icon</title>
+<style>
+  body { margin: 0; padding: 20px; background: #141518; font: 13px "Segoe UI", sans-serif; color: #8d929c; }
+  .wrap { display: flex; gap: 24px; align-items: center; }
+  .rows { display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; align-items: flex-end; gap: 14px; padding: 12px; border-radius: 8px; }
+  .dark { background: #202124; }
+  .light { background: #f3f3f3; }
+  img { display: block; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <img src="shoebox.svg" width="420" height="420" alt="Shoebox">
+    <div class="rows" id="rows"></div>
+  </div>
+<script>
+  const sizes = [128, 64, 48, 32, 24, 16];
+  const ag = "../../../Argentum/src-tauri/icons/argentum-source.svg";
+  const row = (cls) => `<div class="row ${cls}">${sizes.map(s => `<img src="shoebox.svg" width="${s}" height="${s}" alt="">`).join("")}<img src="${ag}" width="48" height="48" alt="Argentum"></div>`;
+  document.getElementById("rows").innerHTML = row("dark") + row("light");
+</script>
+</body>
+</html>

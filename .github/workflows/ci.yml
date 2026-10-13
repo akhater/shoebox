@@ -1,0 +1,56 @@
+name: CI
+
+# Every pull request, and every push to main: the quick checks that decide
+# whether a change can merge. main is protected and requires the `check` job;
+# nothing is pushed to main directly. Full builds only happen when a release
+# is published (release.yml), as in Argentum.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check
+    # Shoebox reads disks and images through Windows APIs today (roadmap 6
+    # brings macOS and Linux).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install the window's dependencies
+        run: npm ci
+
+      # tsc --noEmit, then vite build (also gives Tauri its frontend folder).
+      - name: Typecheck and build the window
+        run: npm run build
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+          rustflags: ''
+          cache-workspaces: src-tauri
+
+      - name: cargo fmt
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Includes the guards behind Shoebox's promises: no code outside paths.rs
+      # and organize.rs can write a file, and nothing writes outside its own
+      # folders.
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --lib

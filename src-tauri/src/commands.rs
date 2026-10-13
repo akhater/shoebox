@@ -1,0 +1,540 @@
+//! What the window can ask the backend. Errors go back as plain sentences.
+
+use crate::AppState;
+use crate::catalog::{
+    Browse, Facets, Filters, FolderCheck, Overview, PhotoDetail, PhotoList, RemoveReport, Scope, Sort, Stats,
+};
+use crate::organize::{self, DeletePlan, DeleteReport};
+use crate::scan::Progress;
+use crate::settings::Settings;
+use crate::tags;
+use serde::Serialize;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, State};
+
+type Res<T> = Result<T, String>;
+
+fn err(e: anyhow::Error) -> String {
+    format!("{e:#}")
+}
+
+#[tauri::command]
+pub fn get_overview(state: State<'_, AppState>) -> Res<Overview> {
+    state.cat.overview().map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_photos(
+    state: State<'_, AppState>,
+    scope: Scope,
+    sort: Option<Sort>,
+    filters: Option<Filters>,
+) -> Res<PhotoList> {
+    let cat = state.cat.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cat.list_photos(&scope, sort.unwrap_or_default(), &filters.unwrap_or_default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(err)
+}
+
+/// What each filter offers in a scope, with counts.
+#[tauri::command]
+pub async fn facets(state: State<'_, AppState>, scope: Scope, filters: Option<Filters>) -> Res<Facets> {
+    let cat = state.cat.clone();
+    tauri::async_runtime::spawn_blocking(move || cat.facets(&scope, &filters.unwrap_or_default()))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn browse(state: State<'_, AppState>) -> Res<Browse> {
+    let cat = state.cat.clone();
+    tauri::async_runtime::spawn_blocking(move || cat.browse()).await.map_err(|e| e.to_string())?.map_err(err)
+}
+
+#[tauri::command]
+pub fn get_photo(state: State<'_, AppState>, id: i64) -> Res<PhotoDetail> {
+    state.cat.photo_detail(id).map_err(err)
+}
+
+/// Adds a folder and queues its first scan.
+#[tauri::command]
+pub fn add_folder(state: State<'_, AppState>, path: String) -> Res<i64> {
+    let id = state.cat.add_root(Path::new(&path)).map_err(err)?;
+    state.scans.push(id, false);
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn rescan(state: State<'_, AppState>, root_id: i64) -> Res<()> {
+    let root = state.cat.root(root_id).map_err(err)?;
+    if state.cat.mount_of(root.volume_id).is_none() {
+        return Err(format!("{} is not plugged in", root.volume_label));
+    }
+    state.scans.push(root_id, false);
+    Ok(())
+}
+
+/// Queues every folder whose disk is plugged in. Unplugged disks are skipped,
+/// never treated as empty.
+#[tauri::command]
+pub fn rescan_all(state: State<'_, AppState>) -> Res<usize> {
+    let _ = state.cat.refresh_roots();
+    let mut n = 0;
+    for id in state.cat.root_ids().map_err(err)? {
+        if let Ok(root) = state.cat.root(id)
+            && state.cat.mount_of(root.volume_id).is_some()
+        {
+            state.scans.push(id, false);
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Reads the photos again and rebuilds their previews (after changing size
+/// or quality). One folder, or every folder on a plugged-in disk. Photos on
+/// unplugged disks keep the previews they have.
+#[tauri::command]
+pub fn regenerate(state: State<'_, AppState>, root_id: Option<i64>) -> Res<usize> {
+    let _ = state.cat.refresh_roots();
+    let ids = match root_id {
+        Some(id) => vec![id],
+        None => state.cat.root_ids().map_err(err)?,
+    };
+    let mut n = 0;
+    for id in ids {
+        if let Ok(root) = state.cat.root(id)
+            && state.cat.mount_of(root.volume_id).is_some()
+        {
+            state.scans.push(id, true);
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return Err("Plug the disk in first: previews are rebuilt from the original photos.".into());
+    }
+    Ok(n)
+}
+
+/// Takes a folder out of the catalog. Its files on disk are not touched.
+#[tauri::command]
+pub fn remove_folder(state: State<'_, AppState>, root_id: i64) -> Res<RemoveReport> {
+    if state.scans.current.lock().unwrap().as_ref().is_some_and(|p| p.root_id == root_id) {
+        return Err("That folder is being scanned. Stop the scan first.".into());
+    }
+    state.scans.forget(root_id);
+    state.cat.remove_root(root_id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn catalog_stats(state: State<'_, AppState>) -> Res<Stats> {
+    let cat = state.cat.clone();
+    tauri::async_runtime::spawn_blocking(move || cat.stats()).await.map_err(|e| e.to_string())?.map_err(err)
+}
+
+/// Photos matching a description ("succulent", "airport lounge"), best first,
+/// within the current scope.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResult {
+    list: PhotoList,
+    /// The first `clear` photos of `list` are clear matches; the rest are possible ones.
+    clear: usize,
+}
+
+#[tauri::command]
+pub async fn search_photos(
+    state: State<'_, AppState>,
+    query: String,
+    scope: Scope,
+    filters: Option<Filters>,
+) -> Res<SearchResult> {
+    let filters = filters.unwrap_or_default();
+    let (cat, index) = (state.cat.clone(), state.search.clone());
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<SearchResult> {
+        let started = std::time::Instant::now();
+        let (hits, cutoff) = index.search(query.trim(), 1000)?;
+        let clear_ids: std::collections::HashSet<i64> = hits.iter().filter(|h| h.1 >= cutoff).map(|h| h.0).collect();
+        let ranked: Vec<i64> = hits.iter().map(|h| h.0).collect();
+        let list = cat.ranked_in_scope(&ranked, &scope, &filters)?;
+        let clear = list.ids.iter().take_while(|id| clear_ids.contains(id)).count();
+        log::info!(
+            "search {:?}: {clear} clear + {} possible in {} ms",
+            query.trim(),
+            list.ids.len() - clear,
+            started.elapsed().as_millis()
+        );
+        Ok(SearchResult { list, clear })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(err)
+}
+
+#[tauri::command]
+pub fn people(state: State<'_, AppState>) -> Res<Vec<crate::faces::Person>> {
+    state.faces.people(&state.cat).map_err(err)
+}
+
+#[tauri::command]
+pub fn rename_person(state: State<'_, AppState>, person_id: i64, name: String) -> Res<()> {
+    state.faces.rename(&state.cat, person_id, &name).map_err(err)
+}
+
+/// Sorts again every face not named, ignored or placed by hand.
+#[tauri::command]
+pub async fn regroup_faces(state: State<'_, AppState>) -> Res<(usize, usize)> {
+    let (cat, faces) = (state.cat.clone(), state.faces.clone());
+    tauri::async_runtime::spawn_blocking(move || faces.regroup(&cat)).await.map_err(|e| e.to_string())?.map_err(err)
+}
+
+/// Hides strangers from People (or shows them again).
+#[tauri::command]
+pub fn ignore_people(state: State<'_, AppState>, ids: Vec<i64>, ignored: bool) -> Res<()> {
+    state.faces.set_ignored(&state.cat, &ids, ignored).map_err(err)
+}
+
+/// Makes several people one (the same person found in two groups).
+#[tauri::command]
+pub fn merge_people(state: State<'_, AppState>, ids: Vec<i64>, into: i64) -> Res<()> {
+    state.faces.merge(&state.cat, &ids, into).map_err(err)
+}
+
+/// "That's not them": takes a face out of its person.
+#[tauri::command]
+pub fn split_face(state: State<'_, AppState>, face_id: i64) -> Res<i64> {
+    state.faces.split_face(&state.cat, face_id).map_err(err)
+}
+
+/// Faces in a person that don't look like them, worst first.
+#[tauri::command]
+pub fn person_strays(state: State<'_, AppState>, person_id: i64) -> Res<Vec<crate::faces::Stray>> {
+    state.faces.strays(&state.cat, person_id).map_err(err)
+}
+
+/// Moves faces out of a person, to whoever they resemble (or someone new).
+#[tauri::command]
+pub fn move_faces_out(state: State<'_, AppState>, person_id: i64, face_ids: Vec<i64>) -> Res<usize> {
+    state.faces.move_out(&state.cat, person_id, &face_ids).map_err(err)
+}
+
+#[tauri::command]
+pub fn photo_faces(state: State<'_, AppState>, photo_id: i64) -> Res<Vec<crate::faces::PhotoFace>> {
+    state.faces.photo_faces(&state.cat, photo_id).map_err(err)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiStatus {
+    indexed: usize,
+    current: Option<crate::search::AiProgress>,
+}
+
+#[tauri::command]
+pub fn ai_status(state: State<'_, AppState>) -> AiStatus {
+    AiStatus { indexed: state.search.indexed(), current: state.ai.current.lock().unwrap().clone() }
+}
+
+#[tauri::command]
+pub fn cancel_scan(state: State<'_, AppState>) {
+    state.scans.cancel_all();
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanStatus {
+    current: Option<Progress>,
+    queued: Vec<i64>,
+}
+
+#[tauri::command]
+pub fn scan_status(state: State<'_, AppState>) -> ScanStatus {
+    ScanStatus { current: state.scans.current.lock().unwrap().clone(), queued: state.scans.pending() }
+}
+
+#[tauri::command]
+pub fn reveal_file(state: State<'_, AppState>, file_id: i64) -> Res<()> {
+    let path = state.cat.file_path(file_id).map_err(err)?;
+    explorer(&format!("/select,\"{path}\""))
+}
+
+#[tauri::command]
+pub fn open_file(state: State<'_, AppState>, file_id: i64) -> Res<()> {
+    let path = state.cat.file_path(file_id).map_err(err)?;
+    explorer(&format!("\"{path}\""))
+}
+
+fn explorer(raw_args: &str) -> Res<()> {
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.raw_arg(raw_args);
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> Settings {
+    state.cat.settings()
+}
+
+#[tauri::command]
+pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Res<Settings> {
+    state.cat.save_settings(settings).map_err(err)
+}
+
+#[tauri::command]
+pub fn check_catalog_folder(state: State<'_, AppState>, path: String) -> Res<FolderCheck> {
+    state.cat.check_catalog_folder(Path::new(&path)).map_err(err)
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveProgress {
+    done: usize,
+    total: usize,
+    finished: bool,
+    error: Option<String>,
+}
+
+/// Stops scanning, copies the catalog to the chosen folder, then restarts
+/// Shoebox on it. Runs in the background and reports `catalog-move` events.
+#[tauri::command]
+pub fn move_catalog(app: AppHandle, state: State<'_, AppState>, path: String) -> Res<()> {
+    let check = state.cat.check_catalog_folder(Path::new(&path)).map_err(err)?;
+    if let Some(p) = check.problem {
+        return Err(p);
+    }
+    if check.has_catalog {
+        return Err("That folder already has a catalog: switch to it instead.".into());
+    }
+    let (cat, scans) = (state.cat.clone(), state.scans.clone());
+    scans.paused.store(true, Ordering::Relaxed);
+    scans.cancel_all();
+    std::thread::spawn(move || {
+        for _ in 0..600 {
+            if scans.current.lock().unwrap().is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let emit = |m: MoveProgress| {
+            let _ = app.emit("catalog-move", m);
+        };
+        let result = cat.move_catalog(Path::new(&check.target), &|done, total| {
+            emit(MoveProgress { done, total, finished: false, error: None })
+        });
+        match result {
+            Ok(()) => {
+                emit(MoveProgress { done: 0, total: 0, finished: true, error: None });
+                std::thread::sleep(Duration::from_millis(800));
+                app.restart();
+            }
+            Err(e) => {
+                scans.paused.store(false, Ordering::Relaxed);
+                emit(MoveProgress { done: 0, total: 0, finished: true, error: Some(format!("{e:#}")) });
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Restarts Shoebox on a folder that already holds a catalog.
+#[tauri::command]
+pub fn switch_catalog(app: AppHandle, state: State<'_, AppState>, path: String) -> Res<()> {
+    state.cat.use_catalog(Path::new(&path)).map_err(err)?;
+    app.restart();
+}
+
+#[tauri::command]
+pub fn rename_volume(state: State<'_, AppState>, volume_id: i64, label: String) -> Res<()> {
+    state.cat.rename_volume(volume_id, &label).map_err(err)
+}
+
+/// Renames a folder on its disk and in the catalog. Returns its new path.
+#[tauri::command]
+pub fn rename_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    volume_id: i64,
+    rel_path: String,
+    name: String,
+) -> Res<String> {
+    if state.scans.current.lock().unwrap().is_some() {
+        return Err("A scan is running. Let it finish (or stop it), then rename.".into());
+    }
+    let new_rel = organize::rename_folder(&state.cat, volume_id, &rel_path, &name).map_err(err)?;
+    let _ = app.emit("catalog-changed", ());
+    Ok(new_rel)
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderMoveEvent {
+    name: String,
+    progress: Option<organize::MoveProgress>,
+    result: Option<organize::MoveResult>,
+    error: Option<String>,
+    finished: bool,
+}
+
+/// Drag and drop: moves a folder into another catalog folder. On the same
+/// disk it's done at once and the result comes back. To another disk it runs
+/// in the background (copy, check every byte, then remove the original) with
+/// `folder-move` events, and this returns None.
+#[tauri::command]
+pub fn move_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    volume_id: i64,
+    rel_path: String,
+    to_volume_id: i64,
+    to_parent_rel: String,
+) -> Res<Option<organize::MoveResult>> {
+    if state.scans.current.lock().unwrap().is_some() {
+        return Err("A scan is running. Let it finish (or stop it), then move.".into());
+    }
+    if state.moving.load(Ordering::Relaxed) {
+        return Err("Another folder is being moved. Wait for it to finish.".into());
+    }
+    let m = organize::FolderMove { from: volume_id, rel: rel_path, to: to_volume_id, to_parent: to_parent_rel };
+    if m.from == m.to {
+        let r = organize::move_folder(&state.cat, &m, &AtomicBool::new(false), &|_| {}).map_err(err)?;
+        let _ = app.emit("catalog-changed", ());
+        return Ok(Some(r));
+    }
+    organize::check_move(&state.cat, &m).map_err(err)?;
+    let (cat, scans, moving, cancel) =
+        (state.cat.clone(), state.scans.clone(), state.moving.clone(), state.move_cancel.clone());
+    moving.store(true, Ordering::Relaxed);
+    cancel.store(false, Ordering::Relaxed);
+    scans.paused.store(true, Ordering::Relaxed); // nothing scans while files move
+    let name = m.rel.rsplit('\\').next().unwrap_or("").to_string();
+    std::thread::spawn(move || {
+        let emit = |e: FolderMoveEvent| {
+            let _ = app.emit("folder-move", e);
+        };
+        let last = std::sync::Mutex::new(std::time::Instant::now() - Duration::from_secs(1));
+        let result = organize::move_folder(&cat, &m, &cancel, &|p| {
+            let mut l = last.lock().unwrap();
+            if l.elapsed() > Duration::from_millis(150) || p.files == p.total_files {
+                *l = std::time::Instant::now();
+                emit(FolderMoveEvent {
+                    name: name.clone(),
+                    progress: Some(p.clone()),
+                    result: None,
+                    error: None,
+                    finished: false,
+                });
+            }
+        });
+        scans.paused.store(false, Ordering::Relaxed);
+        moving.store(false, Ordering::Relaxed);
+        let (result, error) = match result {
+            Ok(r) => (Some(r), None),
+            Err(e) => {
+                log::warn!("move {name}: {e:#}");
+                (None, Some(format!("{e:#}")))
+            }
+        };
+        emit(FolderMoveEvent { name, progress: None, result, error, finished: true });
+        let _ = app.emit("catalog-changed", ());
+    });
+    Ok(None)
+}
+
+#[tauri::command]
+pub fn cancel_folder_move(state: State<'_, AppState>) {
+    state.move_cancel.store(true, Ordering::Relaxed);
+}
+
+/// Makes a new folder inside a catalog folder. Returns its path.
+#[tauri::command]
+pub fn new_folder(app: AppHandle, state: State<'_, AppState>, volume_id: i64, parent_rel: String) -> Res<String> {
+    let rel = organize::create_folder(&state.cat, volume_id, &parent_rel, "New folder").map_err(err)?;
+    let _ = app.emit("catalog-changed", ());
+    Ok(rel)
+}
+
+#[tauri::command]
+pub fn show_folder(state: State<'_, AppState>, volume_id: i64, rel_path: String) -> Res<()> {
+    let path = state.cat.folder_path(volume_id, &rel_path).map_err(err)?;
+    explorer(&format!("\"{path}\""))
+}
+
+/// Every tag, most used first.
+#[tauri::command]
+pub fn tags_all(state: State<'_, AppState>) -> Res<Vec<tags::Tag>> {
+    tags::all(&state.cat).map_err(err)
+}
+
+/// The tags on these photos; `count` = how many of them have each.
+#[tauri::command]
+pub fn tags_on(state: State<'_, AppState>, photo_ids: Vec<i64>) -> Res<Vec<tags::Tag>> {
+    tags::on(&state.cat, &photo_ids).map_err(err)
+}
+
+#[tauri::command]
+pub fn tags_add(state: State<'_, AppState>, photo_ids: Vec<i64>, names: Vec<String>) -> Res<Vec<tags::Tag>> {
+    tags::add(&state.cat, &photo_ids, &names).map_err(err)
+}
+
+#[tauri::command]
+pub fn tags_remove(state: State<'_, AppState>, photo_ids: Vec<i64>, tag_ids: Vec<i64>) -> Res<usize> {
+    tags::remove(&state.cat, &photo_ids, &tag_ids).map_err(err)
+}
+
+#[tauri::command]
+pub fn tag_rename(state: State<'_, AppState>, tag_id: i64, name: String) -> Res<()> {
+    tags::rename(&state.cat, tag_id, &name).map_err(err)
+}
+
+#[tauri::command]
+pub fn tag_delete(state: State<'_, AppState>, tag_id: i64) -> Res<()> {
+    tags::delete(&state.cat, tag_id).map_err(err)
+}
+
+/// Culling: marks or unmarks photos for deletion. Catalog only.
+#[tauri::command]
+pub fn mark_photos(state: State<'_, AppState>, ids: Vec<i64>, marked: bool) -> Res<usize> {
+    organize::mark(&state.cat, &ids, marked).map_err(err)
+}
+
+#[tauri::command]
+pub fn unmark_all(state: State<'_, AppState>) -> Res<usize> {
+    organize::unmark_all(&state.cat).map_err(err)
+}
+
+/// What "Delete marked files" would remove now, by disk.
+#[tauri::command]
+pub async fn delete_plan(state: State<'_, AppState>) -> Res<DeletePlan> {
+    let cat = state.cat.clone();
+    tauri::async_runtime::spawn_blocking(move || organize::plan(&cat)).await.map_err(|e| e.to_string())?.map_err(err)
+}
+
+/// Deletes the plan the user confirmed (`token`), on the disks they ticked.
+#[tauri::command]
+pub async fn delete_marked(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: String,
+    volume_ids: Vec<i64>,
+) -> Res<DeleteReport> {
+    if state.scans.current.lock().unwrap().is_some() {
+        return Err("A scan is running. Let it finish (or stop it), then delete.".into());
+    }
+    let cat = state.cat.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || organize::delete_confirmed(&cat, &token, &volume_ids))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(err)?;
+    let _ = app.emit("catalog-changed", ());
+    Ok(report)
+}

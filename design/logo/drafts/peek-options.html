@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shoebox Peeking Options</title>
+<style>
+  :root { --bg: #141518; --panel: #1a1c20; --text: #e9e9ec; --muted: #8d929c; --border: #2c3037; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+         font: 14px/1.4 "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 20px; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .opt { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .opt h2 { font-size: 15px; margin: 0 0 2px; }
+  .opt p { color: var(--muted); margin: 0 0 12px; min-height: 40px; }
+  .big { width: 100%; max-width: 300px; display: block; margin: 0 auto 12px; }
+  .row { display: flex; align-items: flex-end; gap: 12px; padding: 10px; border-radius: 8px; }
+  .row.dark { background: #202124; }
+  .row.light { background: #f3f3f3; margin-top: 8px; }
+  .row img { display: block; }
+  .row .ag { margin-left: auto; opacity: .9; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+  <h1>Shoebox - peeking</h1>
+  <p class="sub">Same box, lid lifted so the photos show. Each at 64, 48, 32, 24, 16 px on a dark and a light taskbar, Argentum on the right.</p>
+  <div class="grid" id="grid"></div>
+<script>
+  const opts = [
+    ["../shoebox.svg", "Now - closed", "The current logo: tied shut, prints only at the sides."],
+    ["peek-1.svg", "1 - Peeking", "Still tied, but the prints inside lever the lid up: photos in the gap."],
+    ["peek-2.svg", "2 - Lid off", "The silver lid leans behind, three prints fanned out of the box."],
+    ["peek-3.svg", "3 - Lid ajar", "Lid swung up on the right rim, prints rising out from under it."],
+  ];
+  const sizes = [64, 48, 32, 24, 16];
+  const ag = "../../../../Argentum/src-tauri/icons/argentum-source.svg";
+  const row = (cls, f) => `<div class="row ${cls}">${sizes.map(s => `<img src="${f}" width="${s}" height="${s}" alt="">`).join("")}<img class="ag" src="${ag}" width="32" height="32" alt="Argentum"></div>`;
+  document.getElementById("grid").innerHTML = opts.map(([f, t, d]) =>
+    `<div class="opt"><h2>${t}</h2><p>${d}</p><img class="big" src="${f}" alt="${t}">${row("dark", f)}${row("light", f)}</div>`).join("");
+</script>
+</body>
+</html>

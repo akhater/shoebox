@@ -1,0 +1,50 @@
+name: Release
+
+# Builds happen only when a release is published (Argentum's logic), never on
+# every change. Windows today; macOS and Linux join when they have their own
+# disk recognition and HEIC reading (roadmap 6).
+#
+# The AI models are not in the download. Until the models screen (download
+# from the original publishers, SHA-256 checked) lands, they go in `models/`
+# next to the app by hand.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ''
+          cache-workspaces: src-tauri
+
+      - name: Build
+        run: npx tauri build --no-bundle
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.release.tag_name }}"
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item src-tauri/target/release/shoebox.exe, src-tauri/target/release/shoebox-cli.exe out/
+          Compress-Archive -Path out/* -DestinationPath "Shoebox_${tag}_windows_x64.zip"
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" (Get-ChildItem Shoebox_*.zip).FullName --clobber
+        shell: pwsh

@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Shoebox, option C: open box seen from above, prints filed inside,
+       silver lid leaning behind. Tile = Argentum's. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0.85" y2="1">
+      <stop offset="0%" stop-color="#3a3f46"/>
+      <stop offset="45%" stop-color="#23262b"/>
+      <stop offset="100%" stop-color="#15171a"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8e979f" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#5a6169" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#c9d1d9" stop-opacity="0.55"/>
+    </linearGradient>
+    <linearGradient id="silver" x1="0" y1="0" x2="1" y2="0.6">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="30%" stop-color="#e8ecf1"/>
+      <stop offset="52%" stop-color="#a8b2bd"/>
+      <stop offset="74%" stop-color="#e4e9ee"/>
+      <stop offset="100%" stop-color="#9aa4af"/>
+    </linearGradient>
+    <linearGradient id="silverDark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8d969f"/>
+      <stop offset="100%" stop-color="#5c646c"/>
+    </linearGradient>
+    <linearGradient id="kraft" x1="0" y1="0" x2="0.25" y2="1">
+      <stop offset="0%" stop-color="#f0b24f"/>
+      <stop offset="60%" stop-color="#e29c38"/>
+      <stop offset="100%" stop-color="#b8772b"/>
+    </linearGradient>
+    <linearGradient id="kraftSide" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#c07e2c"/>
+      <stop offset="100%" stop-color="#8f5a1d"/>
+    </linearGradient>
+    <linearGradient id="inside" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3b2409"/>
+      <stop offset="100%" stop-color="#6e4515"/>
+    </linearGradient>
+    <radialGradient id="ground" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#000000" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7fb4dc"/>
+      <stop offset="100%" stop-color="#d6e8f2"/>
+    </linearGradient>
+    <linearGradient id="dusk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e9875a"/>
+      <stop offset="100%" stop-color="#f6d08a"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#9fd0c7"/>
+      <stop offset="100%" stop-color="#3f8f95"/>
+    </linearGradient>
+    <!-- Landscape prints, 300 x 200 -->
+    <g id="p1">
+      <rect width="300" height="200" rx="6" fill="#f6f3ec"/>
+      <rect x="14" y="14" width="272" height="172" fill="url(#sky)"/>
+      <circle cx="70" cy="58" r="20" fill="#f3c15d"/>
+      <path d="M14 186 L110 92 L160 140 L214 84 L286 150 V186 Z" fill="#2f4a5f"/>
+    </g>
+    <g id="p2">
+      <rect width="300" height="200" rx="6" fill="#f6f3ec"/>
+      <rect x="14" y="14" width="272" height="172" fill="url(#dusk)"/>
+      <circle cx="200" cy="80" r="26" fill="#fff4d6"/>
+      <path d="M14 186 L14 140 Q100 112 170 136 T286 128 V186 Z" fill="#7a3e2b"/>
+    </g>
+    <g id="p3">
+      <rect width="300" height="200" rx="6" fill="#f6f3ec"/>
+      <rect x="14" y="14" width="272" height="172" fill="url(#sea)"/>
+      <path d="M14 120 Q80 104 150 120 T286 116 V186 H14 Z" fill="#2d6f78"/>
+    </g>
+  </defs>
+
+  <rect x="72" y="72" width="880" height="880" rx="150" fill="url(#tile)"/>
+  <rect x="72" y="72" width="880" height="880" rx="150" fill="none" stroke="url(#edge)" stroke-width="10"/>
+
+  <ellipse cx="520" cy="782" rx="330" ry="34" fill="url(#ground)"/>
+
+  <!-- Silver lid leaning behind the box: wall thickness, then the top -->
+  <g transform="rotate(-5 560 360)">
+    <rect x="300" y="184" width="520" height="330" rx="18" fill="url(#silverDark)" transform="translate(-20 18)"/>
+    <rect x="300" y="184" width="520" height="330" rx="18" fill="url(#silver)"/>
+    <rect x="300" y="184" width="520" height="330" rx="18" fill="none" stroke="#6f7881" stroke-opacity="0.6" stroke-width="3"/>
+    <rect x="320" y="192" width="480" height="5" rx="2.5" fill="#ffffff" fill-opacity="0.85"/>
+  </g>
+
+  <!-- Opening of the box -->
+  <path d="M230 480 L330 410 L790 410 L690 480 Z" fill="url(#inside)"/>
+
+  <!-- Prints filed upright, back to front -->
+  <use href="#p3" transform="translate(392 270) rotate(4)"/>
+  <use href="#p2" transform="translate(330 306) rotate(-5)"/>
+  <use href="#p1" transform="translate(286 344) rotate(2)"/>
+
+  <!-- Box walls -->
+  <path d="M690 480 L790 410 L790 710 L690 780 Z" fill="url(#kraftSide)"/>
+  <path d="M230 480 H690 V780 H230 Z" fill="url(#kraft)"/>
+  <path d="M230 480 H690" stroke="#f7c879" stroke-width="5"/>
+  <path d="M690 480 L790 410" stroke="#d99a45" stroke-width="5"/>
+</svg>

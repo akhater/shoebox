@@ -1,0 +1,78 @@
+[package]
+name = "shoebox"
+description = "Shoebox - an offline catalog of every photo, on every disk."
+authors = ["Antoine Khater"]
+edition = "2024"
+version = "26.42.1"
+rust-version = "1.98"
+default-run = "shoebox"
+
+[lib]
+name = "shoebox_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "shoebox"
+path = "src/main.rs"
+
+# Headless tool: scan and inspect the catalog without the window. Used for tests.
+[[bin]]
+name = "shoebox-cli"
+path = "src/bin/shoebox-cli.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = [] }
+tauri-plugin-dialog = "2.7.2"
+tauri-plugin-single-instance = "2.4.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0.104"
+log = "0.4"
+fern = "0.7"
+chrono = "0.4"
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Same RAW reader and revision as Argentum, so both apps read files identically.
+rawler = { git = "https://github.com/akhater/RapidRAW-DngLab.git", rev = "16b9b01068ac1f7a9b5319705a075ef6c7789d7a" }
+image = "0.25.10"
+kamadak-exif = "0.6.1"
+# Decodes a camera's embedded JPEG at 1/2, 1/4, 1/8 size straight from the compressed data.
+jpeg-decoder = { version = "0.3", default-features = false }
+blake3 = "1.8.7"
+rayon = "1.12.0"
+walkdir = "2.5.0"
+# Culling: deleted photos go to the Recycle Bin (only organize.rs may use it).
+trash = "5"
+# AI: same ONNX Runtime binding as Argentum. The runtime DLL is loaded at run
+# time from models (never linked or downloaded at build time).
+ort = { version = "=2.0.0-rc.10", features = ["ndarray", "load-dynamic"] }
+ndarray = "0.16"
+tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Diagnostics_Debug",
+] }
+# Runs the AI models on any DirectX 12 GPU (Intel Arc, AMD, NVIDIA).
+ort = { version = "=2.0.0-rc.10", features = ["directml"] }
+
+[profile.dev]
+opt-level = 1
+debug = 1
+incremental = true
+
+# Image decoding is unusably slow unoptimised, even in a dev build.
+[profile.dev.package."*"]
+opt-level = 3
+debug-assertions = false
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

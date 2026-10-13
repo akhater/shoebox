@@ -1,0 +1,13 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+# The catalog and the models are data, not source.
+data/
+models/
+*.log
+# Where a moved catalog lives, on this PC only.
+shoebox.json
+# Local working files for development sessions, not part of the project.
+# CHANGELOG.md is the public record of changes.
+BACKLOG.md

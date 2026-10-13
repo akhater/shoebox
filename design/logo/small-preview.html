@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shoebox Small Icons</title>
+<style>
+  body { margin: 0; padding: 20px; background: #141518; font: 13px "Segoe UI", sans-serif; color: #8d929c; }
+  h2 { margin: 0 0 6px; font-size: 14px; color: #e6e7ea; font-weight: 600; }
+  .cols { display: grid; grid-template-columns: 330px 1fr; gap: 24px; align-items: start; }
+  .bar { display: flex; align-items: center; gap: 4px; height: 48px; padding: 0 10px; border-radius: 8px; margin-bottom: 8px; }
+  .bar.dark { background: #1c1c1c; }
+  .bar.light { background: #eeeeee; }
+  .btn { width: 40px; height: 40px; border-radius: 4px; display: grid; place-items: center; position: relative; }
+  .dark .btn.on { background: #2d2d2d; }
+  .light .btn.on { background: #fbfbfb; }
+  .btn.on::after { content: ""; position: absolute; bottom: 2px; width: 16px; height: 3px; border-radius: 2px; background: #4cc2ff; }
+  .light .btn.on::after { background: #0067c0; }
+  .title { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border-radius: 8px 8px 0 0; margin-bottom: 8px; font-size: 12px; }
+  .title.dark { background: #202020; color: #fff; }
+  .title.light { background: #f3f3f3; color: #000; }
+  .lbl { font-size: 12px; margin: 10px 0 4px; }
+  .zoom { display: flex; gap: 18px; align-items: flex-end; padding: 14px; background: #202020; border-radius: 8px; }
+  .zoom img { image-rendering: pixelated; display: block; }
+  img { display: block; }
+</style>
+</head>
+<body>
+<div class="cols">
+  <div>
+    <h2>Taskbar at 100% (24 px)</h2>
+    <div class="lbl">Before: the red box, drawn for 24 px</div>
+    <div class="bar dark" id="b1"></div>
+    <div class="bar light" id="b2"></div>
+    <div class="lbl">After: the Sb tile</div>
+    <div class="bar dark" id="a1"></div>
+    <div class="bar light" id="a2"></div>
+    <h2 style="margin-top:16px">Title bar (16 px)</h2>
+    <div class="title dark"><img src="app-icon-16.png" width="16" height="16"> Shoebox</div>
+    <div class="title light"><img src="app-icon-16.png" width="16" height="16"> Shoebox</div>
+  </div>
+  <div>
+    <h2>16, 24, 32 px (8x zoom), then the full size</h2>
+    <div class="zoom">
+      <img src="app-icon-16.png" width="128" height="128">
+      <img src="app-icon-24.png" width="192" height="192">
+      <img src="app-icon-32.png" width="256" height="256">
+      <img src="app-icon.svg" width="256" height="256" style="image-rendering:auto">
+    </div>
+  </div>
+</div>
+<script>
+  const ag = "../../../Argentum/src-tauri/icons/argentum-source.svg";
+  const bar = (icon) => [ag, icon, ag].map((s, k) => `<div class="btn ${k === 1 ? "on" : ""}"><img src="${s}" width="24" height="24"></div>`).join("");
+  b1.innerHTML = b2.innerHTML = bar("drafts/box-24.svg");
+  a1.innerHTML = a2.innerHTML = bar("app-icon-24.png");
+</script>
+</body>
+</html>

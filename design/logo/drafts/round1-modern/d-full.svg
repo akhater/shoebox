@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Shoebox, option D: no tile, the box is the icon. Lid slightly lifted,
+       prints peeking. -->
+  <defs>
+    <linearGradient id="silver" x1="0" y1="0" x2="1" y2="0.3">
+      <stop offset="0%" stop-color="#b4bdc7"/>
+      <stop offset="20%" stop-color="#f2f5f8"/>
+      <stop offset="34%" stop-color="#ffffff"/>
+      <stop offset="56%" stop-color="#a8b2bd"/>
+      <stop offset="78%" stop-color="#e4e9ee"/>
+      <stop offset="100%" stop-color="#9aa4af"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="45%" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.25"/>
+    </linearGradient>
+    <linearGradient id="kraft" x1="0" y1="0" x2="0.25" y2="1">
+      <stop offset="0%" stop-color="#f0b24f"/>
+      <stop offset="60%" stop-color="#e29c38"/>
+      <stop offset="100%" stop-color="#b8772b"/>
+    </linearGradient>
+    <linearGradient id="bodyShade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="8%" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="90%" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.2"/>
+    </linearGradient>
+    <linearGradient id="underR" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.4"/>
+    </linearGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+    <mask id="fadeDown"><rect x="128" y="392" width="768" height="60" fill="url(#fade)"/></mask>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7fb4dc"/>
+      <stop offset="100%" stop-color="#d6e8f2"/>
+    </linearGradient>
+    <linearGradient id="dusk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e9875a"/>
+      <stop offset="100%" stop-color="#f6d08a"/>
+    </linearGradient>
+    <g id="print">
+      <rect width="230" height="280" rx="8" fill="#f6f3ec"/>
+      <rect x="17" y="17" width="196" height="200" fill="url(#sky)"/>
+      <circle cx="70" cy="68" r="20" fill="#f3c15d"/>
+      <path d="M17 217 L86 138 L126 178 L170 128 L213 182 V217 Z" fill="#2f4a5f"/>
+    </g>
+    <g id="print2">
+      <rect width="230" height="280" rx="8" fill="#f6f3ec"/>
+      <rect x="17" y="17" width="196" height="200" fill="url(#dusk)"/>
+      <circle cx="150" cy="92" r="27" fill="#fff4d6"/>
+      <path d="M17 217 L17 170 Q80 144 136 168 T213 160 V217 Z" fill="#7a3e2b"/>
+    </g>
+  </defs>
+
+  <!-- Inside of the back wall -->
+  <rect x="136" y="368" width="752" height="30" fill="#9a5f1f"/>
+
+  <use href="#print2" transform="translate(372 216) rotate(7)"/>
+  <use href="#print" transform="translate(168 196) rotate(-7)"/>
+
+  <!-- Box -->
+  <path d="M128 392 H896 V830 Q896 920 806 920 H218 Q128 920 128 830 Z" fill="url(#kraft)"/>
+  <path d="M128 392 H896 V830 Q896 920 806 920 H218 Q128 920 128 830 Z" fill="url(#bodyShade)"/>
+  <rect x="128" y="392" width="768" height="60" fill="url(#underR)" mask="url(#fadeDown)"/>
+
+  <!-- Silver lid -->
+  <g transform="rotate(9 900 398)">
+    <rect x="76" y="228" width="872" height="178" rx="40" fill="url(#silver)"/>
+    <rect x="76" y="228" width="872" height="178" rx="40" fill="url(#sheen)"/>
+    <rect x="76" y="228" width="872" height="178" rx="40" fill="none" stroke="#6f7881" stroke-opacity="0.6" stroke-width="4"/>
+    <rect x="110" y="238" width="804" height="7" rx="3.5" fill="#ffffff" fill-opacity="0.85"/>
+  </g>
+</svg>
