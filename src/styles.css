@@ -1534,6 +1534,132 @@ button {
   background: var(--hover);
 }
 
+/* People: named and to-name, each folding away */
+.people-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 20px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.people-group-head .count {
+  color: var(--muted);
+  font-weight: 400;
+}
+.people-empty {
+  padding: 4px 20px 10px 42px;
+}
+/* A person's page: the title names them */
+.title-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.title-name svg {
+  opacity: 0.4;
+}
+.title-name:hover svg {
+  opacity: 1;
+}
+.title-name.unnamed {
+  color: var(--muted);
+}
+.name-editor.wide {
+  width: 280px;
+}
+.name-editor.wide .name-suggest {
+  left: 0;
+  transform: none;
+}
+.title-name-input {
+  width: 100%;
+  padding: 3px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+/* Naming: suggestions under the box, "Same person" merges */
+.name-editor {
+  position: relative;
+  width: 100%;
+}
+.name-suggest {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.name-suggest-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.name-suggest-row:hover {
+  background: var(--hover);
+}
+.name-suggest-row img {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.name-suggest-row button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.same-person {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.same-person input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 /* Tags */
 .filter-note {
   margin: 2px 8px 6px;

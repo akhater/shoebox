@@ -4,6 +4,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
   FileType,
+  Pencil,
   FolderPlus,
   FolderX,
   RefreshCw,
@@ -48,7 +49,7 @@ import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
 import { StraysDialog } from "./components/StraysDialog";
 import { TagEditor } from "./components/Tags";
-import { PeopleView } from "./components/PeopleView";
+import { NameEditor, PeopleView } from "./components/PeopleView";
 import { PhotoGrid } from "./components/PhotoGrid";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar, type FolderTarget } from "./components/Sidebar";
@@ -182,6 +183,10 @@ export default function App() {
   const [peopleList, setPeopleList] = useState<Person[]>([]);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [straysFor, setStraysFor] = useState<Person | null>(null);
+  // Naming the person whose page this is, from the title.
+  const [namingTitle, setNamingTitle] = useState(false);
+  const personHere = scope.kind === "person" ? peopleList.find((p) => p.id === scope.id) : undefined;
+  useEffect(() => setNamingTitle(false), [scope]);
   // Photos being tagged from the grid (T, or the Tag button).
   const [tagging, setTagging] = useState<number[] | null>(null);
   // Escape closes it - unless there's text in the tag box, which Escape clears first.
@@ -612,7 +617,36 @@ export default function App() {
                 <ArrowLeft size={18} />
               </button>
             )}
-            <h1>{view === "people" ? "People" : scopeInfo.title}</h1>
+            {view === "photos" && personHere ? (
+              namingTitle ? (
+                <NameEditor
+                  wide
+                  person={personHere}
+                  everyone={peopleList}
+                  onRename={(name) => {
+                    setNamingTitle(false);
+                    if (name.trim() !== (personHere.name ?? "")) run(people.rename(personHere.id, name).then(refresh));
+                  }}
+                  onMerge={(into) => {
+                    setNamingTitle(false);
+                    run(people.merge([personHere.id, into.id], into.id).then(() => setScope({ kind: "person", id: into.id })));
+                  }}
+                  onCancel={() => setNamingTitle(false)}
+                />
+              ) : (
+                <h1>
+                  <button
+                    className={`title-name ${personHere.name ? "" : "unnamed"}`}
+                    onClick={() => setNamingTitle(true)}
+                    title="Name this person"
+                  >
+                    {personHere.name ?? "Unnamed person"} <Pencil size={14} />
+                  </button>
+                </h1>
+              )
+            ) : (
+              <h1>{view === "people" ? "People" : scopeInfo.title}</h1>
+            )}
             <span className="muted">
               {fmtNum(shown.ids.length)} {query ? "matches" : "photos"}
               {view === "photos" && selected.size > 1 && ` · ${fmtNum(selected.size)} selected`}
