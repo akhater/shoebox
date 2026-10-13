@@ -1,5 +1,5 @@
-import { Check, Eye, EyeOff, Merge, Pencil, X } from "lucide-react";
-import { useState } from "react";
+import { Check, ChevronRight, Eye, EyeOff, Merge, Pencil, X } from "lucide-react";
+import { useEffect, useState } from "react";
 import { faceUrl, fmtNum, people as peopleApi, type Person } from "../api";
 
 interface Props {
@@ -9,19 +9,46 @@ interface Props {
   onError: (e: string) => void;
 }
 
-/** Everyone the face recogniser found: open, name, merge, ignore strangers. */
+type Group = "named" | "toName" | "ignored";
+
+/** Which groups are folded, remembered between sessions (convenience only).
+ *  Ignored starts folded. */
+function useFolded() {
+  const [folded, setFolded] = useState<Group[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("shoebox.people.folded") ?? '["ignored"]') as Group[];
+    } catch {
+      return ["ignored"];
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("shoebox.people.folded", JSON.stringify(folded));
+    } catch {
+      /* per-viewer convenience only */
+    }
+  }, [folded]);
+  const toggle = (g: Group) => setFolded((f) => (f.includes(g) ? f.filter((x) => x !== g) : [...f, g]));
+  return [folded, toggle] as const;
+}
+
+/** Everyone the face recogniser found: open, name, merge, ignore strangers.
+ *  Named people and people still to name are two groups that fold away. */
 export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
   const [selected, setSelected] = useState<number[]>([]);
   const [editing, setEditing] = useState<number | null>(null);
   const [showOnce, setShowOnce] = useState(false);
-  const [showIgnored, setShowIgnored] = useState(false);
+  const [folded, fold] = useFolded();
 
   const active = people.filter((p) => !p.ignored);
   const ignored = people.filter((p) => p.ignored);
   // People seen in one photo only are mostly passers-by: hidden unless asked.
   const seenOnce = active.filter((p) => !p.name && p.photos < 2);
-  const shown = showIgnored ? ignored : showOnce ? active : active.filter((p) => p.name || p.photos >= 2);
+  const named = active.filter((p) => p.name);
+  const toName = active.filter((p) => !p.name && (showOnce || p.photos >= 2));
   const selecting = selected.length > 0;
+  // With only ignored people selected, the bar offers "Show again" instead of "Ignore".
+  const allIgnored = selecting && selected.every((id) => people.find((p) => p.id === id)?.ignored);
 
   const toggle = (id: number) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
@@ -38,6 +65,12 @@ export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
   const rename = (p: Person, name: string) => {
     setEditing(null);
     if (name.trim() !== (p.name ?? "")) act(() => peopleApi.rename(p.id, name));
+  };
+
+  /** "Same person": this one joins `into`, which keeps its name. */
+  const mergeInto = (p: Person, into: Person) => {
+    setEditing(null);
+    act(() => peopleApi.merge([p.id, into.id], into.id));
   };
 
   const merge = () => {
@@ -58,6 +91,67 @@ export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
     );
   }
 
+  const card = (p: Person) => {
+    const isSel = selected.includes(p.id);
+    return (
+      <div key={p.id} className={`person ${isSel ? "selected" : ""} ${p.ignored ? "ignored" : ""}`}>
+        <button
+          className="person-face"
+          onClick={() => (selecting ? toggle(p.id) : onOpen(p))}
+          title={selecting ? "Select" : "Show their photos"}
+        >
+          <img src={faceUrl(p.cover)} alt="" loading="lazy" draggable={false} />
+          <span
+            className={`tick ${isSel ? "on" : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggle(p.id);
+            }}
+            title="Select"
+          >
+            <Check size={13} />
+          </span>
+          <span
+            className="eye"
+            onClick={(e) => {
+              e.stopPropagation();
+              act(() => peopleApi.ignore([p.id], !p.ignored));
+            }}
+            title={p.ignored ? "Show again" : "Ignore (a stranger)"}
+          >
+            {p.ignored ? <Eye size={13} /> : <EyeOff size={13} />}
+          </span>
+        </button>
+        {editing === p.id ? (
+          <NameEditor
+            person={p}
+            everyone={people}
+            onRename={(name) => rename(p, name)}
+            onMerge={(into) => mergeInto(p, into)}
+            onCancel={() => setEditing(null)}
+          />
+        ) : (
+          <button className={`person-name ${p.name ? "" : "unnamed"}`} onClick={() => setEditing(p.id)}>
+            {p.name ?? "Add a name"} <Pencil size={11} />
+          </button>
+        )}
+        <span className="muted small">{fmtNum(p.photos)} photos</span>
+      </div>
+    );
+  };
+
+  const group = (g: Group, title: string, list: Person[], empty: string) => (
+    <section className="people-group">
+      <button className="people-group-head" onClick={() => fold(g)} aria-expanded={!folded.includes(g)}>
+        <ChevronRight size={14} className={`chev ${folded.includes(g) ? "" : "open"}`} />
+        <span>{title}</span>
+        <span className="count">{fmtNum(list.length)}</span>
+      </button>
+      {!folded.includes(g) &&
+        (list.length ? <div className="people-grid">{list.map(card)}</div> : <p className="muted small people-empty">{empty}</p>)}
+    </section>
+  );
+
   return (
     <div className="people-wrap">
       <div className="people-bar">
@@ -66,25 +160,21 @@ export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
             <span>
               <b>{selected.length}</b> selected
             </span>
-            {!showIgnored && (
-              <button className="btn small primary" disabled={selected.length < 2} onClick={merge}>
-                <Merge size={14} /> Merge into one person
-              </button>
-            )}
-            <button className="btn small" onClick={() => act(() => peopleApi.ignore(selected, !showIgnored))}>
-              {showIgnored ? <Eye size={14} /> : <EyeOff size={14} />} {showIgnored ? "Show again" : "Ignore"}
+            <button className="btn small primary" disabled={selected.length < 2} onClick={merge}>
+              <Merge size={14} /> Merge into one person
+            </button>
+            <button className="btn small" onClick={() => act(() => peopleApi.ignore(selected, !allIgnored))}>
+              {allIgnored ? <Eye size={14} /> : <EyeOff size={14} />} {allIgnored ? "Show again" : "Ignore"}
             </button>
             <button className="btn small ghost" onClick={() => setSelected([])}>
               <X size={14} /> Cancel
             </button>
           </>
-        ) : showIgnored ? (
-          <span className="muted">Ignored people: hidden from People, their new faces still join them.</span>
         ) : (
           <span className="muted">Click a face for their photos · click the name to rename · tick to merge or ignore</span>
         )}
         <span className="grow" />
-        {!showIgnored && seenOnce.length > 0 && (
+        {seenOnce.length > 0 && (
           <>
             <button className="btn small ghost" onClick={() => setShowOnce(!showOnce)}>
               {showOnce ? "Hide" : "Show"} {fmtNum(seenOnce.length)} seen only once
@@ -98,81 +188,90 @@ export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
             </button>
           </>
         )}
-        {!showIgnored && (
-          <button
-            className="btn small ghost"
-            title="Sort again every face that isn't named, ignored or placed by hand"
-            onClick={() => act(() => peopleApi.regroup().then(() => {}))}
-          >
-            Regroup faces
-          </button>
-        )}
-        {(ignored.length > 0 || showIgnored) && (
-          <button
-            className="btn small ghost"
-            onClick={() => {
-              setSelected([]);
-              setShowIgnored(!showIgnored);
-            }}
-          >
-            {showIgnored ? "Back to people" : `Ignored (${fmtNum(ignored.length)})`}
-          </button>
-        )}
+        <button
+          className="btn small ghost"
+          title="Sort again every face that isn't named, ignored or placed by hand"
+          onClick={() => act(() => peopleApi.regroup().then(() => {}))}
+        >
+          Regroup faces
+        </button>
       </div>
-      <div className="people-grid">
-        {shown.map((p) => {
-          const isSel = selected.includes(p.id);
-          return (
-            <div key={p.id} className={`person ${isSel ? "selected" : ""} ${p.ignored ? "ignored" : ""}`}>
-              <button
-                className="person-face"
-                onClick={() => (selecting ? toggle(p.id) : onOpen(p))}
-                title={selecting ? "Select" : "Show their photos"}
-              >
-                <img src={faceUrl(p.cover)} alt="" loading="lazy" draggable={false} />
-                <span
-                  className={`tick ${isSel ? "on" : ""}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggle(p.id);
-                  }}
-                  title="Select"
-                >
-                  <Check size={13} />
-                </span>
-                <span
-                  className="eye"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    act(() => peopleApi.ignore([p.id], !p.ignored));
-                  }}
-                  title={p.ignored ? "Show again" : "Ignore (a stranger)"}
-                >
-                  {p.ignored ? <Eye size={13} /> : <EyeOff size={13} />}
-                </span>
+      {group("named", "Named", named, "Nobody named yet. Click “Add a name” under a face.")}
+      {group("toName", "To name", toName, "Everyone found is named.")}
+      {group("ignored", "Ignored", ignored, "Nobody ignored. Strangers you ignore go here; their new faces still join them.")}
+    </div>
+  );
+}
+
+/** Typing a name: people with a matching name are suggested (face, name,
+ *  photos). Clicking one takes its name - a different person can share a
+ *  name; ticking "Same person" merges into them. Enter keeps what's typed. */
+export function NameEditor({
+  person,
+  everyone,
+  onRename,
+  onMerge,
+  onCancel,
+  wide,
+}: {
+  person: Person;
+  everyone: Person[];
+  onRename: (name: string) => void;
+  onMerge: (into: Person) => void;
+  onCancel: () => void;
+  /** In a page title: bigger box, suggestions aligned left. */
+  wide?: boolean;
+}) {
+  const [text, setText] = useState(person.name ?? "");
+  const [done, setDone] = useState(false);
+  const q = text.trim().toLowerCase();
+  const matches = q
+    ? everyone
+        .filter((p) => p.id !== person.id && p.name && !p.ignored && p.name.toLowerCase().includes(q))
+        .sort((a, b) => Number(!a.name!.toLowerCase().startsWith(q)) - Number(!b.name!.toLowerCase().startsWith(q)) || b.photos - a.photos)
+        .slice(0, 6)
+    : [];
+  const finish = (f: () => void) => {
+    if (done) return;
+    setDone(true);
+    f();
+  };
+
+  return (
+    <div className={`name-editor ${wide ? "wide" : ""}`}>
+      <input
+        className={wide ? "title-name-input" : "person-name-input"}
+        autoFocus
+        value={text}
+        placeholder="Name"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => finish(() => onRename(text))}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") finish(() => onRename(text));
+          else if (e.key === "Escape") finish(onCancel);
+          else if (e.key === "Tab" && matches.length && q) {
+            e.preventDefault();
+            setText(matches[0].name!);
+          }
+        }}
+      />
+      {matches.length > 0 && (
+        <div className="name-suggest" onMouseDown={(e) => e.preventDefault()}>
+          {matches.map((m) => (
+            <div key={m.id} className="name-suggest-row">
+              <img src={faceUrl(m.cover)} alt="" />
+              <button className="grow" onClick={() => setText(m.name!)} title="Use this name (a different person)">
+                <span className="ellipsis">{m.name}</span>
+                <span className="muted small">{fmtNum(m.photos)} photos</span>
               </button>
-              {editing === p.id ? (
-                <input
-                  className="person-name-input"
-                  autoFocus
-                  defaultValue={p.name ?? ""}
-                  placeholder="Name"
-                  onBlur={(e) => rename(p, e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                    if (e.key === "Escape") setEditing(null);
-                  }}
-                />
-              ) : (
-                <button className={`person-name ${p.name ? "" : "unnamed"}`} onClick={() => setEditing(p.id)}>
-                  {p.name ?? "Add a name"} <Pencil size={11} />
-                </button>
-              )}
-              <span className="muted small">{fmtNum(p.photos)} photos</span>
+              <label className="same-person" title={`Same person: merge into ${m.name}`}>
+                <input type="checkbox" onChange={() => finish(() => onMerge(m))} />
+                Same person
+              </label>
             </div>
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
