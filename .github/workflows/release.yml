@@ -1,8 +1,15 @@
 name: Release
 
 # Builds happen only when a release is published (Argentum's logic), never on
-# every change. Windows today; macOS and Linux join when they have their own
-# disk recognition and HEIC reading (roadmap 6).
+# every change: Windows, macOS and Linux, on Intel/AMD and on ARM, each
+# attached to the release. Run it by hand from the Actions tab when a change
+# touches the build itself: the same builds, kept on the run, no release
+# touched.
+#
+# Each download is the Shoebox folder: the app and shoebox-cli, no installer,
+# because the catalog lives next to the app (never in AppData). macOS and
+# Linux builds open and browse, but can't add disks yet: disk recognition
+# there is roadmap 6.
 #
 # The AI models are not in the download. Until the models screen (download
 # from the original publishers, SHA-256 checked) lands, they go in `models/`
@@ -10,15 +17,50 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows_x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: windows_arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - name: macos_arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+          - name: macos_x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          # The oldest supported Ubuntu, so the builds run on newer ones too.
+          - name: linux_x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux_arm64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    env:
+      NAME: Shoebox_${{ github.event.release.tag_name || format('dev{0}', github.run_number) }}_${{ matrix.name }}
+      BIN: src-tauri/target/${{ matrix.target }}/release
     steps:
       - uses: actions/checkout@v4
+
+      # The window is WebKitGTK on Linux.
+      - name: Install the Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev build-essential pkg-config
 
       - uses: actions/setup-node@v4
         with:
@@ -29,22 +71,45 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          target: ${{ matrix.target }}
           rustflags: ''
           cache-workspaces: src-tauri
 
       - name: Build
-        run: npx tauri build --no-bundle
+        run: npx tauri build --no-bundle --target ${{ matrix.target }}
 
-      - name: Package
+      # Same features as the window's build, so nothing is compiled twice.
+      - name: Build shoebox-cli
+        working-directory: src-tauri
+        run: cargo build --release --target ${{ matrix.target }} --bin shoebox-cli --features tauri/custom-protocol
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tag = "${{ github.event.release.tag_name }}"
-          New-Item -ItemType Directory -Force out | Out-Null
-          Copy-Item src-tauri/target/release/shoebox.exe, src-tauri/target/release/shoebox-cli.exe out/
-          Compress-Archive -Path out/* -DestinationPath "Shoebox_${tag}_windows_x64.zip"
+          New-Item -ItemType Directory -Force out/Shoebox | Out-Null
+          Copy-Item "$env:BIN/shoebox.exe", "$env:BIN/shoebox-cli.exe" out/Shoebox/
+          Compress-Archive -Path out/Shoebox -DestinationPath "$env:NAME.zip"
+
+      - name: Package (macOS, Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p out/Shoebox
+          cp "$BIN/shoebox" "$BIN/shoebox-cli" out/Shoebox/
+          tar -czf "$NAME.tar.gz" -C out Shoebox
 
       - name: Attach to the release
+        if: github.event_name == 'release'
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.release.tag_name }}" (Get-ChildItem Shoebox_*.zip).FullName --clobber
-        shell: pwsh
+        run: gh release upload "${{ github.event.release.tag_name }}" "$NAME".* --clobber
+
+      - name: Keep on the run
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.NAME }}.*
+          retention-days: 7
