@@ -283,17 +283,11 @@ pub struct Person {
     pub cover: i64,
     /// A stranger the user chose to hide.
     pub ignored: bool,
-    /// Every face of theirs was found since the visit to People before this one.
+    /// None of their faces has been seen yet: someone new.
     pub is_new: bool,
-    /// Photos they were found in since then.
+    /// Photos they were found in that the user hasn't seen on their page yet.
     pub new_photos: i64,
 }
-
-/// Faces after this id were found since People was last opened.
-const SEEN_UPTO: &str = "people_seen_upto";
-/// What "new" means during the current visit: faces after this id. Kept for the
-/// whole visit, so naming or merging doesn't clear the badges under the user's eyes.
-const NEW_AFTER: &str = "people_new_after";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -337,11 +331,6 @@ impl FaceIndex {
             cat.db()
                 .execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('face_grouping', ?1)", [GROUPING_RULES])?;
         }
-        // Faces found from now on are new at the next visit to People, even the first one.
-        cat.db().execute(
-            "INSERT OR IGNORE INTO meta (key, value) SELECT ?1, COALESCE(MAX(id), 0) FROM faces",
-            [SEEN_UPTO],
-        )?;
         Ok(index)
     }
 
@@ -618,18 +607,16 @@ impl FaceIndex {
     /// Everyone, named people first, then by how many photos they're in.
     pub fn people(&self, cat: &Catalog) -> Result<Vec<Person>> {
         let db = cat.db();
-        // Never opened People yet: nothing is new.
-        let new_after = meta_id(&db, NEW_AFTER)?.unwrap_or(i64::MAX);
         let people = db
             .prepare(
                 "SELECT p.id, p.name, COUNT(f.id), COUNT(DISTINCT f.photo_id),
                         (SELECT f2.id FROM faces f2 WHERE f2.person_id = p.id ORDER BY f2.score DESC LIMIT 1),
-                        p.ignored, MIN(f.id) > ?1, COUNT(DISTINCT CASE WHEN f.id > ?1 THEN f.photo_id END)
+                        p.ignored, MAX(f.seen) = 0, COUNT(DISTINCT CASE WHEN f.seen = 0 THEN f.photo_id END)
                    FROM people p JOIN faces f ON f.person_id = p.id
                   GROUP BY p.id
                   ORDER BY p.ignored, p.name IS NULL, COUNT(DISTINCT f.photo_id) DESC, p.id",
             )?
-            .query_map([new_after], |r| {
+            .query_map([], |r| {
                 Ok(Person {
                     id: r.get(0)?,
                     name: r.get(1)?,
@@ -645,15 +632,22 @@ impl FaceIndex {
         Ok(people)
     }
 
-    /// The user opens People: what was found since their last visit is new for this
-    /// visit, and the next visit starts counting from now.
-    pub fn visit_people(&self, cat: &Catalog) -> Result<()> {
-        let db = cat.db();
-        let now: i64 = db.query_row("SELECT COALESCE(MAX(id), 0) FROM faces", [], |r| r.get(0))?;
-        let seen = meta_id(&db, SEEN_UPTO)?.unwrap_or(now);
-        db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)", params![NEW_AFTER, seen.to_string()])?;
-        db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)", params![SEEN_UPTO, now.to_string()])?;
-        Ok(())
+    /// The user has seen these people's photos (they left their page): no longer new.
+    /// Returns how many faces that was.
+    pub fn mark_read(&self, cat: &Catalog, person_ids: &[i64]) -> Result<usize> {
+        let mut db = cat.db();
+        let tx = db.transaction()?;
+        let mut n = 0;
+        for id in person_ids {
+            n += tx.execute("UPDATE faces SET seen = 1 WHERE person_id = ?1 AND seen = 0", [id])?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// "Mark all as read" in People: every face found so far has been seen.
+    pub fn mark_all_read(&self, cat: &Catalog) -> Result<usize> {
+        Ok(cat.db().execute("UPDATE faces SET seen = 1 WHERE seen = 0", [])?)
     }
 
     pub fn rename(&self, cat: &Catalog, person_id: i64, name: &str) -> Result<()> {
@@ -838,11 +832,6 @@ impl FaceIndex {
 }
 
 /// A square 160 px picture of the face, with some margin.
-fn meta_id(db: &Connection, key: &str) -> rusqlite::Result<Option<i64>> {
-    let v: Option<String> = db.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional()?;
-    Ok(v.and_then(|v| v.parse().ok()))
-}
-
 fn face_thumb(img: &DynamicImage, bbox: &[f32; 4]) -> Result<Vec<u8>> {
     let (w, h) = img.dimensions();
     let (cx, cy) = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0);

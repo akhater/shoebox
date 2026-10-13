@@ -17,6 +17,10 @@
 //!                               "types":["cr3"],"status":["online","offline","missing"],
 //!                               "people":[42],"tags":[3,7] (photos with all of these tags)}
 //!
+//! People found since the user last looked at them show "(new)" / "(+N new photos)" in
+//! `shoebox-cli faces`; the window marks a person read when the user leaves their page:
+//!   shoebox-cli people-read <person-id>... | --all
+//!
 //! Tags (catalog only, never written into photos):
 //!   shoebox-cli tags [photo-id...]              every tag, or those on some photos
 //!   shoebox-cli tag "<name>" <photo-id>...      add (made if new)
@@ -157,6 +161,19 @@ fn main() -> anyhow::Result<()> {
                     if p.ignored { " (ignored)" } else { "" }
                 );
             }
+        }
+        Some("people-read") => {
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            let n = if args.get(1).is_some_and(|a| a == "--all") {
+                faces.mark_all_read(&cat)?
+            } else {
+                let ids = args[1..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+                if ids.is_empty() {
+                    anyhow::bail!("people-read <person-id>... | --all");
+                }
+                faces.mark_read(&cat, &ids)?
+            };
+            println!("{}", serde_json::json!({ "facesRead": n }));
         }
         Some("faces-reset") => {
             // Test catalogs only: forget every face, person and name.

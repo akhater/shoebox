@@ -318,6 +318,11 @@ export function PhotoGrid(p: Props) {
                         <TriangleAlert size={13} />
                       </span>
                     )}
+                    {list.fresh[t.index] === 1 && (
+                      <span className="new-badge" title="New: found since you last looked at this person">
+                        New
+                      </span>
+                    )}
                     {marked && (
                       <span className="badge marked">
                         <Trash2 size={13} />

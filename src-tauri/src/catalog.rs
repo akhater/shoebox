@@ -380,11 +380,17 @@ impl Catalog {
             Sort::Name => format!("{name}, p.id"),
             Sort::Added => "p.added_at DESC, p.id DESC".to_string(),
         };
+        let fresh = match scope {
+            Scope::Person { .. } => {
+                "EXISTS (SELECT 1 FROM faces fx WHERE fx.photo_id = p.id AND fx.person_id = ?1 AND fx.seen = 0)"
+            }
+            _ => "0",
+        };
         let sql = format!(
             "WITH st AS ({}) SELECT p.id, COALESCE(p.taken_ts, 0), COALESCE(st.s, 0),
                     COALESCE(p.thumb_w, 0), COALESCE(p.thumb_h, 0), p.preview_rev, p.preview_state, p.marked,
                     COALESCE((SELECT {EXT_SQL} FROM files f WHERE f.photo_id = p.id ORDER BY f.state LIMIT 1), ''),
-                    p.kind = 'raw'
+                    p.kind = 'raw', {fresh}
                FROM photos p LEFT JOIN st ON st.pid = p.id
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
               ORDER BY {order}",
@@ -407,6 +413,7 @@ impl Catalog {
             out.marked.push(r.get(7)?);
             out.ext.push(r.get(8)?);
             out.raw.push(r.get(9)?);
+            out.fresh.push(r.get(10)?);
         }
         Ok(out)
     }
@@ -581,6 +588,7 @@ impl Catalog {
                 out.marked.push(all.marked[i]);
                 out.ext.push(all.ext[i].clone());
                 out.raw.push(all.raw[i]);
+                out.fresh.push(all.fresh[i]);
             }
         }
         Ok(out)
@@ -1363,6 +1371,8 @@ pub struct PhotoList {
     pub ext: Vec<String>,
     /// 1 = a RAW file.
     pub raw: Vec<i64>,
+    /// On a person's page: 1 = they were found in it since the user last looked at them.
+    pub fresh: Vec<i64>,
 }
 
 /// Photos per day, for the calendar.
