@@ -1645,19 +1645,45 @@ button {
   text-align: left;
   cursor: pointer;
 }
-.same-person {
+/* The whole "[ ] Same person" area is one button (not just its box). */
+.name-suggest-row .same-person {
   display: inline-flex;
+  flex-direction: row;
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  align-self: stretch;
+  padding: 0 6px;
+  border-radius: 5px;
   color: var(--muted);
   font-size: 11px;
-  cursor: pointer;
   white-space: nowrap;
 }
-.same-person input {
-  margin: 0;
-  accent-color: var(--accent);
+.name-suggest-row .same-person:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+.name-suggest-row .same-person:hover svg {
+  color: var(--accent);
+}
+
+/* People found since the last visit to People. */
+.new-badge {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  pointer-events: none;
+}
+.people-group-head .new-count {
+  color: var(--accent);
+  font-size: 12px;
 }
 
 /* Tags */

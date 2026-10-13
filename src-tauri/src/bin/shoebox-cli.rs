@@ -127,8 +127,13 @@ fn main() -> anyhow::Result<()> {
             let total: i64 = people.iter().map(|p| p.faces).sum();
             println!("\n{total} faces, {} people, {:.1} s", people.len(), t.elapsed().as_secs_f64());
             for p in people.iter().take(15) {
+                let new = match (p.is_new, p.new_photos) {
+                    (true, _) => " (new)".to_string(),
+                    (false, 0) => String::new(),
+                    (false, n) => format!(" (+{n} new photos)"),
+                };
                 println!(
-                    "  person {:>4}: {:>3} faces in {:>3} photos  {:?}{}",
+                    "  person {:>4}: {:>3} faces in {:>3} photos  {:?}{}{new}",
                     p.id,
                     p.faces,
                     p.photos,

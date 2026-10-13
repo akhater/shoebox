@@ -183,6 +183,12 @@ pub fn people(state: State<'_, AppState>) -> Res<Vec<crate::faces::Person>> {
     state.faces.people(&state.cat).map_err(err)
 }
 
+/// People is opened: what was found since the last time shows as new.
+#[tauri::command]
+pub fn visit_people(state: State<'_, AppState>) -> Res<()> {
+    state.faces.visit_people(&state.cat).map_err(err)
+}
+
 #[tauri::command]
 pub fn rename_person(state: State<'_, AppState>, person_id: i64, name: String) -> Res<()> {
     state.faces.rename(&state.cat, person_id, &name).map_err(err)

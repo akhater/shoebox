@@ -19,7 +19,7 @@ use anyhow::{Result, anyhow, bail};
 use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -55,8 +55,11 @@ pub struct Report {
     pub restored: u64,
     pub missing: u64,
     pub photos_added: u64,
+    /// Files whose photo was already in the catalog before this scan (moved or copied).
     pub linked: u64,
-    /// Known photos read again (regenerated previews, edited files).
+    /// More copies of a photo this scan read: the same file twice in the folder.
+    pub duplicates: u64,
+    /// Known photos read again (regenerated previews, edited files, retried failures).
     pub reread: u64,
     pub errors: u64,
     pub cancelled: bool,
@@ -187,45 +190,65 @@ pub fn scan_root(
     let read = AtomicU64::new(0);
     let added = AtomicU64::new(0);
     let linked = AtomicU64::new(0);
+    let duplicates = AtomicU64::new(0);
     let reread = AtomicU64::new(0);
     let errors = AtomicU64::new(0);
     let emit_gate = Mutex::new(Instant::now());
+    let reading = Mutex::new(Reading::default());
+    // Copies of a photo another worker was reading at that moment.
+    let later: Mutex<Vec<(&Job, String)>> = Mutex::new(Vec::new());
+    let tally = |job: &Job, outcome: Result<Outcome>| {
+        let counter = match outcome {
+            Ok(Outcome::Linked) => &linked,
+            Ok(Outcome::Duplicate) => &duplicates,
+            Ok(Outcome::Added) => &added,
+            Ok(Outcome::Updated) => &reread,
+            // Busy is set aside before it gets here; after the parallel pass nobody is reading.
+            Ok(Outcome::Unreadable | Outcome::Busy) | Err(_) => &errors,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        let n = read.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut gate = emit_gate.lock().unwrap();
+        if gate.elapsed() > Duration::from_millis(250) {
+            *gate = Instant::now();
+            let mut p = progress.clone();
+            p.read = n;
+            p.current = job.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            on_progress(&p);
+        }
+    };
     let pool = rayon::ThreadPoolBuilder::new().num_threads(settings.workers).build()?;
     pool.install(|| {
         jobs.par_iter().for_each(|job| {
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
-            match ingest(cat, job, &settings) {
-                Ok(Outcome::Linked) => {
-                    linked.fetch_add(1, Ordering::Relaxed);
+            let fp = match fingerprint(&job.path, job.size) {
+                Ok(fp) => fp,
+                Err(e) => {
+                    set_file_error(cat, job.file_id, &e.to_string());
+                    return tally(job, Err(e.into()));
                 }
-                Ok(Outcome::Added) => {
-                    added.fetch_add(1, Ordering::Relaxed);
-                }
-                Ok(Outcome::Updated) => {
-                    reread.fetch_add(1, Ordering::Relaxed);
-                }
-                Ok(Outcome::Unreadable) | Err(_) => {
-                    errors.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            let n = read.fetch_add(1, Ordering::Relaxed) + 1;
-            let mut gate = emit_gate.lock().unwrap();
-            if gate.elapsed() > Duration::from_millis(250) {
-                *gate = Instant::now();
-                let mut p = progress.clone();
-                p.read = n;
-                p.current = job.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                on_progress(&p);
+            };
+            match ingest(cat, job, &fp, &settings, &reading) {
+                Ok(Outcome::Busy) => later.lock().unwrap().push((job, fp)),
+                outcome => tally(job, outcome),
             }
         })
     });
+    // Their photo has been read by now: they are only linked to it.
+    for (job, fp) in later.into_inner().unwrap() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        tally(job, ingest(cat, job, &fp, &settings, &reading));
+    }
     if cancel.load(Ordering::Relaxed) {
         report.cancelled = true;
     }
     report.photos_added = added.into_inner();
     report.linked = linked.into_inner();
+    report.duplicates = duplicates.into_inner();
     report.reread = reread.into_inner();
     report.errors = errors.into_inner();
 
@@ -320,8 +343,8 @@ fn record(
                     report.restored += 1;
                 }
                 report.unchanged += 1;
-                // Interrupted last time: finish the preview.
-                if regenerate || preview == Some(PREVIEW_PENDING) {
+                // Interrupted last time: finish the preview. Failed last time: try again.
+                if regenerate || preview == Some(PREVIEW_PENDING) || preview == Some(PREVIEW_FAILED) {
                     jobs.push(job(id, Some(pid), regenerate));
                 }
             }
@@ -363,10 +386,56 @@ fn mark_missing(db: &Connection, volume_id: i64, root_rel: &str, scan_id: i64, e
 }
 
 enum Outcome {
+    /// Its photo was already in the catalog.
     Linked,
+    /// Another copy of a photo this scan read.
+    Duplicate,
     Added,
     Updated,
     Unreadable,
+    /// Another worker is reading the same content right now: try again after
+    /// the parallel pass, when it will only be linked.
+    Busy,
+}
+
+/// The contents being read right now, and those already read in this scan,
+/// by fingerprint. Two copies of one photo are never read at the same time
+/// (both would write its preview at once), nor twice in one scan.
+#[derive(Default)]
+struct Reading {
+    now: HashSet<String>,
+    done: HashSet<String>,
+}
+
+enum Claim<'a> {
+    /// This worker reads it; the claim ends when the guard is dropped.
+    Mine(ReadingGuard<'a>),
+    Busy,
+    Done,
+}
+
+struct ReadingGuard<'a> {
+    reading: &'a Mutex<Reading>,
+    fp: String,
+}
+
+impl Drop for ReadingGuard<'_> {
+    fn drop(&mut self) {
+        let mut r = self.reading.lock().unwrap_or_else(|e| e.into_inner());
+        r.now.remove(&self.fp);
+        r.done.insert(std::mem::take(&mut self.fp));
+    }
+}
+
+fn claim<'a>(reading: &'a Mutex<Reading>, fp: &str) -> Claim<'a> {
+    let mut r = reading.lock().unwrap();
+    if r.done.contains(fp) {
+        Claim::Done
+    } else if !r.now.insert(fp.to_string()) {
+        Claim::Busy
+    } else {
+        Claim::Mine(ReadingGuard { reading, fp: fp.to_string() })
+    }
 }
 
 /// Size + BLAKE3 of the first and last 256 KB. Camera files carry their capture
@@ -423,26 +492,36 @@ fn link(db: &Connection, file_id: i64, photo_id: i64) -> Result<()> {
     Ok(())
 }
 
-fn ingest(cat: &Catalog, job: &Job, s: &Settings) -> Result<Outcome> {
+fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Reading>) -> Result<Outcome> {
     let (preview_size, thumb_h) = (s.preview_size, s.thumb_height);
-    let fp = match fingerprint(&job.path, job.size) {
-        Ok(f) => f,
-        Err(e) => {
-            set_file_error(cat, job.file_id, &e.to_string());
-            return Err(e.into());
-        }
+    let fp = fp.to_string();
+    let photo_of = |db: &Connection| -> rusqlite::Result<Option<(i64, i64)>> {
+        db.query_row("SELECT id, preview_state FROM photos WHERE fingerprint = ?1", [&fp], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()
     };
 
-    // Known content: a move, a copy, or a file that didn't change.
+    let _claim = match claim(reading, &fp) {
+        Claim::Busy => return Ok(Outcome::Busy),
+        // Read already in this scan (even if that failed): the same file again.
+        Claim::Done => {
+            let db = cat.db();
+            if let Some((pid, _)) = photo_of(&db)? {
+                link(&db, job.file_id, pid)?;
+                return Ok(Outcome::Duplicate);
+            }
+            None
+        }
+        Claim::Mine(guard) => Some(guard),
+    };
+
+    // Known content: a move, a copy, or a file that didn't change. A photo
+    // whose preview isn't done (interrupted, or failed last time) is read again.
     {
         let db = cat.db();
-        let known: Option<(i64, i64)> = db
-            .query_row("SELECT id, preview_state FROM photos WHERE fingerprint = ?1", [&fp], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .optional()?;
-        if let Some((pid, state)) = known
-            && state != PREVIEW_PENDING
+        if let Some((pid, state)) = photo_of(&db)?
+            && state == PREVIEW_OK
             && !job.force
         {
             link(&db, job.file_id, pid)?;
@@ -475,7 +554,7 @@ fn ingest(cat: &Catalog, job: &Job, s: &Settings) -> Result<Outcome> {
                     |r| r.get(0),
                 )
             };
-            // Same content added by another worker meanwhile (duplicate files).
+            // Known content read again (preview unfinished or failed, or regenerating).
             let same_fp: Option<i64> =
                 tx.query_row("SELECT id FROM photos WHERE fingerprint = ?1", [&fp], |r| r.get(0)).optional()?;
             // Same path, new content, and no other copy of the old content: edited in place.

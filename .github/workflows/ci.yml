@@ -50,7 +50,7 @@ jobs:
 
       # Includes the guards behind Shoebox's promises: no code outside paths.rs
       # and organize.rs can write a file, and nothing writes outside its own
-      # folders.
+      # folders. Tests in tests/ (they write sample photos) run too.
       - name: cargo test
         working-directory: src-tauri
-        run: cargo test --lib
+        run: cargo test --lib --test '*'

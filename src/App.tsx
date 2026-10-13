@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
+  Eye,
+  EyeOff,
   FileType,
   Pencil,
   FolderPlus,
@@ -141,14 +143,21 @@ function loadSort(): Sort {
 
 function summarize(name: string, r: Report) {
   if (r.cancelled) return `${name}: stopped.`;
-  const parts = [
+  // Every file read is counted once, so the parts add up to the total.
+  const read = [
     r.photosAdded && `${fmtNum(r.photosAdded)} new photos`,
-    r.linked && `${fmtNum(r.linked)} recognised (moved or copied)`,
-    r.restored && `${fmtNum(r.restored)} back where they were`,
-    r.missing && `${fmtNum(r.missing)} not found`,
+    r.duplicates && `${fmtNum(r.duplicates)} the same photos again under other names`,
+    r.linked && `${fmtNum(r.linked)} already in the catalog (copies or moves)`,
+    r.reread && `${fmtNum(r.reread)} read again`,
     r.errors && `${fmtNum(r.errors)} couldn't be read`,
   ].filter(Boolean);
-  return `${name}: ${parts.length ? parts.join(", ") : "nothing changed"} · ${Math.max(1, Math.round(r.seconds))} s`;
+  const total = r.photosAdded + r.duplicates + r.linked + r.reread + r.errors;
+  const parts = [
+    read.length && `${fmtNum(total)} ${total === 1 ? "file" : "files"}: ${read.join(", ")}`,
+    r.restored && `${fmtNum(r.restored)} back where they were`,
+    r.missing && `${fmtNum(r.missing)} not found`,
+  ].filter(Boolean);
+  return `${name}: ${parts.length ? parts.join(" · ") : "nothing changed"} · ${Math.max(1, Math.round(r.seconds))} s`;
 }
 
 export default function App() {
@@ -261,6 +270,8 @@ export default function App() {
   }, []);
 
   const timer = useRef<number | undefined>(undefined);
+  // When People was last reloaded while faces are being found.
+  const facesShown = useRef(0);
   const refreshSoon = useCallback(() => {
     if (timer.current) return;
     timer.current = window.setTimeout(() => {
@@ -301,6 +312,11 @@ export default function App() {
       listen<AiProgress>("ai-progress", (e) => {
         if (e.payload.error) setMessage(modelHint(`Word search: ${e.payload.error}`));
         setAiProgress(e.payload.finished ? null : e.payload);
+        // People fills in while faces are found, and is complete when they're done.
+        if (e.payload.finished || (e.payload.task === "faces" && Date.now() - facesShown.current > 3000)) {
+          facesShown.current = Date.now();
+          refreshSoon();
+        }
       }),
       listen<Progress>("scan-progress", (e) => {
         lastRootName.current = e.payload.rootName;
@@ -400,6 +416,25 @@ export default function App() {
     setFocusId(prev.viewerId ?? prev.focusId);
     setViewerId(prev.viewerId);
   }, [trail]);
+
+  /** From a person's page. Ignoring a stranger goes back to People, with Undo. */
+  const ignorePerson = (p: Person) => {
+    const ignored = !p.ignored;
+    run(
+      people.ignore([p.id], ignored).then(() => {
+        const label = p.name ?? "This person";
+        setMessage({
+          text: ignored ? `${label} is ignored: hidden from People.` : `${label} is back in People.`,
+          action: {
+            label: "Undo",
+            run: () => run(people.ignore([p.id], !ignored).then(refresh)),
+          },
+        });
+        if (ignored && trail[trail.length - 1]?.view === "people") goBack();
+        else refresh();
+      }),
+    );
+  };
 
   useEffect(() => {
     if (!trail.length || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging) return;
@@ -576,6 +611,8 @@ export default function App() {
         onPeople={() => {
           setTrail([]);
           setView("people");
+          // Faces found since the last visit show as new; Back from a person isn't a new visit.
+          run(people.visit().then(refresh));
         }}
         onScope={(s) => {
           setTrail([]);
@@ -645,15 +682,25 @@ export default function App() {
                   onCancel={() => setNamingTitle(false)}
                 />
               ) : (
-                <h1>
+                <>
+                  <h1>
+                    <button
+                      className={`title-name ${personHere.name ? "" : "unnamed"}`}
+                      onClick={() => setNamingTitle(true)}
+                      title="Name this person"
+                    >
+                      {personHere.name ?? "Unnamed person"} <Pencil size={14} />
+                    </button>
+                  </h1>
                   <button
-                    className={`title-name ${personHere.name ? "" : "unnamed"}`}
-                    onClick={() => setNamingTitle(true)}
-                    title="Name this person"
+                    className="btn small ghost"
+                    onClick={() => ignorePerson(personHere)}
+                    title={personHere.ignored ? "Show them in People again" : "A stranger: hide them from People"}
                   >
-                    {personHere.name ?? "Unnamed person"} <Pencil size={14} />
+                    {personHere.ignored ? <Eye size={14} /> : <EyeOff size={14} />}{" "}
+                    {personHere.ignored ? "Show again" : "Ignore"}
                   </button>
-                </h1>
+                </>
               )
             ) : (
               <h1>{view === "people" ? "People" : scopeInfo.title}</h1>
