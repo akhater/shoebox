@@ -9,6 +9,7 @@
 //!                                before each Kopia snapshot; see .kopiaignore)
 //!   shoebox-cli list [oldest|newest|name|added] [limit] [filters]   photos in grid order (JSON)
 //!   shoebox-cli facets [filters]  what each filter offers, with counts (JSON)
+//!   shoebox-cli days [filters]    photos taken each day, as the calendar shows them (JSON)
 //!       filters = JSON, any of {"dates":["2026-09-26"],"cameras":[..],"lenses":[..],
 //!                               "types":["cr3"],"status":["online","offline","missing"],
 //!                               "people":[42],"tags":[3,7] (photos with all of these tags)}
@@ -276,6 +277,11 @@ fn main() -> anyhow::Result<()> {
             // What each filter offers, with counts: shoebox-cli facets [filters JSON]
             let filters: Filters = args.get(1).map(|f| serde_json::from_str(f)).transpose()?.unwrap_or_default();
             println!("{}", serde_json::to_string_pretty(&cat.facets(&Scope::All, &filters)?)?);
+        }
+        Some("days") => {
+            // Photos per day, as the calendar shows them: shoebox-cli days [filters JSON]
+            let filters: Filters = args.get(1).map(|f| serde_json::from_str(f)).transpose()?.unwrap_or_default();
+            println!("{}", serde_json::to_string_pretty(&cat.days(&Scope::All, &filters)?)?);
         }
         Some("models") => {
             use shoebox_lib::models;

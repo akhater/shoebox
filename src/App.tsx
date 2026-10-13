@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
+  CalendarDays,
   Eye,
   EyeOff,
   FileType,
@@ -47,6 +48,7 @@ import {
   SORTS,
   type Sort,
 } from "./api";
+import { CalendarView } from "./components/CalendarView";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
 import { StraysDialog } from "./components/StraysDialog";
@@ -227,6 +229,10 @@ export default function App() {
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   // Bumped to hand the keyboard back to the grid (viewer closed).
   const [gridFocus, setGridFocus] = useState(0);
+  // The calendar covers the grid; a day picked there jumps the grid to it.
+  const [calendar, setCalendar] = useState(false);
+  const [jump, setJump] = useState<{ index: number; seq: number } | null>(null);
+  const gridTop = useRef(0);
 
   // Filters narrow whatever is shown and stay on from folder to folder.
   const [filters, setFilters] = useState<Filters>(NO_FILTERS);
@@ -402,6 +408,7 @@ export default function App() {
   const drill = (to: Scope) => {
     setTrail((t) => [...t, { view, scope, focusId, viewerId }]);
     setViewerId(null);
+    setCalendar(false);
     setView("photos");
     setScope(to);
     setFocusId(null);
@@ -436,8 +443,21 @@ export default function App() {
     );
   };
 
+  // Escape closes the calendar first.
   useEffect(() => {
-    if (!trail.length || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging) return;
+    if (!calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (e.key !== "Escape" || (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"))) return;
+      setCalendar(false);
+      setGridFocus((n) => n + 1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging]);
+
+  useEffect(() => {
+    if (!trail.length || calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const t = e.target as HTMLElement | null;
@@ -446,7 +466,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [trail, viewerId, deleteOpen, settingsOpen, straysFor, tagging, goBack]);
+  }, [trail, calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, goBack]);
 
   // Drag and drop of a folder. Same disk: done at once, with Undo. Another
   // disk: asked first, then copied, checked and the original removed in the
@@ -610,12 +630,14 @@ export default function App() {
         peopleOpen={view === "people"}
         onPeople={() => {
           setTrail([]);
+          setCalendar(false);
           setView("people");
           // Faces found since the last visit show as new; Back from a person isn't a new visit.
           run(people.visit().then(refresh));
         }}
         onScope={(s) => {
           setTrail([]);
+          setCalendar(false);
           setView("photos");
           setScope(s);
           setFocusId(null);
@@ -765,6 +787,19 @@ export default function App() {
             )}
             {view === "photos" && (
               <button
+                className={`icon-btn type-toggle ${calendar ? "on" : ""}`}
+                onClick={() => {
+                  setCalendar(!calendar);
+                  if (calendar) setGridFocus((n) => n + 1);
+                }}
+                title={calendar ? "Back to the photos (Esc)" : "Calendar: every day you took photos; click a day to go there"}
+                aria-pressed={calendar}
+              >
+                <CalendarDays size={16} />
+              </button>
+            )}
+            {view === "photos" && (
+              <button
                 className={`icon-btn type-toggle ${showType ? "on" : ""}`}
                 onClick={() => setShowType(!showType)}
                 title={showType ? "Hide the file type on thumbnails" : "Show the file type (CR3, JPG…) on thumbnails"}
@@ -861,32 +896,50 @@ export default function App() {
             </div>
           </div>
         ) : (
-          <PhotoGrid
-            key={JSON.stringify(scope) + query + sort + JSON.stringify(filters)}
-            list={shown}
-            rowHeight={rowHeight}
-            onOpen={(i) => setViewerId(shown.ids[i])}
-            onSelect={(cursor, sel) => {
-              setFocusId(cursor >= 0 ? shown.ids[cursor] : null);
-              setSelected(sel);
-            }}
-            onMark={setMarked}
-            onTag={setTagging}
-            selected={selected}
-            keyboard={viewerIndex < 0 && !deleteOpen && !settingsOpen && !straysFor && !tagging}
-            focusRequest={gridFocus}
-            focusIndex={focusIndex}
-            showType={showType}
-            flatLabel={
-              query
-                ? `Best matches for "${query}"`
-                : sort === "name"
-                  ? "By file name"
-                  : sort === "added"
-                    ? "Most recently added first"
-                    : undefined
-            }
-          />
+          <div className="grid-stack">
+            <PhotoGrid
+              key={JSON.stringify(scope) + query + sort + JSON.stringify(filters)}
+              list={shown}
+              rowHeight={rowHeight}
+              onOpen={(i) => setViewerId(shown.ids[i])}
+              onSelect={(cursor, sel) => {
+                setFocusId(cursor >= 0 ? shown.ids[cursor] : null);
+                setSelected(sel);
+              }}
+              onMark={setMarked}
+              onTag={setTagging}
+              selected={selected}
+              keyboard={viewerIndex < 0 && !calendar && !deleteOpen && !settingsOpen && !straysFor && !tagging}
+              focusRequest={gridFocus}
+              focusIndex={focusIndex}
+              showType={showType}
+              flatLabel={
+                query
+                  ? `Best matches for "${query}"`
+                  : sort === "name"
+                    ? "By file name"
+                    : sort === "added"
+                      ? "Most recently added first"
+                      : undefined
+              }
+              jump={jump}
+              onTopPhoto={(i) => (gridTop.current = i)}
+            />
+            {calendar && (
+              <CalendarView
+                list={shown}
+                newestFirst={sort === "newest" && !query}
+                startIndex={focusIndex != null && focusIndex >= 0 ? focusIndex : gridTop.current}
+                onPick={(i) => {
+                  setCalendar(false);
+                  setFocusId(shown.ids[i]);
+                  setSelected(new Set([shown.ids[i]]));
+                  setJump((j) => ({ index: i, seq: (j?.seq ?? 0) + 1 }));
+                  setGridFocus((n) => n + 1);
+                }}
+              />
+            )}
+          </div>
         )}
 
         <StatusBar

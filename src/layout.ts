@@ -7,7 +7,7 @@ export interface Tile {
 }
 
 export type Row =
-  | { kind: "header"; top: number; height: number; label: string; count: number }
+  | { kind: "header"; top: number; height: number; label: string; count: number; ts: number }
   | { kind: "photos"; top: number; height: number; tiles: Tile[] };
 
 export interface Layout {
@@ -44,7 +44,14 @@ export function buildLayout(list: PhotoList, width: number, target: number, gap:
     let end = i;
     while (end < n && (flatLabel ? 0 : monthKey(list.taken[end])) === key) end++;
 
-    rows.push({ kind: "header", top, height: HEADER, label: flatLabel ?? fmtMonth(list.taken[i]), count: end - i });
+    rows.push({
+      kind: "header",
+      top,
+      height: HEADER,
+      label: flatLabel ?? fmtMonth(list.taken[i]),
+      count: end - i,
+      ts: list.taken[i],
+    });
     top += HEADER;
 
     let row: number[] = [];
