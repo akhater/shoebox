@@ -372,6 +372,8 @@ pub fn run() {
             commands::photo_faces,
             commands::ai_status,
             commands::check_catalog_folder,
+            commands::backup_catalog,
+            commands::last_backup,
             commands::move_catalog,
             commands::switch_catalog,
             commands::rename_folder,

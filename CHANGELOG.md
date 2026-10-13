@@ -68,6 +68,9 @@ Newest first. Same format and versioning as Argentum.
   Disks mounted in a folder (`C:\Mounts\Disk1`) are recognised, not
   just drive letters.
 
+- **Moving the catalog takes seconds on the same disk**: previews, thumbnails and faces move as whole folders, the way Explorer moves them; the databases are copied consistently; anything failing puts it all back. To another disk it still copies. The old folder keeps only its old databases and a note saying where the catalog went.
+- **Backup, Kopia-ready**: `shoebox-cli backup` (or Settings > Make backup copies now) writes consistent copies of the databases into `backup` while Shoebox runs, and a `.kopiaignore` that skips the live ones. Run it as Kopia's before-snapshot action; daily snapshots only add new previews plus a few MB.
+
 ### Internal
 
 - Renamed from OtO (working name) to Shoebox: window, app id

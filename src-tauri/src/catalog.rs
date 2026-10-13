@@ -708,11 +708,14 @@ impl Catalog {
         let same = |a: &Path, b: &Path| a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy());
         let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
 
+        // files() leaves out the databases (snapshotted, not copied): count them here.
+        let dbs = ["faces.db", "search.db"].map(|n| self.data.root.join(n));
         let bytes: u64 = self
             .data
             .files()
-            .iter()
-            .chain(std::iter::once(&self.data.db_path()))
+            .into_iter()
+            .chain(std::iter::once(self.data.db_path()))
+            .chain(dbs)
             .filter_map(|p| p.metadata().ok())
             .map(|m| m.len())
             .sum();
@@ -747,17 +750,84 @@ impl Catalog {
         Ok(FolderCheck { target: target.to_string_lossy().into_owned(), has_catalog: t.has_catalog(), bytes, problem })
     }
 
-    /// Copies the whole catalog to `target` and makes it the catalog for the
-    /// next start. The current folder is left untouched. Scans must be stopped.
+    /// Moves the catalog to `target` and makes it the catalog for the next
+    /// start. Previews, thumbnails and faces move as folders (instant on the
+    /// same disk, copied to another one); the databases are snapshotted. The
+    /// old folder keeps only its old databases and a note saying where the
+    /// catalog went. Any failure puts everything back. Scans must be stopped.
     pub fn move_catalog(&self, target: &Path, progress: &dyn Fn(usize, usize)) -> Result<()> {
         let to = DataDir { root: target.to_path_buf() };
         if to.has_catalog() {
             bail!("{} already has a catalog", target.display());
         }
-        self.data.copy_files_to(&to, progress)?;
-        paths::snapshot_db(&self.db(), &to)?;
-        paths::remember_data_dir(&to.root)?;
+        let moved = self.data.move_files_to(&to, progress)?;
+        let finish = || -> Result<()> {
+            for db in ["faces.db", "search.db"] {
+                let src = self.data.root.join(db);
+                if src.is_file() {
+                    paths::snapshot_sqlite(&src, &to)?;
+                }
+            }
+            paths::snapshot_db(&self.db(), &to)?;
+            paths::remember_data_dir(&to.root)?;
+            Ok(())
+        };
+        if let Err(e) = finish() {
+            DataDir::unmove(&moved);
+            return Err(e);
+        }
+        log::info!("catalog moved to {} ({} folders moved whole)", to.root.display(), moved.len());
+        let note = format!(
+            "Shoebox's catalog moved to {} on {}.\r\nIts previews went with it: this folder only holds the old databases and can be deleted.\r\n",
+            to.root.display(),
+            chrono::Local::now().format("%Y-%m-%d %H:%M")
+        );
+        let _ = self.data.write(&self.data.root.join("MOVED.txt"), note.as_bytes());
         Ok(())
+    }
+
+    /// Consistent copies of the catalog's databases in `backup\` inside the
+    /// catalog folder, made safely while Shoebox runs - for Kopia or any
+    /// backup tool, run just before each snapshot. Also leaves a
+    /// `.kopiaignore` so Kopia skips the live databases and keeps these copies,
+    /// the previews, thumbnails and face pictures (one unchanging file each, so
+    /// a daily snapshot only adds what's new).
+    pub fn backup(&self) -> Result<BackupReport> {
+        let started = std::time::Instant::now();
+        let dir = self.data.backup_dir();
+        let mut files = Vec::new();
+        {
+            let db = self.db();
+            self.data.snapshot_into(&db, &dir.join("catalog.db"))?;
+        }
+        files.push("catalog.db".to_string());
+        for name in ["faces.db", "search.db"] {
+            let src = self.data.root.join(name);
+            if src.is_file() {
+                let conn = Connection::open_with_flags(&src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                self.data.snapshot_into(&conn, &dir.join(name))?;
+                files.push(name.to_string());
+            }
+        }
+        let ignore = self.data.root.join(".kopiaignore");
+        if !ignore.exists() {
+            self.data.write(&ignore, KOPIA_IGNORE.as_bytes())?;
+        }
+        let bytes = files.iter().filter_map(|f| dir.join(f).metadata().ok()).map(|m| m.len()).sum();
+        log::info!("backup copies made in {} ({} files, {bytes} bytes)", dir.display(), files.len());
+        Ok(BackupReport {
+            folder: dir.to_string_lossy().into_owned(),
+            files,
+            bytes,
+            at: db::now(),
+            ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// When `backup` last ran (its catalog copy), if ever.
+    pub fn last_backup(&self) -> Option<i64> {
+        let modified = self.data.backup_dir().join("catalog.db").metadata().ok()?.modified().ok()?;
+        Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64)
     }
 
     /// Makes an existing catalog folder the catalog for the next start.
@@ -858,6 +928,30 @@ fn upsert_volume(db: &Connection, mv: &MountedVolume) -> Result<i64> {
         params![mv.serial as i64, mv.fs, mv.size as i64, label, mv.mount, db::now()],
     )?;
     Ok(db.last_insert_rowid())
+}
+
+/// Kopia: keep the consistent copies in backup\, skip the live databases.
+const KOPIA_IGNORE: &str = "# Written by Shoebox. For Kopia (or any tool reading .kopiaignore):\r
+# back up backup\\*.db - consistent copies made by `shoebox-cli backup` just\r
+# before each snapshot - and skip the live databases, which change mid-copy.\r
+# To restore: with Shoebox closed, copy backup\\*.db back into this folder.\r
+/*.db\r
+/*.db-wal\r
+/*.db-shm\r
+/*.db-journal\r
+*.tmp\r
+/logs/\r
+";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupReport {
+    pub folder: String,
+    pub files: Vec<String>,
+    pub bytes: u64,
+    /// When, seconds since 1970.
+    pub at: i64,
+    pub ms: u64,
 }
 
 #[derive(Serialize)]

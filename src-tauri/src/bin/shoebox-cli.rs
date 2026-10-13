@@ -5,6 +5,8 @@
 //!   shoebox-cli scan [root-id]   rescan one folder, or every plugged-in one
 //!   shoebox-cli stats            catalog overview
 //!   shoebox-cli photo <id>       one photo's details
+//!   shoebox-cli backup           consistent copies of the databases in backup\ (run it
+//!                                before each Kopia snapshot; see .kopiaignore)
 //!   shoebox-cli list [oldest|newest|name|added] [limit] [filters]   photos in grid order (JSON)
 //!   shoebox-cli facets [filters]  what each filter offers, with counts (JSON)
 //!       filters = JSON, any of {"dates":["2026-09-26"],"cameras":[..],"lenses":[..],
@@ -75,6 +77,10 @@ fn main() -> anyhow::Result<()> {
             let list = cat.list_photos(&Scope::All, Sort::default(), &Filters::default())?;
             let failed = list.preview.iter().filter(|&&s| s == 2).count();
             println!("photos listed: {}, without preview: {failed}", list.ids.len());
+        }
+        Some("backup") => {
+            // Consistent copies of the databases in backup\ - Kopia's before-snapshot action.
+            println!("{}", serde_json::to_string_pretty(&cat.backup()?)?);
         }
         Some("move") => {
             let folder = args.get(1).ok_or_else(|| anyhow::anyhow!("move <folder>"))?;

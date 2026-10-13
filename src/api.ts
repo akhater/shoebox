@@ -296,6 +296,9 @@ export const api = {
     invoke<MoveResult | null>("move_folder", { volumeId, relPath, toVolumeId, toParentRel }),
   cancelFolderMove: () => invoke<void>("cancel_folder_move"),
   checkCatalogFolder: (path: string) => invoke<FolderCheck>("check_catalog_folder", { path }),
+  /** Consistent copies of the databases in backup\ inside the catalog folder (for Kopia). */
+  backup: () => invoke<{ folder: string; files: string[]; bytes: number; at: number; ms: number }>("backup_catalog"),
+  lastBackup: () => invoke<number | null>("last_backup"),
   moveCatalog: (path: string) => invoke<void>("move_catalog", { path }),
   switchCatalog: (path: string) => invoke<void>("switch_catalog", { path }),
 };
