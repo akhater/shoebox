@@ -85,10 +85,12 @@ Newest first. Same format and versioning as Argentum.
   made on GitHub only when a release is published, as in Argentum:
   installers (Windows setup .exe, per user, no admin prompt; macOS .dmg;
   Linux .deb / .rpm / .AppImage) and a portable Shoebox folder, all with
-  the app and `shoebox-cli`. Installed, Shoebox keeps its
-  catalog, models and `shoebox.json` in `~/.shoebox`; portable, next to the
-  app as before. On macOS and Linux it opens and browses but can't add disks
-  yet; Show in Explorer / Open use Finder and the desktop's file manager
+  the app and `shoebox-cli`. Installed, Shoebox keeps its catalog and
+  `shoebox.json` in `~/.shoebox` and its AI models in the install folder
+  (`~/.shoebox` on macOS and Linux, whose install folders can't be
+  written); portable, all of it next to the app as before. On macOS and
+  Linux it opens and browses but can't add disks yet; Show in Explorer /
+  Open use Finder and the desktop's file manager
   there.
 
 ## Versioning: `yy.isoWeek.release`
