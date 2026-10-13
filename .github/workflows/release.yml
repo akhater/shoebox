@@ -1,10 +1,8 @@
 name: Release
 
 # Builds happen only when a release is published (Argentum's logic), never on
-# every change: Windows, macOS and Linux, on Intel/AMD and on ARM, each
-# attached to the release. Run it by hand from the Actions tab when a change
-# touches the build itself: the same builds, kept on the run, no release
-# touched.
+# every change and never by hand: Windows, macOS and Linux, on Intel/AMD and
+# on ARM, each attached to the release.
 #
 # Each platform gets installers, as Argentum (Windows setup .exe, macOS .dmg,
 # Linux .deb / .rpm / .AppImage), and the portable Shoebox folder (a zip or
@@ -19,7 +17,6 @@ name: Release
 on:
   release:
     types: [published]
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -58,7 +55,7 @@ jobs:
             bundles: deb,rpm,appimage
     runs-on: ${{ matrix.runner }}
     env:
-      NAME: Shoebox_${{ github.event.release.tag_name || format('dev{0}', github.run_number) }}_${{ matrix.name }}
+      NAME: Shoebox_${{ github.event.release.tag_name }}_${{ matrix.name }}
       BIN: src-tauri/target/${{ matrix.target }}/release
       # The AppImage tool's own strip breaks on today's binaries (as in Argentum).
       NO_STRIP: '1'
@@ -119,16 +116,7 @@ jobs:
           ls -la out
 
       - name: Attach to the release
-        if: github.event_name == 'release'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ github.event.release.tag_name }}" out/* --clobber
-
-      - name: Keep on the run
-        if: github.event_name != 'release'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.NAME }}
-          path: out/
-          retention-days: 7
