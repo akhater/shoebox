@@ -285,7 +285,7 @@ function BackupLine() {
       <small>
         For Kopia or any backup tool: back up this folder, and run <code>shoebox-cli backup</code> just before each
         snapshot (Kopia: <i>before-snapshot action</i>). It writes consistent copies of the databases in{" "}
-        <code>backup\\</code>, safe while Shoebox runs; the <code>.kopiaignore</code> it leaves skips the live ones.
+        <code>backup\</code>, safe while Shoebox runs; the <code>.kopiaignore</code> it leaves skips the live ones.
         Previews never change once made, so a daily snapshot only adds what's new.
       </small>
       {note && <small>{note}</small>}

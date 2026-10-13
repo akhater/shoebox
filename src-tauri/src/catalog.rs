@@ -708,11 +708,14 @@ impl Catalog {
         let same = |a: &Path, b: &Path| a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy());
         let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
 
+        // files() leaves out the databases (snapshotted, not copied): count them here.
+        let dbs = ["faces.db", "search.db"].map(|n| self.data.root.join(n));
         let bytes: u64 = self
             .data
             .files()
-            .iter()
-            .chain(std::iter::once(&self.data.db_path()))
+            .into_iter()
+            .chain(std::iter::once(self.data.db_path()))
+            .chain(dbs)
             .filter_map(|p| p.metadata().ok())
             .map(|m| m.len())
             .sum();
