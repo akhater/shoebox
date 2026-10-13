@@ -217,6 +217,8 @@ export interface Report {
   /** Known photos read again (regenerated, edited, failed before). */
   reread: number;
   errors: number;
+  /** Only the files that couldn't be read before, on a disk just plugged in. */
+  retry: boolean;
   cancelled: boolean;
   seconds: number;
 }

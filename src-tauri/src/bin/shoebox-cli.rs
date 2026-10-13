@@ -3,6 +3,9 @@
 //!
 //!   shoebox-cli add <folder>     add a folder and scan it
 //!   shoebox-cli scan [root-id]   rescan one folder, or every plugged-in one
+//!   shoebox-cli retry [disk-id]  read again only the files that couldn't be read, on one
+//!                                plugged-in disk or all of them (the window does it when a disk
+//!                                is plugged in)
 //!   shoebox-cli stats            catalog overview
 //!   shoebox-cli photo <id>       one photo's details
 //!   shoebox-cli backup           consistent copies of the databases in backup\ (run it
@@ -55,6 +58,7 @@ fn main() -> anyhow::Result<()> {
     shoebox_lib::setup_logging(&data);
     let cat = Catalog::open(data)?;
     shoebox_lib::tidy_old_catalog(&cat.data);
+    scan::heal_saved_previews(&cat)?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cancel = AtomicBool::new(false);
     let show = |p: &Progress| {
@@ -77,6 +81,17 @@ fn main() -> anyhow::Result<()> {
                 match scan::scan_root(&cat, id, &cancel, args.get(2).is_some_and(|a| a == "--regenerate"), &show) {
                     Ok(report) => println!("{}", serde_json::to_string_pretty(&report)?),
                     Err(e) => println!("folder {id}: {e:#}"),
+                }
+            }
+        }
+        Some("retry") => {
+            let ids = match args.get(1) {
+                Some(id) => vec![id.parse()?],
+                None => cat.online_ids(),
+            };
+            for id in ids {
+                if scan::failed_count(&cat, id)? > 0 {
+                    println!("{}", serde_json::to_string_pretty(&scan::retry_failed(&cat, id, &cancel, &show)?)?);
                 }
             }
         }
