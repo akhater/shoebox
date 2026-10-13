@@ -19,6 +19,16 @@
 //!   shoebox-cli untag "<name>" <photo-id>...
 //!   shoebox-cli tag-rename "<old>" "<new>"      onto an existing name = merge
 //!
+//! Gear: cameras and lenses, one name each (catalog only, never written into photos; JSON out).
+//! Spellings of the same gear ("EF70-200mm f/4L IS USM" = "Canon EF 70-200mm f/4L IS USM")
+//! are grouped by themselves; names given here win, and later photos join them:
+//!   shoebox-cli gear                                  every camera and lens, with the names in their files
+//!   shoebox-cli gear-rename camera|lens "<name>" "<new>"   onto an existing name = merge
+//!   shoebox-cli gear-split camera|lens "<name>"       back to the names in the files, kept apart
+//!   shoebox-cli find-lenses       photos without a lens: read again from their originals
+//!                                 (metadata only, plugged-in disks), or from the same shot's other file
+//!   shoebox-cli lens <file>       the lens Shoebox reads in a file
+//!
 //! Folders (on the disk and in the catalog in one step; JSON out):
 //!   shoebox-cli rename-folder <volume-id> <folder> <new name>
 //!   shoebox-cli new-folder <volume-id> <parent folder> [name]
@@ -43,7 +53,7 @@
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::{self, Progress};
-use shoebox_lib::{organize, tags};
+use shoebox_lib::{gear, organize, tags};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -272,6 +282,27 @@ fn main() -> anyhow::Result<()> {
             tags::rename(&cat, id, new)?;
             println!("{}", serde_json::json!({ "renamed": new }));
         }
+        Some("gear") => println!("{}", serde_json::to_string_pretty(&gear::list(&cat.db())?)?),
+        Some(cmd @ ("gear-rename" | "gear-split")) => {
+            let usage = || anyhow::anyhow!("gear-rename camera|lens <name> <new>  |  gear-split camera|lens <name>");
+            let kind = gear::Kind::parse(args.get(1).ok_or_else(usage)?)?;
+            let name = args.get(2).ok_or_else(usage)?;
+            if cmd == "gear-rename" {
+                let shown = gear::rename(&cat.db(), kind, name, args.get(3).ok_or_else(usage)?)?;
+                println!("{}", serde_json::json!({ "renamed": name, "to": shown }));
+            } else {
+                println!("{}", serde_json::json!({ "split": name, "into": gear::split(&cat.db(), kind, name)? }));
+            }
+        }
+        Some("find-lenses") => println!("{}", serde_json::to_string_pretty(&gear::find_lenses(&cat, &cancel)?)?),
+        Some("lens") => {
+            // The lens Shoebox reads in a file (metadata only): shoebox-cli lens <file>
+            let file = args.get(1).ok_or_else(|| anyhow::anyhow!("lens <file>"))?;
+            let kind = shoebox_lib::formats::kind_of(file).ok_or_else(|| anyhow::anyhow!("{file}: not a photo"))?;
+            let t = std::time::Instant::now();
+            let lens = shoebox_lib::imaging::read_lens(Path::new(file), kind);
+            println!("{}", serde_json::json!({ "file": file, "lens": lens, "ms": t.elapsed().as_millis() as u64 }));
+        }
         Some("facets") => {
             // What each filter offers, with counts: shoebox-cli facets [filters JSON]
             let filters: Filters = args.get(1).map(|f| serde_json::from_str(f)).transpose()?.unwrap_or_default();
@@ -367,7 +398,7 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&organize::delete_confirmed(&cat, token, &disks)?)?);
         }
         _ => eprintln!(
-            "usage: shoebox-cli add <folder> | scan [root-id] | stats | photo <id> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...]"
+            "usage: shoebox-cli add <folder> | scan [root-id] | stats | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...]"
         ),
     }
     Ok(())

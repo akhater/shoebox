@@ -35,6 +35,8 @@ import {
   filtersOn,
   NO_FILTERS,
   type FolderMoveEvent,
+  gearApi,
+  type GearKind,
   type PhotoDetail,
   type FolderNode,
   type Overview,
@@ -492,6 +494,49 @@ export default function App() {
     }
   };
 
+  // Gear: one name per camera or lens. A view or filter on the old name follows it.
+  const followGear = (kind: GearKind, from: string, to: string[]) => {
+    setScope((s) => (s.kind === kind && s.name === from ? { kind, name: to[0] } : s));
+    const key = kind === "camera" ? "cameras" : "lenses";
+    setFilters((f) =>
+      f[key].includes(from) ? { ...f, [key]: [...new Set(f[key].flatMap((v) => (v === from ? to : [v])))] } : f,
+    );
+  };
+  const renameGear = async (kind: GearKind, name: string, to: string) => {
+    const items = (kind === "camera" ? browse?.gear.cameras : browse?.gear.lenses) ?? [];
+    // Onto another one's name (any case) = merge, as the backend does.
+    const typed = to.trim().split(/\s+/).join(" ").toLowerCase();
+    const into = items.find((i) => i.name !== name && !i.unknown && i.name.toLowerCase() === typed);
+    const merged = into ? into.count + (items.find((i) => i.name === name)?.count ?? 0) : 0;
+    try {
+      const shown = await gearApi.rename(kind, name, to);
+      followGear(kind, name, [shown]);
+      setMessage({
+        text: into
+          ? `“${name}” and “${shown}” are one ${kind} now (${fmtNum(merged)} photos). Its menu splits them again.`
+          : `“${name}” is now “${shown}”, in Shoebox only: the photo files are not changed.`,
+      });
+      refresh();
+    } catch (e) {
+      setMessage({ text: String(e), warn: true });
+    }
+  };
+  const splitGear = async (kind: GearKind, name: string) => {
+    try {
+      const names = await gearApi.split(kind, name);
+      followGear(kind, name, names);
+      setMessage({
+        text:
+          names.length > 1
+            ? `“${name}” is split into the names in its files: ${names.join(", ")}.`
+            : `“${name}” goes by the name in its files again: ${names[0]}.`,
+      });
+      refresh();
+    } catch (e) {
+      setMessage({ text: String(e), warn: true });
+    }
+  };
+
   const unmarkAll = async () => {
     const n = overview?.marked ?? 0;
     const yes = await ask(`Unmark all ${fmtNum(n)} photos? Nothing is deleted.`, {
@@ -572,7 +617,11 @@ export default function App() {
     if (scope.kind === "missing") return { title: "Missing" };
     if (scope.kind === "marked") return { title: "Marked for deletion" };
     if (scope.kind === "date") return { title: fmtDateKey(scope.key) };
-    if (scope.kind === "camera") return { title: scope.name };
+    if (scope.kind === "camera" || scope.kind === "lens") {
+      const items = (scope.kind === "camera" ? browse?.gear.cameras : browse?.gear.lenses) ?? [];
+      const item = items.find((i) => i.name === scope.name);
+      return { title: scope.name, sub: item?.inFiles.length ? `In the files: ${item.inFiles.join(" · ")}` : undefined };
+    }
     if (scope.kind === "person") {
       const p = peopleList.find((p) => p.id === scope.id);
       return { title: p?.name ?? "Unnamed person" };
@@ -592,7 +641,7 @@ export default function App() {
       if (r) return { title: r.relPath ? r.name : v.label, sub: r.path, offline: !v.online, lost: v.online && !r.found };
     }
     return { title: "" };
-  }, [scope, overview, peopleList]);
+  }, [scope, overview, peopleList, browse]);
 
   const empty = overview && overview.volumes.length === 0;
 
@@ -650,6 +699,8 @@ export default function App() {
         onShowFolder={(vid, rel) => run(api.showFolder(vid, rel))}
         onMoveFolder={moveFolder}
         onSettings={() => setSettingsTab("general")}
+        onGearRename={renameGear}
+        onGearSplit={splitGear}
       />
 
       <main className="main">

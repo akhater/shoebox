@@ -1268,6 +1268,37 @@ button {
   border-top: 1px solid var(--border);
   margin: 4px 0;
 }
+/* Gear: a camera's or lens's menu, with the others to merge it into. */
+.gear-menu {
+  max-width: 300px;
+}
+.menu-label {
+  padding: 4px 10px 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.menu-scroll {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.menu-scroll button {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+}
+/* A lens's name ends with what tells it apart (f/4L, IS II): wrap, never cut. */
+.nav-item.gear-item .grow.ellipsis {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+}
+.nav-item.gear-item.unknown .grow {
+  color: var(--muted);
+  font-style: italic;
+}
 .modal-foot {
   display: flex;
   justify-content: flex-end;

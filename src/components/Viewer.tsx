@@ -269,16 +269,18 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
                 {d.takenTs ? fmtDay(d.takenTs) : "Unknown"}
                 {!d.takenFromCamera && d.takenTs ? <span className="muted"> (file date)</span> : null}
               </dd>
-              {(d.make || d.model) && (
+              {d.camera && (
                 <>
                   <dt>Camera</dt>
-                  <dd>{[d.make, d.model?.replace(d.make ?? "", "").trim()].filter(Boolean).join(" ")}</dd>
+                  <dd>{d.camera}</dd>
                 </>
               )}
               {d.lens && (
                 <>
                   <dt>Lens</dt>
-                  <dd>{d.lens}</dd>
+                  <dd title={d.lensInFile && d.lensInFile !== d.lens ? `In the file: ${d.lensInFile}` : undefined}>
+                    {d.lens}
+                  </dd>
                 </>
               )}
               {exposure.length > 0 && (
