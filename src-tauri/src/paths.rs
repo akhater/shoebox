@@ -61,6 +61,18 @@ const POINTER_FILE: &str = "shoebox.json";
 #[serde(rename_all = "camelCase")]
 struct Pointer {
     data_dir: Option<PathBuf>,
+    /// The folder a move left behind, removed once Shoebox has started on
+    /// the new one (see [`remove_old_catalog`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    old_data_dir: Option<PathBuf>,
+}
+
+fn read_pointer() -> Option<Pointer> {
+    serde_json::from_str(&std::fs::read_to_string(app_home().join(POINTER_FILE)).ok()?).ok()
+}
+
+fn write_pointer(p: &Pointer) -> io::Result<()> {
+    atomic_write(&app_home().join(POINTER_FILE), serde_json::to_string_pretty(p)?.as_bytes())
 }
 
 impl DataDir {
@@ -70,10 +82,7 @@ impl DataDir {
         if let Some(p) = std::env::var_os("SHOEBOX_DATA") {
             return Self { root: PathBuf::from(p) };
         }
-        let chosen = std::fs::read_to_string(app_home().join(POINTER_FILE))
-            .ok()
-            .and_then(|s| serde_json::from_str::<Pointer>(&s).ok())
-            .and_then(|p| p.data_dir);
+        let chosen = read_pointer().and_then(|p| p.data_dir);
         let default = || portable_home().map_or_else(installed_home, |home| home.join("data"));
         Self { root: chosen.unwrap_or_else(default) }
     }
@@ -273,9 +282,68 @@ pub fn snapshot_sqlite(src: &Path, target: &DataDir) -> anyhow::Result<()> {
 }
 
 /// Remembers `root` as the catalog folder for the next start.
-pub fn remember_data_dir(root: &Path) -> io::Result<()> {
-    let p = Pointer { data_dir: Some(root.to_path_buf()) };
-    atomic_write(&app_home().join(POINTER_FILE), serde_json::to_string_pretty(&p)?.as_bytes())
+/// `left_behind`: the folder a move came from, removed at the next start.
+pub fn remember_data_dir(root: &Path, left_behind: Option<&Path>) -> io::Result<()> {
+    write_pointer(&Pointer { data_dir: Some(root.to_path_buf()), old_data_dir: left_behind.map(Path::to_path_buf) })
+}
+
+/// What a catalog folder holds of its own: the databases (and their SQLite
+/// side files), settings, logs, backups, previews, thumbnails, faces.
+fn is_catalog_entry(name: &str, is_dir: bool) -> bool {
+    let n = name.to_lowercase();
+    if is_dir {
+        return ["previews", "thumbs", "faces", "logs", "backup"].contains(&n.as_str());
+    }
+    let db_file = ["catalog.db", "faces.db", "search.db"]
+        .iter()
+        .any(|db| n.strip_prefix(db).is_some_and(|rest| ["", "-wal", "-shm", "-journal", ".tmp"].contains(&rest)));
+    db_file || ["settings.json", "moved.txt", ".kopiaignore"].contains(&n.as_str())
+}
+
+/// The old catalog's own entries in `dir`, and whether anything else is there
+/// (installed, `~/.shoebox` also holds `models` and `shoebox.json`).
+fn old_catalog_entries(dir: &Path) -> io::Result<(Vec<PathBuf>, bool)> {
+    let mut own = Vec::new();
+    let mut other = false;
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        if is_catalog_entry(&e.file_name().to_string_lossy(), e.file_type()?.is_dir()) {
+            own.push(e.path());
+        } else {
+            other = true;
+        }
+    }
+    Ok((own, other))
+}
+
+/// After a catalog move, the old folder still holds the old databases (and,
+/// moved to another disk, a full copy of everything). Once Shoebox has opened
+/// the new catalog, they go to the Recycle Bin: only the catalog's own files
+/// and folders, never `models` or `shoebox.json` - the whole folder when
+/// nothing else is in it. Not found (its disk unplugged), it waits for a later
+/// start. Returns the folder cleared.
+pub fn remove_old_catalog(current: &DataDir) -> anyhow::Result<Option<PathBuf>> {
+    let Some(mut p) = read_pointer() else { return Ok(None) };
+    let Some(old) = p.old_data_dir.clone() else { return Ok(None) };
+    let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+    let (o, c) = (lower(&old), lower(&current.root));
+    let in_use = o.starts_with(&c) || c.starts_with(&o) || lower(&models_dir()).starts_with(&o);
+    if in_use || !current.has_catalog() || !old.is_dir() {
+        if in_use {
+            p.old_data_dir = None; // never the catalog (or models) in use
+            write_pointer(&p)?;
+        }
+        return Ok(None);
+    }
+    let (own, other) = old_catalog_entries(&old)?;
+    if !other {
+        trash::delete(&old)?;
+    } else if !own.is_empty() {
+        trash::delete_all(&own)?;
+    }
+    p.old_data_dir = None;
+    write_pointer(&p)?;
+    Ok(Some(old))
 }
 
 /// An AI model file being downloaded, written as `<name>.part` beside where it
@@ -410,6 +478,38 @@ mod tests {
         assert!(dst.is_file());
         remove_model_path(&dst).unwrap();
         assert!(!dst.parent().unwrap().exists());
+    }
+
+    /// Only the old catalog's own files go after a move: installed, the
+    /// folder is also `~/.shoebox` with the models and `shoebox.json`.
+    #[test]
+    fn old_catalog_keeps_what_isnt_the_catalogs() {
+        let data = DataDir { root: std::env::temp_dir().join("shoebox-old-catalog") };
+        let _ = std::fs::remove_dir_all(&data.root);
+        for f in [
+            "catalog.db",
+            "catalog.db-wal",
+            "search.db-shm",
+            "settings.json",
+            "MOVED.txt",
+            "previews/01/1.jpg",
+            "logs/shoebox.log",
+            "models/clip/model.onnx",
+            "shoebox.json",
+            "notes.txt",
+        ] {
+            data.write(&data.root.join(f), b"x").unwrap();
+        }
+        let (own, other) = old_catalog_entries(&data.root).unwrap();
+        let mut own: Vec<String> = own.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        own.sort();
+        assert_eq!(
+            own,
+            ["MOVED.txt", "catalog.db", "catalog.db-wal", "logs", "previews", "search.db-shm", "settings.json"]
+        );
+        assert!(other);
+        let _ = std::fs::remove_dir_all(&data.root);
+        assert!(!is_catalog_entry("faces.db.bak", false) && !is_catalog_entry("faces", false));
     }
 
     /// Installed, `~/.shoebox` holds the models and `shoebox.json` beside the

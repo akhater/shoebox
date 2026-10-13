@@ -53,6 +53,7 @@ fn main() -> anyhow::Result<()> {
     data.ensure()?;
     shoebox_lib::setup_logging(&data);
     let cat = Catalog::open(data)?;
+    shoebox_lib::tidy_old_catalog(&cat.data);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cancel = AtomicBool::new(false);
     let show = |p: &Progress| {
