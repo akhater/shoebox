@@ -210,7 +210,12 @@ export interface Report {
   restored: number;
   missing: number;
   photosAdded: number;
+  /** Files whose photo was already in the catalog (moved or copied). */
   linked: number;
+  /** More copies of a photo this scan read: the same file twice in the folder. */
+  duplicates: number;
+  /** Known photos read again (regenerated, edited, failed before). */
+  reread: number;
   errors: number;
   cancelled: boolean;
   seconds: number;
@@ -451,6 +456,10 @@ export interface Person {
   cover: number;
   /** A stranger hidden from People. */
   ignored: boolean;
+  /** Found since the visit to People before this one. */
+  isNew: boolean;
+  /** Photos they were found in since then. */
+  newPhotos: number;
 }
 
 export interface PhotoFace {
@@ -472,6 +481,8 @@ export interface Stray {
 
 export const people = {
   list: () => invoke<Person[]>("people"),
+  /** People is opened: what was found since the last visit shows as new. */
+  visit: () => invoke<void>("visit_people"),
   rename: (personId: number, name: string) => invoke<void>("rename_person", { personId, name }),
   merge: (ids: number[], into: number) => invoke<void>("merge_people", { ids, into }),
   ignore: (ids: number[], ignored: boolean) => invoke<void>("ignore_people", { ids, ignored }),

@@ -1,4 +1,4 @@
-import { Check, ChevronRight, Eye, EyeOff, Merge, Pencil, X } from "lucide-react";
+import { Check, ChevronRight, Eye, EyeOff, Merge, Pencil, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { faceUrl, fmtNum, modelsApi, people as peopleApi, type Person } from "../api";
 
@@ -63,6 +63,8 @@ export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }:
   const allIgnored = selecting && selected.every((id) => people.find((p) => p.id === id)?.ignored);
 
   const toggle = (id: number) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  // New people, and people found in new photos, since the last visit.
+  const fresh = (list: Person[]) => list.filter((p) => p.isNew || p.newPhotos > 0).length;
 
   const act = async (f: () => Promise<void>) => {
     try {
@@ -122,6 +124,17 @@ export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }:
           title={selecting ? "Select" : "Show their photos"}
         >
           <img src={faceUrl(p.cover)} alt="" loading="lazy" draggable={false} />
+          {p.isNew ? (
+            <span className="new-badge" title="Found since your last visit to People">
+              New
+            </span>
+          ) : (
+            p.newPhotos > 0 && (
+              <span className="new-badge" title={`Found in ${fmtNum(p.newPhotos)} more photos since your last visit to People`}>
+                +{fmtNum(p.newPhotos)}
+              </span>
+            )
+          )}
           <span
             className={`tick ${isSel ? "on" : ""}`}
             onClick={(e) => {
@@ -167,6 +180,7 @@ export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }:
         <ChevronRight size={14} className={`chev ${folded.includes(g) ? "" : "open"}`} />
         <span>{title}</span>
         <span className="count">{fmtNum(list.length)}</span>
+        {fresh(list) > 0 && <span className="new-count">· {fmtNum(fresh(list))} new</span>}
       </button>
       {!folded.includes(g) &&
         (list.length ? <div className="people-grid">{list.map(card)}</div> : <p className="muted small people-empty">{empty}</p>)}
@@ -199,6 +213,7 @@ export function PeopleView({ people, onOpen, onChanged, onError, onOpenModels }:
           <>
             <button className="btn small ghost" onClick={() => setShowOnce(!showOnce)}>
               {showOnce ? "Hide" : "Show"} {fmtNum(seenOnce.length)} seen only once
+              {!showOnce && fresh(seenOnce) > 0 && ` (${fmtNum(fresh(seenOnce))} new)`}
             </button>
             <button
               className="btn small ghost"
@@ -285,10 +300,11 @@ export function NameEditor({
                 <span className="ellipsis">{m.name}</span>
                 <span className="muted small">{fmtNum(m.photos)} photos</span>
               </button>
-              <label className="same-person" title={`Same person: merge into ${m.name}`}>
-                <input type="checkbox" onChange={() => finish(() => onMerge(m))} />
-                Same person
-              </label>
+              {/* A button, not a label: a label hands the keyboard to its box, the name box
+                  loses it and saves what's typed as a name before the merge can happen. */}
+              <button className="same-person" title={`Same person: merge into ${m.name}`} onClick={() => finish(() => onMerge(m))}>
+                <Square size={13} /> Same person
+              </button>
             </div>
           ))}
         </div>

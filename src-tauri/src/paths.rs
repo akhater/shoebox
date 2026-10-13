@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Debug)]
 pub struct DataDir {
@@ -425,13 +426,18 @@ pub fn inside(path: &Path, root: &Path) -> bool {
     path.starts_with(root) && !path.components().any(|c| c == Component::ParentDir)
 }
 
+/// Each write gets its own temporary file: two writers of the same file must
+/// never share one (one rename would take the other's file away).
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
+    let tmp = path.with_extension(format!("{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// 256 sub-folders so no single folder holds 100k files.
