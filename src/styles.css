@@ -1556,6 +1556,46 @@ button {
 .people-empty {
   padding: 4px 20px 10px 42px;
 }
+/* A person's page: the title names them */
+.title-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.title-name svg {
+  opacity: 0.4;
+}
+.title-name:hover svg {
+  opacity: 1;
+}
+.title-name.unnamed {
+  color: var(--muted);
+}
+.name-editor.wide {
+  width: 280px;
+}
+.name-editor.wide .name-suggest {
+  left: 0;
+  transform: none;
+}
+.title-name-input {
+  width: 100%;
+  padding: 3px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 17px;
+  font-weight: 600;
+}
+
 /* Naming: suggestions under the box, "Same person" merges */
 .name-editor {
   position: relative;

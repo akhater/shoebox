@@ -226,18 +226,21 @@ export function PeopleView({ people, onOpen, onChanged, onError }: Props) {
 /** Typing a name: people with a matching name are suggested (face, name,
  *  photos). Clicking one takes its name - a different person can share a
  *  name; ticking "Same person" merges into them. Enter keeps what's typed. */
-function NameEditor({
+export function NameEditor({
   person,
   everyone,
   onRename,
   onMerge,
   onCancel,
+  wide,
 }: {
   person: Person;
   everyone: Person[];
   onRename: (name: string) => void;
   onMerge: (into: Person) => void;
   onCancel: () => void;
+  /** In a page title: bigger box, suggestions aligned left. */
+  wide?: boolean;
 }) {
   const [text, setText] = useState(person.name ?? "");
   const [done, setDone] = useState(false);
@@ -255,9 +258,9 @@ function NameEditor({
   };
 
   return (
-    <div className="name-editor">
+    <div className={`name-editor ${wide ? "wide" : ""}`}>
       <input
-        className="person-name-input"
+        className={wide ? "title-name-input" : "person-name-input"}
         autoFocus
         value={text}
         placeholder="Name"
