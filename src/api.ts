@@ -8,7 +8,9 @@ export type Scope =
   | { kind: "folder"; volumeId: number; relPath: string }
   /** "2026", "2026-09" or "unknown" */
   | { kind: "date"; key: string }
+  /** A camera or a lens, by the name shown (Gear). */
   | { kind: "camera"; name: string }
+  | { kind: "lens"; name: string }
   | { kind: "person"; id: number }
   /** Marked for deletion. */
   | { kind: "marked" };
@@ -86,10 +88,32 @@ export interface FolderNode {
   children: FolderNode[];
 }
 
+/** A camera or lens, one name whatever its files call it. */
+export interface GearItem {
+  /** As shown everywhere. */
+  name: string;
+  count: number;
+  /** What the files call it, when that isn't just its name (several spellings grouped, or renamed). */
+  inFiles: string[];
+  /** Renamed or merged by hand: it can be split back into the files' names. */
+  byHand: boolean;
+  /** "Unknown camera" / "Unknown lens": photos that don't say. Never renamed. */
+  unknown: boolean;
+}
+export type GearKind = "camera" | "lens";
+
+/** Gear names live in the catalog only - never written into photo files. */
+export const gearApi = {
+  /** Renames a camera or lens; onto a name already shown = merge. Returns the name it now goes by. */
+  rename: (kind: GearKind, name: string, to: string) => invoke<string>("gear_rename", { kind, name, to }),
+  /** Back to the names in the files, each kept apart. */
+  split: (kind: GearKind, name: string) => invoke<string[]>("gear_split", { kind, name }),
+};
+
 export interface Browse {
   years: { year: string; count: number; months: { key: string; month: number; count: number }[] }[];
   unknownDate: number;
-  cameras: { name: string; count: number }[];
+  gear: { cameras: GearItem[]; lenses: GearItem[] };
   folders: { rootId: number; children: FolderNode[] }[];
 }
 
@@ -180,7 +204,11 @@ export interface PhotoDetail {
   takenFromCamera: boolean;
   make: string | null;
   model: string | null;
+  /** Camera and lens as shown everywhere (their Gear names); null when the file doesn't say. */
+  camera: string | null;
   lens: string | null;
+  /** The lens as the file names it. */
+  lensInFile: string | null;
   width: number | null;
   height: number | null;
   iso: number | null;

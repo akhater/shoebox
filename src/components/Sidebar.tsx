@@ -1,4 +1,6 @@
 import {
+  Aperture,
+  Camera,
   ChevronRight,
   Ellipsis,
   Folder,
@@ -27,6 +29,8 @@ import {
   sameScope,
   type Browse,
   type FolderNode,
+  type GearItem,
+  type GearKind,
   type Overview,
   type RootInfo,
   type Scope,
@@ -58,6 +62,18 @@ interface Props {
   /** Drag and drop: `folder` goes inside `into`. */
   onMoveFolder: (folder: FolderTarget, into: FolderTarget) => void;
   onSettings: () => void;
+  /** Gear: renames a camera or lens (onto another's name = merge). */
+  onGearRename: (kind: GearKind, name: string, to: string) => void;
+  /** Gear: back to the names in its files, kept apart. */
+  onGearSplit: (kind: GearKind, name: string) => void;
+}
+
+/** A camera or lens row's menu: where it was asked for. */
+interface GearMenuAt {
+  kind: GearKind;
+  item: GearItem;
+  x: number;
+  y: number;
 }
 
 /** A folder in Sources: a source (catalog root) or a folder inside one. */
@@ -175,6 +191,7 @@ export function Sidebar(p: Props) {
   const { overview, scope, onScope } = p;
   const [open, toggle] = useOpenSet("shoebox.sidebar", ["sec:disks"]);
   const [menu, setMenu] = useState<{ t: FolderTarget; x: number; y: number } | null>(null);
+  const [gearMenu, setGearMenu] = useState<GearMenuAt | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   // Read synchronously: a blur right after Escape must not rename.
@@ -319,9 +336,13 @@ export function Sidebar(p: Props) {
     e.preventDefault();
   };
 
+  const anyMenu = menu != null || gearMenu != null;
   useEffect(() => {
-    if (menu == null) return;
-    const close = () => setMenu(null);
+    if (!anyMenu) return;
+    const close = () => {
+      setMenu(null);
+      setGearMenu(null);
+    };
     window.addEventListener("click", close);
     window.addEventListener("blur", close);
     window.addEventListener("resize", close);
@@ -330,7 +351,7 @@ export function Sidebar(p: Props) {
       window.removeEventListener("blur", close);
       window.removeEventListener("resize", close);
     };
-  }, [menu]);
+  }, [anyMenu]);
 
   const cls = (s: Scope, extra = "") => `nav-item ${!p.peopleOpen && sameScope(s, scope) ? "active" : ""} ${extra}`;
 
@@ -362,7 +383,30 @@ export function Sidebar(p: Props) {
         />
       )}
 
-      <div className="sidebar-scroll" ref={scroller} onKeyDown={onKey} onFocus={onFocus} onScroll={() => setMenu(null)}>
+      {gearMenu && (
+        <GearMenu
+          {...gearMenu}
+          others={(gearMenu.kind === "camera" ? p.browse?.gear.cameras : p.browse?.gear.lenses) ?? []}
+          onClose={() => {
+            setGearMenu(null);
+            opener.current?.focus();
+          }}
+          onRename={() => setRenaming(gearId(gearMenu.kind, gearMenu.item.name))}
+          onMerge={(into) => p.onGearRename(gearMenu.kind, gearMenu.item.name, into)}
+          onSplit={() => p.onGearSplit(gearMenu.kind, gearMenu.item.name)}
+        />
+      )}
+
+      <div
+        className="sidebar-scroll"
+        ref={scroller}
+        onKeyDown={onKey}
+        onFocus={onFocus}
+        onScroll={() => {
+          setMenu(null);
+          setGearMenu(null);
+        }}
+      >
         <div className="nav-group">
           <button {...nav(0)} className={cls({ kind: "all" })} onClick={() => onScope({ kind: "all" })}>
             <Images size={16} />
@@ -416,6 +460,34 @@ export function Sidebar(p: Props) {
             />
           ))}
           {overview && sources.length === 0 && <p className="muted small pad">No sources yet.</p>}
+        </Section>
+
+        <Section id="sec:gear" title="Gear" open={open} toggle={toggle}>
+          {(["camera", "lens"] as const).map((kind) => (
+            <GearGroup
+              key={kind}
+              kind={kind}
+              items={(kind === "camera" ? p.browse?.gear.cameras : p.browse?.gear.lenses) ?? []}
+              open={open}
+              toggle={toggle}
+              cls={cls}
+              onScope={onScope}
+              renaming={renaming}
+              onMenu={(item, at) => {
+                opener.current = document.activeElement as HTMLElement | null;
+                setMenu(null);
+                setGearMenu({ kind, item, ...at });
+              }}
+              onRename={(item) => setRenaming(gearId(kind, item.name))}
+              onRenamed={(item, to) => {
+                if (renamingNow.current !== gearId(kind, item.name)) return;
+                renamingNow.current = null;
+                setRenaming(null);
+                const n = to?.trim();
+                if (n && n !== item.name) p.onGearRename(kind, item.name, n);
+              }}
+            />
+          ))}
         </Section>
       </div>
 
@@ -711,5 +783,195 @@ function Tree({
           <Tree key={c.relPath} n={c} depth={depth + 1} root={root} v={v} p={p} open={open} toggle={toggle} f={f} cls={cls} />
         ))}
     </>
+  );
+}
+
+const gearId = (kind: GearKind, name: string) => `gear:${kind}:${name}`;
+
+/** Cameras or lenses, most used first: click one to see its photos. One name
+ *  per camera or lens, however its files spell it; rename and merge from its menu. */
+function GearGroup({
+  kind,
+  items,
+  open,
+  toggle,
+  cls,
+  onScope,
+  renaming,
+  onMenu,
+  onRename,
+  onRenamed,
+}: {
+  kind: GearKind;
+  items: GearItem[];
+  open: Set<string>;
+  toggle: (id: string) => void;
+  cls: (s: Scope, extra?: string) => string;
+  onScope: (s: Scope) => void;
+  renaming: string | null;
+  onMenu: (item: GearItem, at: { x: number; y: number }) => void;
+  onRename: (item: GearItem) => void;
+  onRenamed: (item: GearItem, to: string | null) => void;
+}) {
+  const key = `g:${kind}`;
+  const Icon = kind === "camera" ? Camera : Aperture;
+  if (!items.length) return null;
+  return (
+    <>
+      <div {...nav(1, key)} className="nav-item" onClick={() => toggle(key)}>
+        <Twisty open={open.has(key)} onClick={() => toggle(key)} />
+        <Icon size={15} />
+        <span className="grow">{kind === "camera" ? "Cameras" : "Lenses"}</span>
+        <span className="count">{fmtNum(items.filter((i) => !i.unknown).length)}</span>
+      </div>
+      {open.has(key) &&
+        items.map((item) => {
+          const s: Scope = { kind, name: item.name };
+          const editing = renaming === gearId(kind, item.name);
+          const menuAt = (x: number, y: number) => !item.unknown && onMenu(item, { x, y });
+          return (
+            <div
+              key={item.name}
+              {...nav(2)}
+              className={cls(s, `gear-item ${item.unknown ? "unknown" : ""}`)}
+              style={{ paddingLeft: 38 }}
+              onClick={(e) => {
+                e.currentTarget.focus();
+                onScope(s);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                menuAt(e.clientX, e.clientY);
+              }}
+              onKeyDown={(e) => {
+                if (editing || item.unknown) return;
+                if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  menuAt(r.left + 24, r.bottom);
+                } else if (e.key === "F2") {
+                  onRename(item);
+                } else return;
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              title={
+                item.unknown
+                  ? `Photos whose files don't name their ${kind}`
+                  : item.inFiles.length
+                    ? `${item.name}\nIn the files: ${item.inFiles.join(" · ")}`
+                    : item.name
+              }
+            >
+              {editing ? (
+                <input
+                  className="rename grow"
+                  autoFocus
+                  defaultValue={item.name}
+                  title={`Type another ${kind}'s name to merge the two`}
+                  onFocus={(e) => e.target.select()}
+                  onClick={(e) => e.stopPropagation()}
+                  onBlur={(e) => onRenamed(item, e.target.value)}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === "Enter") e.currentTarget.blur();
+                    if (e.key === "Escape") onRenamed(item, null);
+                  }}
+                />
+              ) : (
+                <span className="grow ellipsis">{item.name}</span>
+              )}
+              {!item.unknown && !editing && (
+                <button
+                  tabIndex={-1}
+                  className="icon-btn tiny"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const b = e.currentTarget.getBoundingClientRect();
+                    menuAt(b.left, b.bottom + 4);
+                  }}
+                  title="Rename, merge"
+                >
+                  <Ellipsis size={12} />
+                </button>
+              )}
+              <span className="count">{fmtNum(item.count)}</span>
+            </div>
+          );
+        })}
+    </>
+  );
+}
+
+/** A camera's or lens's menu: rename, merge into another, split back into the names in its files. */
+function GearMenu({
+  kind,
+  item,
+  x,
+  y,
+  others,
+  onClose,
+  onRename,
+  onMerge,
+  onSplit,
+}: GearMenuAt & {
+  others: GearItem[];
+  onClose: () => void;
+  onRename: () => void;
+  onMerge: (into: string) => void;
+  onSplit: () => void;
+}) {
+  const act = (fn: () => void) => () => {
+    onClose();
+    fn();
+  };
+  const targets = others.filter((o) => !o.unknown && o.name !== item.name);
+  return (
+    <div
+      className="menu folder-menu gear-menu"
+      style={{ left: Math.min(x, window.innerWidth - 260), top: Math.min(y, window.innerHeight - 300) }}
+      ref={(el) => {
+        if (el && !el.contains(document.activeElement)) el.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+      }}
+      onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        const items = [...e.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+        const i = items.indexOf(e.target as HTMLButtonElement);
+        if (e.key === "Escape" || e.key === "Tab") {
+          e.preventDefault();
+          onClose();
+        } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+        }
+      }}
+    >
+      <button onClick={act(onRename)} title="Shoebox's name for it; the photo files are not changed">
+        Rename <span className="shortcut">F2</span>
+      </button>
+      {item.inFiles.length > 0 && (
+        <button
+          onClick={act(onSplit)}
+          title={`In the files: ${item.inFiles.join(" · ")}`}
+        >
+          {item.inFiles.length > 1 ? "Split into the names in the files" : "Back to the name in the files"}
+        </button>
+      )}
+      {targets.length > 0 && (
+        <>
+          <hr />
+          <div className="menu-label">Same {kind} as…</div>
+          <div className="menu-scroll">
+            {targets.map((o) => (
+              <button key={o.name} onClick={act(() => onMerge(o.name))} title={`Merge into ${o.name}`}>
+                <span className="ellipsis">{o.name}</span>
+                <span className="shortcut">{fmtNum(o.count)}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   );
 }

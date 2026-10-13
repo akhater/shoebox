@@ -2,6 +2,7 @@
 //! No UI code here, so the CLI and the app share it.
 
 use crate::db::{self, FILE_MISSING, FILE_PRESENT, PREVIEW_OK, under_sql};
+use crate::gear::{self, CAMERA_SQL, LENS_SQL};
 use crate::paths::{self, DataDir};
 use crate::settings::Settings;
 use crate::volumes::{self, MountedVolume};
@@ -28,6 +29,7 @@ impl Catalog {
     pub fn open(data: DataDir) -> Result<Self> {
         data.ensure()?;
         let conn = db::open(&data.db_path())?;
+        gear::tidy_if_new_rules(&conn)?;
         let settings = Settings::load(&data.settings_path());
         let cat = Self {
             data,
@@ -555,6 +557,7 @@ impl Catalog {
                 key.clone(),
             ),
             Scope::Camera { name } => (format!("{CAMERA_SQL} = ?2"), 0, name.clone()),
+            Scope::Lens { name } => (format!("{LENS_SQL} = ?2"), 0, name.clone()),
             Scope::Person { id } => ("p.id IN (SELECT photo_id FROM faces WHERE person_id = ?1)".into(), *id, String::new()),
             Scope::Marked => ("p.marked = 1".into(), 0, String::new()),
         };
@@ -594,7 +597,7 @@ impl Catalog {
         Ok(out)
     }
 
-    /// Ways to browse: dates, cameras, and the folder tree under each root.
+    /// Ways to browse: dates, cameras and lenses, and the folder tree under each root.
     pub fn browse(&self) -> Result<Browse> {
         let db = self.db();
 
@@ -623,12 +626,7 @@ impl Catalog {
         drop(rows);
         drop(stmt);
 
-        let cameras: Vec<CameraNode> = db
-            .prepare(&format!(
-                "SELECT {CAMERA_SQL} AS cam, COUNT(*) FROM photos p GROUP BY cam ORDER BY COUNT(*) DESC"
-            ))?
-            .query_map([], |r| Ok(CameraNode { name: r.get(0)?, count: r.get(1)? }))?
-            .collect::<rusqlite::Result<_>>()?;
+        let gear = gear::list(&db)?;
 
         // Photos per folder (directly in it), then rolled up into a tree per
         // root. Empty folders (just made, or emptied) are listed too.
@@ -654,7 +652,7 @@ impl Catalog {
             folders.push(RootTree { root_id, children: top.children });
         }
 
-        Ok(Browse { years, unknown_date, cameras, folders })
+        Ok(Browse { years, unknown_date, gear, folders })
     }
 
     pub fn photo_detail(&self, id: i64) -> Result<PhotoDetail> {
@@ -662,9 +660,11 @@ impl Catalog {
         let db = self.db();
         let mut d = db
             .query_row(
-                "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
-                        exposure, focal, preview_state, preview_rev, error
-                   FROM photos WHERE id = ?1",
+                &format!(
+                    "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
+                            exposure, focal, preview_state, preview_rev, error, {CAMERA_SQL}, {LENS_SQL}
+                       FROM photos p WHERE id = ?1"
+                ),
                 [id],
                 |r| {
                     Ok(PhotoDetail {
@@ -674,7 +674,7 @@ impl Catalog {
                         taken_from_camera: r.get::<_, i64>(3)? != 0,
                         make: r.get(4)?,
                         model: r.get(5)?,
-                        lens: r.get(6)?,
+                        lens_in_file: r.get(6)?,
                         width: r.get(7)?,
                         height: r.get(8)?,
                         iso: r.get(9)?,
@@ -684,6 +684,8 @@ impl Catalog {
                         preview_state: r.get(13)?,
                         preview_rev: r.get(14)?,
                         error: r.get(15)?,
+                        camera: Some(r.get::<_, String>(16)?).filter(|c| c != gear::Kind::Camera.unknown()),
+                        lens: Some(r.get::<_, String>(17)?).filter(|l| l != gear::Kind::Lens.unknown()),
                         files: Vec::new(),
                     })
                 },
@@ -1052,7 +1054,11 @@ pub enum Scope {
     Date {
         key: String,
     },
+    /// A camera or a lens, by the name shown.
     Camera {
+        name: String,
+    },
+    Lens {
         name: String,
     },
     Person {
@@ -1120,7 +1126,6 @@ impl Filters {
     }
 }
 
-const LENS_SQL: &str = "COALESCE(NULLIF(TRIM(p.lens), ''), 'Unknown lens')";
 /// A file's extension, lower case ("IMG_0001.CR3" -> "cr3"), on file alias `f`.
 const EXT_SQL: &str = "lower(replace(f.name, rtrim(f.name, replace(f.name, '.', '')), ''))";
 const STATUS_SQL: &str = "CASE COALESCE(st.s, 0) WHEN 2 THEN 'online' WHEN 1 THEN 'offline' ELSE 'missing' END";
@@ -1206,19 +1211,12 @@ pub enum Sort {
 
 const SEP: char = std::path::MAIN_SEPARATOR;
 
-/// One name per camera body whatever wrote the file: rawler says
-/// "EOS R6 Mark III", the camera's JPEG says "Canon EOS R6 Mark III".
-const CAMERA_SQL: &str = "COALESCE(NULLIF(TRIM(CASE
-        WHEN p.model IS NULL THEN COALESCE(p.make, '')
-        WHEN p.make IS NOT NULL AND p.model NOT LIKE p.make || '%' THEN p.make || ' ' || p.model
-        ELSE p.model END), ''), 'Unknown camera')";
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Browse {
     pub years: Vec<YearNode>,
     pub unknown_date: i64,
-    pub cameras: Vec<CameraNode>,
+    pub gear: gear::Gear,
     pub folders: Vec<RootTree>,
 }
 
@@ -1235,13 +1233,6 @@ pub struct YearNode {
 pub struct MonthNode {
     pub key: String,
     pub month: u32,
-    pub count: i64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CameraNode {
-    pub name: String,
     pub count: i64,
 }
 
@@ -1438,7 +1429,11 @@ pub struct PhotoDetail {
     pub taken_from_camera: bool,
     pub make: Option<String>,
     pub model: Option<String>,
+    /// Camera and lens as shown everywhere (their Gear names); None when the file doesn't say.
+    pub camera: Option<String>,
     pub lens: Option<String>,
+    /// The lens as the file names it.
+    pub lens_in_file: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
     pub iso: Option<i64>,

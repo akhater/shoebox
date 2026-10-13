@@ -382,6 +382,10 @@ fn read_all(
     report.duplicates = duplicates.into_inner();
     report.reread = reread.into_inner();
     report.errors = errors.into_inner();
+    // New names grouped, new photos without a lens given their twin's.
+    if let Err(e) = crate::gear::after_scan(&cat.db()) {
+        log::warn!("gear names after reading: {e:#}");
+    }
     progress.read = read.into_inner();
     Ok(())
 }
@@ -665,67 +669,82 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
     let ckey = capture_key(&meta, &job.ext);
     let error = rendered.as_ref().err().cloned();
 
-    let (pid, outcome) =
-        {
-            let db = cat.db();
-            let tx = db.unchecked_transaction()?;
-            let others_present = |pid: i64| -> rusqlite::Result<bool> {
-                tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM files WHERE photo_id = ?1 AND state = ?2 AND id <> ?3)",
-                    params![pid, FILE_PRESENT, job.file_id],
+    let (pid, outcome) = {
+        let db = cat.db();
+        let tx = db.unchecked_transaction()?;
+        let others_present = |pid: i64| -> rusqlite::Result<bool> {
+            tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM files WHERE photo_id = ?1 AND state = ?2 AND id <> ?3)",
+                params![pid, FILE_PRESENT, job.file_id],
+                |r| r.get(0),
+            )
+        };
+        // Known content read again (preview unfinished or failed, or regenerating).
+        let same_fp: Option<i64> =
+            tx.query_row("SELECT id FROM photos WHERE fingerprint = ?1", [&fp], |r| r.get(0)).optional()?;
+        // Same path, new content, and no other copy of the old content: edited in place.
+        let edited = match (same_fp, job.prev_photo) {
+            (None, Some(prev)) if !others_present(prev)? => Some(prev),
+            _ => None,
+        };
+        // Moved and modified: same capture, and no copy of that photo left anywhere.
+        let recaptured: Option<i64> = match (same_fp, edited, &ckey) {
+            (None, None, Some(k)) => tx
+                .query_row(
+                    "SELECT p.id FROM photos p WHERE p.capture_key = ?1 AND NOT EXISTS
+                       (SELECT 1 FROM files f WHERE f.photo_id = p.id AND f.state = ?2 AND f.id <> ?3) LIMIT 1",
+                    params![k, FILE_PRESENT, job.file_id],
                     |r| r.get(0),
                 )
-            };
-            // Known content read again (preview unfinished or failed, or regenerating).
-            let same_fp: Option<i64> =
-                tx.query_row("SELECT id FROM photos WHERE fingerprint = ?1", [&fp], |r| r.get(0)).optional()?;
-            // Same path, new content, and no other copy of the old content: edited in place.
-            let edited = match (same_fp, job.prev_photo) {
-                (None, Some(prev)) if !others_present(prev)? => Some(prev),
-                _ => None,
-            };
-            // Moved and modified: same capture, and no copy of that photo left anywhere.
-            let recaptured: Option<i64> = match (same_fp, edited, &ckey) {
-                (None, None, Some(k)) => tx
-                    .query_row(
-                        "SELECT p.id FROM photos p WHERE p.capture_key = ?1 AND NOT EXISTS
-                       (SELECT 1 FROM files f WHERE f.photo_id = p.id AND f.state = ?2 AND f.id <> ?3) LIMIT 1",
-                        params![k, FILE_PRESENT, job.file_id],
-                        |r| r.get(0),
-                    )
-                    .optional()?,
-                _ => None,
-            };
+                .optional()?,
+            _ => None,
+        };
 
-            let result =
-                if let Some(pid) = same_fp.or(edited).or(recaptured) {
-                    tx.execute(
+        let result = if let Some(pid) = same_fp.or(edited).or(recaptured) {
+            tx.execute(
                 "UPDATE photos SET fingerprint = ?1, capture_key = ?2, taken_ts = ?3, taken_exif = ?4, make = ?5,
-                        model = ?6, lens = ?7, width = ?8, height = ?9, iso = ?10, fnumber = ?11, exposure = ?12,
-                        focal = ?13, preview_state = ?14, error = ?15
+                        model = ?6, lens = COALESCE(?7, lens), width = ?8, height = ?9, iso = ?10, fnumber = ?11, exposure = ?12,
+                        focal = ?13, preview_state = ?14, error = ?15, lens_read = ?17
                   WHERE id = ?16",
                 params![
                     fp, ckey, taken_ts, taken_exif, meta.make, meta.model, meta.lens, meta.width, meta.height,
-                    meta.iso, meta.fnumber, meta.exposure, meta.focal, PREVIEW_PENDING, error, pid
+                    meta.iso, meta.fnumber, meta.exposure, meta.focal, PREVIEW_PENDING, error, pid,
+                    imaging::LENS_READER
                 ],
             )?;
-                    (pid, Outcome::Updated)
-                } else {
-                    tx.execute(
+            (pid, Outcome::Updated)
+        } else {
+            tx.execute(
                 "INSERT INTO photos (fingerprint, capture_key, kind, taken_ts, taken_exif, make, model, lens, width,
-                        height, iso, fnumber, exposure, focal, preview_state, error, added_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                        height, iso, fnumber, exposure, focal, preview_state, error, added_at, lens_read)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
-                    fp, ckey, job.kind.as_str(), taken_ts, taken_exif, meta.make, meta.model, meta.lens, meta.width,
-                    meta.height, meta.iso, meta.fnumber, meta.exposure, meta.focal, PREVIEW_PENDING, error, db::now()
+                    fp,
+                    ckey,
+                    job.kind.as_str(),
+                    taken_ts,
+                    taken_exif,
+                    meta.make,
+                    meta.model,
+                    meta.lens,
+                    meta.width,
+                    meta.height,
+                    meta.iso,
+                    meta.fnumber,
+                    meta.exposure,
+                    meta.focal,
+                    PREVIEW_PENDING,
+                    error,
+                    db::now(),
+                    imaging::LENS_READER
                 ],
             )?;
-                    (tx.last_insert_rowid(), Outcome::Added)
-                };
-            link(&tx, job.file_id, result.0)?;
-            tx.commit()?;
-            result
+            (tx.last_insert_rowid(), Outcome::Added)
         };
+        link(&tx, job.file_id, result.0)?;
+        tx.commit()?;
+        result
+    };
 
     // Write the two JPEGs, then mark the photo ready.
     let saved = rendered.and_then(|r| {

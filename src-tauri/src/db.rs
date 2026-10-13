@@ -175,8 +175,31 @@ fn migrate(conn: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 8 {
+        // Safe to run again on a catalog that already has it (its version set back by hand).
+        let has_lens_read =
+            conn.prepare("SELECT 1 FROM pragma_table_info('photos') WHERE name = 'lens_read'")?.exists([])?;
+        let lens_read =
+            if has_lens_read { "" } else { "ALTER TABLE photos ADD COLUMN lens_read INTEGER NOT NULL DEFAULT 0;" };
+        conn.execute_batch(&format!("BEGIN; {SCHEMA_V8} {lens_read} PRAGMA user_version = 8; COMMIT;"))?;
+    }
     Ok(())
 }
+
+/// Gear names (see gear.rs): what a camera or lens is shown as, by the name
+/// its files give. `by_hand` = the user's (renamed, merged, split: backed up with
+/// the catalog); the others are spellings grouped by Shoebox, rebuilt after
+/// every scan. `photos.lens_read`: which lens reader last read the photo, so
+/// photos read before it improved are read again (metadata only).
+const SCHEMA_V8: &str = r#"
+CREATE TABLE IF NOT EXISTS gear_names (
+    kind        TEXT    NOT NULL,   -- 'camera' or 'lens'
+    name        TEXT    NOT NULL,   -- as the files give it
+    shown       TEXT    NOT NULL,
+    by_hand     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (kind, name)
+) WITHOUT ROWID;
+"#;
 
 /// Tags: the user's own keywords. They hang off the photo (its content), so they
 /// survive moves, copies and renames - the "Only Tag Once" core. Flat today;
