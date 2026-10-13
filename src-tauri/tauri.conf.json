@@ -35,7 +35,6 @@
     "shortDescription": "An offline catalog of every photo on every disk",
     "windows": {
       "nsis": {
-        "installMode": "perMachine",
         "installerIcon": "icons/icon.ico"
       }
     }

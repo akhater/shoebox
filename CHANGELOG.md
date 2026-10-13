@@ -80,8 +80,8 @@ Newest first. Same format and versioning as Argentum.
   ONNX runtime from Argentum into `models/` - nothing downloaded.
 - Release builds for Windows, macOS and Linux, each on Intel/AMD and ARM,
   made on GitHub only when a release is published (or by hand from the
-  Actions tab), as in Argentum: installers (Windows setup .exe into Program
-  Files, macOS .dmg, Linux .deb / .rpm / .AppImage) and a portable Shoebox
+  Actions tab), as in Argentum: installers (Windows setup .exe, per user, no
+  admin prompt; macOS .dmg; Linux .deb / .rpm / .AppImage) and a portable Shoebox
   folder, all with the app and `shoebox-cli`. Installed, Shoebox keeps its
   catalog, models and `shoebox.json` in `~/.shoebox`; portable, next to the
   app as before. On macOS and Linux it opens and browses but can't add disks

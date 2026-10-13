@@ -17,8 +17,9 @@ pub struct DataDir {
 }
 
 /// The Shoebox folder, holding `shoebox.json` and `models`: the app's own
-/// folder when it runs portable, otherwise (installed) `~/.shoebox`, since
-/// Program Files, a .app or /usr/bin isn't Shoebox's to write in.
+/// folder when it runs portable, otherwise (installed) `~/.shoebox`. An
+/// installed app's folder belongs to its installer (replaced on update,
+/// removed on uninstall) or isn't writable at all (a .app, /usr/bin).
 pub fn app_home() -> PathBuf {
     portable_home().unwrap_or_else(installed_home)
 }
