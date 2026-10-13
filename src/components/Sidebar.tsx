@@ -423,7 +423,7 @@ export function Sidebar(p: Props) {
                 className="nav-badge"
                 title={`${fmtNum(p.peopleNew)} ${p.peopleNew === 1 ? "person" : "people"} new or found in new photos`}
               >
-                {fmtNum(p.peopleNew)} new
+                {fmtNum(p.peopleNew)}
               </span>
             )}
             <span className="count">{fmtNum(p.people)}</span>
