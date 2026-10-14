@@ -236,12 +236,17 @@ struct Spec {
 
 impl Spec {
     /// A photo's lens named by what it is (`photo`) could be this lens.
+    /// Its apertures at both ends, when it gives both ("f/3.5-5.6"), or the
+    /// one it gives (some cameras say the widest at the focal length used).
     fn holds(&self, photo: &Spec) -> bool {
         let near = |a: f32, b: f32| (a - b).abs() < 0.6;
-        near(self.short, photo.short)
-            && near(self.long, photo.long)
-            && photo.wide_f >= self.wide_f - 0.05
-            && photo.wide_f <= self.tele_f + 0.05
+        let close = |a: f32, b: f32| (a / b).ln().abs() < 0.06;
+        let aperture = if photo.tele_f > photo.wide_f + 0.05 {
+            close(photo.wide_f, self.wide_f) && close(photo.tele_f, self.tele_f)
+        } else {
+            photo.wide_f >= self.wide_f * 0.97 && photo.wide_f <= self.tele_f * 1.03
+        };
+        near(self.short, photo.short) && near(self.long, photo.long) && aperture
     }
 }
 
@@ -251,9 +256,10 @@ const F_STOPS: [f32; 31] = [
     13.0, 14.0, 16.0, 18.0, 20.0, 22.0, 25.0, 29.0, 32.0,
 ];
 
-/// A lens named by what it is, for files that say no more (an older Canon
-/// records no lens id): "24-70mm f/2.8", "50mm f/1.8", "50mm".
-pub fn spec_name(short: f32, long: f32, aperture: Option<f32>) -> Option<String> {
+/// A lens named by what it is - its focal range, and widest aperture at both
+/// ends - for files that say no more (no name, no id it can be found by):
+/// "24-70mm f/2.8", "18-55mm f/3.5-5.6", "50mm".
+pub fn spec_name(short: f32, long: f32, aperture: Option<(f32, f32)>) -> Option<String> {
     if !(short > 0.0 && long >= short && long < 10_000.0) {
         return None;
     }
@@ -264,8 +270,10 @@ pub fn spec_name(short: f32, long: f32, aperture: Option<f32>) -> Option<String>
     let focal = if long - short < 0.05 { num(short) } else { format!("{}-{}", num(short), num(long)) };
     let stop =
         |a: f32| F_STOPS.iter().copied().min_by(|x, y| (x.ln() - a.ln()).abs().total_cmp(&(y.ln() - a.ln()).abs()));
-    Some(match aperture.filter(|a| (0.7..=64.0).contains(a)).and_then(stop) {
-        Some(f) => format!("{focal}mm f/{}", num(f)),
+    let f = |a: f32| Some(a).filter(|a| (0.7..=64.0).contains(a)).and_then(stop);
+    Some(match aperture.and_then(|(w, t)| f(w).map(|w| (w, f(t).unwrap_or(w)))) {
+        Some((w, t)) if t > w => format!("{focal}mm f/{}-{}", num(w), num(t)),
+        Some((w, _)) => format!("{focal}mm f/{}", num(w)),
         None => format!("{focal}mm"),
     })
 }
@@ -756,12 +764,13 @@ mod tests {
 
     #[test]
     fn a_lens_by_what_it_is() {
-        assert_eq!(spec_name(24.0, 70.0, Some(2.83)).as_deref(), Some("24-70mm f/2.8"));
-        assert_eq!(spec_name(50.0, 50.0, Some(1.78)).as_deref(), Some("50mm f/1.8"));
-        assert_eq!(spec_name(12.0, 24.0, Some(4.0)).as_deref(), Some("12-24mm f/4"));
-        assert_eq!(spec_name(100.0, 400.0, Some(5.66)).as_deref(), Some("100-400mm f/5.6"));
+        assert_eq!(spec_name(24.0, 70.0, Some((2.83, 2.83))).as_deref(), Some("24-70mm f/2.8"));
+        assert_eq!(spec_name(50.0, 50.0, Some((1.78, 1.78))).as_deref(), Some("50mm f/1.8"));
+        assert_eq!(spec_name(12.0, 24.0, Some((4.0, 4.0))).as_deref(), Some("12-24mm f/4"));
+        assert_eq!(spec_name(100.0, 400.0, Some((5.66, 5.66))).as_deref(), Some("100-400mm f/5.6"));
+        assert_eq!(spec_name(18.0, 55.0, Some((3.5, 5.6))).as_deref(), Some("18-55mm f/3.5-5.6"));
         assert_eq!(spec_name(50.0, 50.0, None).as_deref(), Some("50mm"));
-        assert_eq!(spec_name(0.0, 0.0, Some(2.8)), None);
+        assert_eq!(spec_name(0.0, 0.0, Some((2.8, 2.8))), None);
 
         let spec = |n: &str| spec_of(n).map(|s| (s.short, s.long, s.wide_f, s.tele_f));
         assert_eq!(spec("Canon EF 24-70mm f/2.8L USM"), Some((24.0, 70.0, 2.8, 2.8)));
@@ -790,13 +799,16 @@ mod tests {
         add(&db, "Canon", "EOS 10D", Some("50mm f/1.8"), 1); // not the f/1.4
         add(&db, "Canon", "EOS 10D", Some("12-24mm f/4"), 1); // no such lens here
         add(&db, "Canon", "EOS 10D", Some("100-400mm f/5.6"), 1); // a zoom, at its long end
+        add(&db, "Nikon", "D700", Some("100-400mm f/4.5-5.6"), 1); // the same, both ends given
+        add(&db, "Nikon", "D700", Some("100-400mm f/4-5.6"), 1); // not the same
         tidy(&db).unwrap();
         let g = list(&db).unwrap();
         assert_eq!(
             shown(&g.lenses),
             [
                 ("Canon EF 24-70mm f/2.8L USM", 5),
-                ("EF100-400mm f/4.5-5.6L IS USM", 2),
+                ("EF100-400mm f/4.5-5.6L IS USM", 3),
+                ("100-400mm f/4-5.6", 1),
                 ("12-24mm f/4", 1),
                 ("50mm f/1.8", 1),
                 ("Canon EF 50mm f/1.4 USM", 1)
