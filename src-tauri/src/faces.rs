@@ -783,12 +783,15 @@ impl FaceIndex {
     }
 
     /// Hides (or shows again) strangers. Their future faces still join them,
-    /// so they never come back as someone new.
+    /// so they never come back as someone new. All or nothing: an unknown
+    /// id changes nobody.
     pub fn set_ignored(&self, cat: &Catalog, ids: &[i64], ignored: bool) -> Result<()> {
         let mut db = cat.db();
         let tx = db.transaction()?;
         for id in ids {
-            tx.execute("UPDATE people SET ignored = ?1 WHERE id = ?2", params![ignored as i64, id])?;
+            if tx.execute("UPDATE people SET ignored = ?1 WHERE id = ?2", params![ignored as i64, id])? == 0 {
+                bail!("no person {id}");
+            }
         }
         tx.commit()?;
         Ok(())
