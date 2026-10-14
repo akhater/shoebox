@@ -169,6 +169,33 @@ impl DataDir {
         }
     }
 
+    /// Takes the lock of folder operation `id` (see [`OpLock`]), or None when
+    /// something else holds it: that operation is still running.
+    pub fn try_op_lock(&self, id: &str) -> io::Result<Option<OpLock>> {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad operation id {id:?}")));
+        }
+        let path = self.root.join(OPS_DIR).join(format!("{id}.lock"));
+        std::fs::create_dir_all(self.root.join(OPS_DIR))?;
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(OpLock { file: Some(file), path })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
+    /// Ids of the folder operations with a lock file: running, or cut short
+    /// (the system let go of their lock, the file stayed).
+    pub fn op_lock_ids(&self) -> Vec<String> {
+        std::fs::read_dir(self.root.join(OPS_DIR))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.strip_suffix(".lock").map(str::to_string))
+            .collect()
+    }
+
     /// (number of files, total bytes) under a sub-folder of the catalog.
     pub fn usage(&self, sub: &str) -> (u64, u64) {
         walkdir::WalkDir::new(self.root.join(sub))
@@ -179,7 +206,8 @@ impl DataDir {
     }
 
     /// Every file of the catalog except its databases (open while Shoebox runs:
-    /// they are snapshotted instead) and half-written temp files.
+    /// they are snapshotted instead), half-written temp files and the locks of
+    /// folder operations (held by a running one; nothing to keep).
     pub fn files(&self) -> Vec<PathBuf> {
         walkdir::WalkDir::new(&self.root)
             .into_iter()
@@ -187,7 +215,10 @@ impl DataDir {
             // the Shoebox folder and the first catalog. A move's own notes stay too.
             .filter_entry(|e| {
                 e.depth() != 1
-                    || !matches!(e.file_name().to_str(), Some("models" | POINTER_FILE | MOVE_JOURNAL | MOVE_LOCK))
+                    || !matches!(
+                        e.file_name().to_str(),
+                        Some("models" | POINTER_FILE | MOVE_JOURNAL | MOVE_LOCK | OPS_DIR)
+                    )
             })
             .flatten()
             .filter(|e| e.file_type().is_file())
@@ -529,13 +560,33 @@ pub fn remember_data_dir(root: &Path, left_behind: Option<&Path>) -> io::Result<
     write_pointer(&Pointer { data_dir: Some(root.to_path_buf()), old_data_dir: left_behind.map(Path::to_path_buf) })
 }
 
+/// Where the locks of folder operations live, in the catalog folder.
+const OPS_DIR: &str = "ops";
+
+/// Held for as long as a folder move, rename or delete runs (organize.rs): a
+/// lock on `ops\<id>.lock` in the catalog folder. The system lets go of it
+/// when the process ends, however it ends, so an operation whose lock is free
+/// was cut short, and one whose lock is held is still running - in this
+/// process or another (the window and `shoebox-cli` share a catalog).
+pub struct OpLock {
+    file: Option<std::fs::File>,
+    path: PathBuf,
+}
+
+impl Drop for OpLock {
+    fn drop(&mut self) {
+        drop(self.file.take()); // closing it lets go of the lock
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// What a catalog folder holds of its own: the databases (and their SQLite
 /// side files), settings, logs, backups, previews, thumbnails, faces, and a
 /// move's notes.
 fn is_catalog_entry(name: &str, is_dir: bool) -> bool {
     let n = name.to_lowercase();
     if is_dir {
-        return ["previews", "thumbs", "faces", "logs", "backup"].contains(&n.as_str());
+        return ["previews", "thumbs", "faces", "logs", "backup", OPS_DIR].contains(&n.as_str());
     }
     let db_file = ["catalog.db", "faces.db", "search.db"]
         .iter()
@@ -707,6 +758,22 @@ mod tests {
         assert!(data.write(photo, b"x").is_err());
         assert!(data.write(&data.root.join("..").join("escape.jpg"), b"x").is_err());
         assert!(data.write(&data.root.join("thumbs").join("ok.jpg"), b"x").is_ok());
+        let _ = std::fs::remove_dir_all(&data.root);
+    }
+
+    /// A running operation's lock can't be taken by anyone else - even another
+    /// handle in the same process; once let go, it can, and its file is gone.
+    #[test]
+    fn an_operation_lock_is_held_until_let_go() {
+        let data = DataDir { root: std::env::temp_dir().join("shoebox-op-lock") };
+        let _ = std::fs::remove_dir_all(&data.root);
+        assert!(data.try_op_lock("../escape").is_err() && data.try_op_lock("").is_err());
+        let held = data.try_op_lock("1-2-3").unwrap().expect("free");
+        assert!(data.try_op_lock("1-2-3").unwrap().is_none());
+        assert_eq!(data.op_lock_ids(), ["1-2-3"]);
+        drop(held);
+        assert!(data.op_lock_ids().is_empty());
+        assert!(data.try_op_lock("1-2-3").unwrap().is_some());
         let _ = std::fs::remove_dir_all(&data.root);
     }
 

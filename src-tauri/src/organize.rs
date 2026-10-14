@@ -18,17 +18,28 @@
 //!   Argentum's edits (`<file>.agdata`, `<file>.<id>.agdata`) with it.
 //! - Files on unplugged disks stay marked until their disk is plugged in.
 //! - The catalog forgets a file only once it is really gone from its folder.
+//!
+//! Shoebox can be stopped at any moment (killed, crashed). Every
+//! rename, move and delete is written down first (the `ops` table) and its
+//! steps change there in the same transaction as the catalog. One cut short
+//! is settled by [`resume`] at the next start (and when a disk comes back):
+//! finished if the catalog had already taken it, undone otherwise. An
+//! original is removed only once its copy was compared byte for byte; a copy
+//! is taken back only while its original is there.
 
 use crate::catalog::Catalog;
 use crate::db::{self, FILE_PRESENT};
 use crate::formats::{self, Kind};
+use crate::paths::OpLock;
 use crate::volumes;
-use anyhow::{Result, bail};
-use rusqlite::params;
-use serde::Serialize;
+use anyhow::{Result, anyhow, bail};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use testing::point as kill_point;
 
 /// Marks (or unmarks) photos for deletion. Catalog only: no file is touched.
 pub fn mark(cat: &Catalog, photo_ids: &[i64], marked: bool) -> Result<usize> {
@@ -232,9 +243,22 @@ pub fn delete_confirmed(cat: &Catalog, token: &str, volume_ids: &[i64]) -> Resul
         bail!("No disk ticked: nothing was deleted.");
     }
     let disk = |vid: i64| current.disks.iter().find(|d| d.volume_id == vid).expect("every file's disk is in the plan");
+    // Each file as the catalog knows it: (disk, folder, name).
+    let places: Vec<(i64, String, String)> = chosen
+        .iter()
+        .map(|f| {
+            let mount = disk(f.volume_id).mount.trim_end_matches('\\');
+            let rest = f.path.get(mount.len()..).unwrap_or("").trim_start_matches('\\');
+            let (rel, name) = rest.rsplit_once('\\').unwrap_or(("", rest));
+            (f.volume_id, rel.to_string(), name.to_string())
+        })
+        .collect();
+    refuse_if_busy(cat, &places.iter().map(|(v, rel, _)| (*v, rel.as_str())).collect::<Vec<_>>())?;
     let (to_bin, to_nuke): (Vec<&PlanFile>, Vec<&PlanFile>) =
         chosen.iter().copied().partition(|f| disk(f.volume_id).recycle);
 
+    let journal = Journal::begin(cat, &Op::Delete(DeleteOp { files: places.clone(), photos: Vec::new() }), DELETING)?;
+    kill_point("delete:journaled");
     let mut report = DeleteReport::default();
     if !to_bin.is_empty() {
         let paths: Vec<&Path> = to_bin.iter().map(|f| Path::new(&f.path)).collect();
@@ -248,10 +272,11 @@ pub fn delete_confirmed(cat: &Catalog, token: &str, volume_ids: &[i64]) -> Resul
             report.failed.push(format!("{}: {e}", f.path));
         }
     }
+    kill_point("delete:sent");
 
     // The catalog forgets only what is really gone.
     let mut gone = Vec::new();
-    for f in &chosen {
+    for (f, place) in chosen.iter().zip(&places) {
         if Path::new(&f.path).exists() {
             continue;
         }
@@ -264,18 +289,26 @@ pub fn delete_confirmed(cat: &Catalog, token: &str, volume_ids: &[i64]) -> Resul
             report.permanent += 1;
         }
         log::info!("deleted ({}): {}", if d.recycle { "recycle bin" } else { "permanent" }, f.path);
-        let rest = f.path.get(d.mount.trim_end_matches('\\').len()..).unwrap_or("").trim_start_matches('\\');
-        let (rel, name) = rest.rsplit_once('\\').unwrap_or(("", rest));
-        gone.push((f.volume_id, rel.to_string(), name.to_string()));
+        gone.push(place.clone());
     }
-    report.photos_removed = forget_files(cat, &gone)?;
+    let removed = forget_files(cat, &gone, &journal, &places)?;
+    report.photos_removed = removed.len();
+    kill_point("delete:forgotten");
+    drop_previews(cat, &removed)?;
+    journal.end(cat);
     Ok(report)
 }
 
 /// Drops the catalog rows of deleted files (volume id, folder, name). Photos
-/// left with no file leave the catalog with their previews and faces.
-/// Returns how many photos left.
-fn forget_files(cat: &Catalog, gone: &[(i64, String, String)]) -> Result<usize> {
+/// left with no file leave the catalog with their faces; their previews go
+/// next ([`drop_previews`]). The delete's journal (`journal`, listing all of
+/// `files`) moves on in the same transaction. Returns the photos that left.
+fn forget_files(
+    cat: &Catalog,
+    gone: &[(i64, String, String)],
+    journal: &Journal,
+    files: &[(i64, String, String)],
+) -> Result<Vec<i64>> {
     let mut removed = Vec::new();
     {
         let mut db = cat.db();
@@ -317,13 +350,31 @@ fn forget_files(cat: &Catalog, gone: &[(i64, String, String)]) -> Result<usize> 
                 [person],
             )?;
         }
+        let next = Op::Delete(DeleteOp { files: files.to_vec(), photos: removed.clone() });
+        journal.set_step(&tx, FORGOTTEN, Some(&next))?;
         tx.commit()?;
     }
-    for pid in &removed {
-        let _ = cat.data.remove(&cat.data.preview_path(*pid));
-        let _ = cat.data.remove(&cat.data.thumb_path(*pid));
+    Ok(removed)
+}
+
+/// Previews and thumbnails of photos that left the catalog. A photo id taken
+/// again since (SQLite reuses the highest one) keeps its new preview: the
+/// check and the removal happen while no one can add a photo.
+fn drop_previews(cat: &Catalog, photos: &[i64]) -> Result<()> {
+    if photos.is_empty() {
+        return Ok(());
     }
-    Ok(removed.len())
+    let mut db = cat.db();
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for pid in photos {
+        let back: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM photos WHERE id = ?1)", [pid], |r| r.get(0))?;
+        if !back {
+            let _ = cat.data.remove(&cat.data.preview_path(*pid));
+            let _ = cat.data.remove(&cat.data.thumb_path(*pid));
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// A name Windows accepts for a folder.
@@ -377,15 +428,41 @@ pub fn rename_folder(cat: &Catalog, volume_id: i64, rel: &str, new_name: &str) -
             "The catalog still remembers a folder called {name} there (its photos are missing). Choose another name."
         );
     }
-    std::fs::rename(&from, &to).map_err(|e| anyhow::anyhow!("Couldn't rename {}: {e}", from.display()))?;
-    if let Err(e) = move_in_catalog(cat, (volume_id, rel), (volume_id, &new_rel), Roots::Follow) {
-        // Keep disk and catalog in step: put the folder back.
-        let _ = std::fs::rename(&to, &from);
-        return Err(e);
-    }
+    refuse_if_busy(cat, &[(volume_id, rel), (volume_id, &new_rel)])?;
+    rename_on_disk(cat, volume_id, (rel, &new_rel), (&from, &to), Roots::Follow, "rename")?;
     log::info!("renamed folder {} -> {}", from.display(), to.display());
     let _ = cat.refresh_roots();
     Ok(new_rel)
+}
+
+/// Renames a catalog folder on its own disk (`from` -> `to`, which are
+/// `rels` there), then points the catalog at it. Written down first: a stop
+/// in between is finished at the next start.
+fn rename_on_disk(
+    cat: &Catalog,
+    volume_id: i64,
+    rels: (&str, &str),
+    (from, to): (&Path, &Path),
+    roots: Roots,
+    verb: &str,
+) -> Result<()> {
+    let op = RenameOp { volume_id, rel: rels.0.into(), new_rel: rels.1.into(), absorb: roots == Roots::Absorb };
+    let journal = Journal::begin(cat, &Op::Rename(op), RENAMING)?;
+    kill_point("rename:journaled");
+    if let Err(e) = std::fs::rename(from, to) {
+        journal.end(cat);
+        bail!("Couldn't {verb} {}: {e}", from.display());
+    }
+    kill_point("rename:renamed");
+    if let Err(e) = move_in_catalog(cat, (volume_id, rels.0), (volume_id, rels.1), roots, Then::Done(&journal)) {
+        // Keep disk and catalog in step: put the folder back (failing that,
+        // the next start finishes the rename).
+        if std::fs::rename(to, from).is_ok() {
+            journal.end(cat);
+        }
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// What happens to catalog roots at or under a folder that moves.
@@ -397,29 +474,46 @@ enum Roots {
     Absorb,
 }
 
-/// Points the catalog's folders at or under `old` (disk, path) to `new`.
-fn move_in_catalog(cat: &Catalog, old: (i64, &str), new: (i64, &str), roots: Roots) -> Result<()> {
-    let mut db = cat.db();
-    let tx = db.transaction()?;
-    for table in ["folders", "roots"] {
-        let rows: Vec<(i64, String)> = tx
-            .prepare(&format!("SELECT id, rel_path FROM {table} WHERE volume_id = ?1 AND {}", db::under_sql(table, 2)))?
-            .query_map(params![old.0, old.1], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        for (id, rel) in rows {
-            if table == "roots" && roots == Roots::Absorb {
-                tx.execute("DELETE FROM roots WHERE id = ?1", [id])?;
-                continue;
+/// What a catalog change does to its journal, in the same transaction.
+enum Then<'a> {
+    /// The change is complete.
+    Done(&'a Journal),
+    /// It goes on to this step.
+    Step(&'a Journal, &'static str),
+}
+
+/// Points the catalog's folders at or under `old` (disk, path) to `new`. On
+/// the disk before it returns: the originals of a copy go next.
+fn move_in_catalog(cat: &Catalog, old: (i64, &str), new: (i64, &str), roots: Roots, then: Then) -> Result<()> {
+    flushed(cat, |conn| {
+        let tx = conn.transaction()?;
+        for table in ["folders", "roots"] {
+            let rows: Vec<(i64, String)> = tx
+                .prepare(&format!(
+                    "SELECT id, rel_path FROM {table} WHERE volume_id = ?1 AND {}",
+                    db::under_sql(table, 2)
+                ))?
+                .query_map(params![old.0, old.1], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (id, rel) in rows {
+                if table == "roots" && roots == Roots::Absorb {
+                    tx.execute("DELETE FROM roots WHERE id = ?1", [id])?;
+                    continue;
+                }
+                let moved = format!("{}{}", new.1, &rel[old.1.len()..]);
+                tx.execute(
+                    &format!("UPDATE {table} SET volume_id = ?1, rel_path = ?2 WHERE id = ?3"),
+                    params![new.0, moved, id],
+                )?;
             }
-            let moved = format!("{}{}", new.1, &rel[old.1.len()..]);
-            tx.execute(
-                &format!("UPDATE {table} SET volume_id = ?1, rel_path = ?2 WHERE id = ?3"),
-                params![new.0, moved, id],
-            )?;
         }
-    }
-    tx.commit()?;
-    Ok(())
+        match then {
+            Then::Done(journal) => journal.remove(&tx)?,
+            Then::Step(journal, step) => journal.set_step(&tx, step, None)?,
+        }
+        tx.commit()?;
+        Ok(())
+    })
 }
 
 /// A folder (`rel` on disk `from`) going into the folder `to_parent` on disk `to`.
@@ -495,6 +589,7 @@ pub fn check_move(cat: &Catalog, m: &FolderMove) -> Result<(PathBuf, PathBuf, St
             "The catalog still remembers a folder called {name} there (its photos are missing). Rename one of them first."
         );
     }
+    refuse_if_busy(cat, &[(m.from, &m.rel), (m.to, &new_rel)])?;
     Ok((from, to, new_rel))
 }
 
@@ -505,6 +600,9 @@ pub fn check_move(cat: &Catalog, m: &FolderMove) -> Result<(PathBuf, PathBuf, St
 ///   update the catalog, then remove the originals one by one. A failure or
 ///   `cancel` before the catalog changes removes the partial copy and leaves
 ///   the original as it was.
+///
+/// Either way it is written down first, so a stop at any point is settled
+/// at the next start ([`resume`]).
 pub fn move_folder(
     cat: &Catalog,
     m: &FolderMove,
@@ -513,11 +611,7 @@ pub fn move_folder(
 ) -> Result<MoveResult> {
     let (from, to, new_rel) = check_move(cat, m)?;
     if m.from == m.to {
-        std::fs::rename(&from, &to).map_err(|e| anyhow::anyhow!("Couldn't move {}: {e}", from.display()))?;
-        if let Err(e) = move_in_catalog(cat, (m.from, &m.rel), (m.to, &new_rel), Roots::Absorb) {
-            let _ = std::fs::rename(&to, &from);
-            return Err(e);
-        }
+        rename_on_disk(cat, m.from, (&m.rel, &new_rel), (&from, &to), Roots::Absorb, "move")?;
         log::info!("moved folder {} -> {}", from.display(), to.display());
         let _ = cat.refresh_roots();
         return Ok(MoveResult {
@@ -534,8 +628,11 @@ pub fn move_folder(
     let mut dirs = Vec::new();
     let mut files = Vec::new();
     for e in walkdir::WalkDir::new(&from).follow_links(false).min_depth(1) {
-        let e = e.map_err(|e| anyhow::anyhow!("Can't read part of {}: {e}. Nothing was moved.", from.display()))?;
-        let inside = e.path().strip_prefix(&from)?.to_path_buf();
+        let e = e.map_err(|e| anyhow!("Can't read part of {}: {e}. Nothing was moved.", from.display()))?;
+        let inside = e.path().strip_prefix(&from)?.to_str().map(str::to_string);
+        let inside = inside.ok_or_else(|| {
+            anyhow!("{} has a name Shoebox can't note down; it won't move it. Nothing was moved.", e.path().display())
+        })?;
         let kind = e.file_type();
         if kind.is_symlink() {
             bail!("{} is a link to somewhere else; Shoebox won't move it. Nothing was moved.", e.path().display());
@@ -555,45 +652,41 @@ pub fn move_folder(
             total_bytes >> 20
         );
     }
-    let mut p = MoveProgress { phase: "copying".into(), total_files: files.len(), total_bytes, ..Default::default() };
+    let plan = CopyOp { from: m.from, rel: m.rel.clone(), to: m.to, new_rel: new_rel.clone(), dirs, files };
+    let journal = Journal::begin(cat, &Op::Copy(plan.clone()), COPYING)?;
+    kill_point("copy:journaled");
+    // Only a folder this move made is ever taken back.
+    if let Err(e) = std::fs::create_dir(&to) {
+        journal.end(cat);
+        bail!("Couldn't create {}: {e}. Nothing was moved.", to.display());
+    }
+    let mut p =
+        MoveProgress { phase: "copying".into(), total_files: plan.files.len(), total_bytes, ..Default::default() };
     progress(&p);
 
-    // Only what this move made is ever undone.
-    let mut made_dirs = Vec::new();
-    let mut made_files = Vec::new();
-    let undo = |made_files: &[PathBuf], made_dirs: &[PathBuf]| {
-        for f in made_files {
-            let _ = remove_original(f);
-        }
-        for d in made_dirs.iter().rev() {
-            let _ = std::fs::remove_dir(d);
-        }
-    };
-    let copy_all = |made_files: &mut Vec<PathBuf>, made_dirs: &mut Vec<PathBuf>, p: &mut MoveProgress| -> Result<()> {
-        std::fs::create_dir(&to)?;
-        made_dirs.push(to.clone());
-        for d in &dirs {
+    let copy_all = |p: &mut MoveProgress| -> Result<()> {
+        for d in &plan.dirs {
             std::fs::create_dir(to.join(d))?;
-            made_dirs.push(to.join(d));
         }
-        for (f, size) in &files {
+        for (f, size) in &plan.files {
             if cancel.load(Ordering::Relaxed) {
                 bail!("Stopped. Nothing was moved.");
             }
             let dst = to.join(f);
             std::fs::copy(from.join(f), &dst)?; // keeps the file's dates, so scans see it unchanged
-            made_files.push(dst.clone());
             // On the disk, not just in memory (a read-only copy can't be opened to flush; Windows writes it soon anyway).
             if let Ok(out) = std::fs::OpenOptions::new().write(true).open(&dst) {
                 out.sync_all()?;
             }
+            kill_point("copy:copied");
             p.files += 1;
             p.bytes += size;
             progress(p);
         }
-        *p = MoveProgress { phase: "checking".into(), total_files: files.len(), total_bytes, ..Default::default() };
+        *p =
+            MoveProgress { phase: "checking".into(), total_files: plan.files.len(), total_bytes, ..Default::default() };
         progress(p);
-        for (f, size) in &files {
+        for (f, size) in &plan.files {
             if cancel.load(Ordering::Relaxed) {
                 bail!("Stopped. Nothing was moved.");
             }
@@ -604,44 +697,62 @@ pub fn move_folder(
             p.bytes += size;
             progress(p);
         }
+        kill_point("copy:checked");
         Ok(())
     };
-    if let Err(e) = copy_all(&mut made_files, &mut made_dirs, &mut p) {
-        undo(&made_files, &made_dirs);
-        return Err(e);
+    if let Err(e) = copy_all(&mut p) {
+        return Err(give_up_copy(cat, journal, &plan, e));
     }
-    if let Err(e) = move_in_catalog(cat, (m.from, &m.rel), (m.to, &new_rel), Roots::Absorb) {
-        undo(&made_files, &made_dirs);
-        return Err(e);
+    let then = Then::Step(&journal, REMOVING);
+    if let Err(e) = move_in_catalog(cat, (m.from, &m.rel), (m.to, &new_rel), Roots::Absorb, then) {
+        return Err(give_up_copy(cat, journal, &plan, e));
     }
+    kill_point("copy:cataloged");
     log::info!(
         "copied and checked {} files ({total_bytes} bytes): {} -> {}",
-        files.len(),
+        plan.files.len(),
         from.display(),
         to.display()
     );
 
     // The catalog now points at the checked copy; the originals can go.
-    p = MoveProgress { phase: "removing".into(), total_files: files.len(), total_bytes, ..Default::default() };
+    p = MoveProgress { phase: "removing".into(), total_files: plan.files.len(), total_bytes, ..Default::default() };
     progress(&p);
-    let mut left_behind = Vec::new();
-    for (f, _) in &files {
-        let path = from.join(f);
-        if let Err(e) = remove_original(&path) {
-            log::warn!("move: couldn't remove {}: {e}", path.display());
-            left_behind.push(path.to_string_lossy().into_owned());
-        }
+    let left_behind = match finish_copy(cat, &plan, false, &mut || {
         p.files += 1;
         progress(&p);
-    }
-    // Folders bottom-up; one that isn't empty (something left, or added meanwhile) stays.
-    for d in dirs.iter().rev().map(|d| from.join(d)).chain(std::iter::once(from.clone())) {
-        if std::fs::remove_dir(&d).is_err() && d.exists() {
-            log::warn!("move: left {} (not empty)", d.display());
+    })? {
+        Some(left) => {
+            journal.end(cat);
+            left
         }
-    }
+        None => {
+            // The journal stays: the next start (or the disk coming back) finishes it.
+            log::warn!("move: a disk went away while {} was being removed", from.display());
+            Vec::new()
+        }
+    };
     let _ = cat.refresh_roots();
-    Ok(MoveResult { volume_id: m.to, rel: new_rel, copied: true, files: files.len(), bytes: total_bytes, left_behind })
+    Ok(MoveResult {
+        volume_id: m.to,
+        rel: new_rel,
+        copied: true,
+        files: plan.files.len(),
+        bytes: total_bytes,
+        left_behind,
+    })
+}
+
+/// A copy to another disk that failed or was stopped before the catalog
+/// changed: the copy is taken back, the original stays as it was. Returns `e`.
+fn give_up_copy(cat: &Catalog, journal: Journal, plan: &CopyOp, e: anyhow::Error) -> anyhow::Error {
+    match undo_copy(cat, plan) {
+        Ok(true) => journal.end(cat),
+        // The journal stays: the next start takes the rest back.
+        Ok(false) => log::warn!("move: part of the copy at {} is still there; Shoebox removes it later", plan.new_rel),
+        Err(undo) => log::warn!("move: couldn't take back the copy at {}: {undo:#}", plan.new_rel),
+    }
+    e
 }
 
 /// Removes an original after its copy was checked; a read-only one is made
@@ -705,6 +816,489 @@ pub fn create_folder(cat: &Catalog, volume_id: i64, parent_rel: &str, name: &str
     cat.db().execute("INSERT OR IGNORE INTO folders (volume_id, rel_path) VALUES (?1, ?2)", params![volume_id, rel])?;
     log::info!("new folder {}", path.display());
     Ok(rel)
+}
+
+// The journal: every rename, move and delete is written down before a disk
+// changes, so one cut short (a kill, a crash) is settled at the next start.
+
+const RENAMING: &str = "renaming";
+const COPYING: &str = "copying";
+const REMOVING: &str = "removing";
+const DELETING: &str = "deleting";
+const FORGOTTEN: &str = "forgotten";
+
+/// A change under way, as the `ops` table keeps it (JSON). Places are
+/// (disk id, folder on that disk), never drive letters: a disk can come back
+/// as another one.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum Op {
+    Rename(RenameOp),
+    Copy(CopyOp),
+    Delete(DeleteOp),
+}
+
+/// A folder renamed, or moved on its own disk: one rename on the disk.
+/// Step: renaming (its journal goes in the catalog's transaction).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct RenameOp {
+    volume_id: i64,
+    rel: String,
+    new_rel: String,
+    /// Into another source's folder: roots inside it join that source.
+    absorb: bool,
+}
+
+/// A folder moved to another disk. Steps: copying (the catalog still points
+/// at the original), then removing (it points at the checked copy).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct CopyOp {
+    from: i64,
+    rel: String,
+    to: i64,
+    new_rel: String,
+    /// Sub-folders and files (with their size), inside the folder.
+    dirs: Vec<String>,
+    files: Vec<(String, u64)>,
+}
+
+/// Files confirmed for deletion: (disk, folder, name). Steps: deleting, then
+/// forgotten (the catalog has dropped them; `photos` left with them and
+/// their previews go).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct DeleteOp {
+    files: Vec<(i64, String, String)>,
+    #[serde(default)]
+    photos: Vec<i64>,
+}
+
+/// A change's row in `ops`, and its lock, held until it is done.
+struct Journal {
+    id: String,
+    _lock: OpLock,
+}
+
+impl Journal {
+    /// Writes down what is about to happen, before anything on a disk changes.
+    fn begin(cat: &Catalog, op: &Op, step: &str) -> Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = format!(
+            "{}-{}-{}",
+            chrono::Utc::now().timestamp_millis(),
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        // Locked before the row exists: no one can take it for one cut short.
+        let lock = cat.data.try_op_lock(&id)?.ok_or_else(|| anyhow!("operation {id} is taken"))?;
+        let plan = serde_json::to_string(op)?;
+        flushed(cat, |conn| {
+            conn.execute(
+                "INSERT INTO ops (id, step, plan, started) VALUES (?1, ?2, ?3, ?4)",
+                params![id, step, plan, db::now()],
+            )?;
+            Ok(())
+        })?;
+        Ok(Self { id, _lock: lock })
+    }
+
+    /// Moves on to `step` (and `op`, when it changed), inside the caller's transaction.
+    fn set_step(&self, tx: &rusqlite::Connection, step: &str, op: Option<&Op>) -> Result<()> {
+        match op {
+            Some(op) => tx.execute(
+                "UPDATE ops SET step = ?2, plan = ?3 WHERE id = ?1",
+                params![self.id, step, serde_json::to_string(op)?],
+            )?,
+            None => tx.execute("UPDATE ops SET step = ?2 WHERE id = ?1", params![self.id, step])?,
+        };
+        Ok(())
+    }
+
+    /// Done, inside the caller's transaction.
+    fn remove(&self, tx: &rusqlite::Connection) -> Result<()> {
+        tx.execute("DELETE FROM ops WHERE id = ?1", [&self.id])?;
+        Ok(())
+    }
+
+    /// Done (or undone): nothing left to settle. Failing that, the next start
+    /// settles it again, which changes nothing.
+    fn end(self, cat: &Catalog) {
+        if let Err(e) = self.remove(&cat.db()) {
+            log::warn!("operation {}: {e:#}", self.id);
+        }
+    }
+}
+
+/// Runs `f` on the catalog with each commit on the disk before it returns
+/// (SQLite's synchronous = FULL, back to Shoebox's usual NORMAL after): a
+/// step written down must be there before the files it covers change.
+fn flushed<T>(cat: &Catalog, f: impl FnOnce(&mut rusqlite::Connection) -> Result<T>) -> Result<T> {
+    let mut db = cat.db();
+    db.pragma_update(None, "synchronous", "FULL")?;
+    let out = f(&mut db);
+    let back = db.pragma_update(None, "synchronous", "NORMAL");
+    let out = out?;
+    back?;
+    Ok(out)
+}
+
+/// What [`resume`] did.
+#[derive(Serialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Resumed {
+    /// Changes finished as they were asked.
+    pub finished: Vec<String>,
+    /// Changes undone: disk and catalog are as they were before.
+    pub undone: Vec<String>,
+    /// Changes waiting for a disk to be plugged in.
+    pub waiting: Vec<String>,
+}
+
+impl Resumed {
+    pub fn is_empty(&self) -> bool {
+        self.finished.is_empty() && self.undone.is_empty() && self.waiting.is_empty()
+    }
+}
+
+enum Settled {
+    Finished,
+    Undone,
+    Waiting,
+}
+
+/// Settles every rename, move and delete cut short (Shoebox killed or
+/// crashed), as far as the disks plugged in allow: finished if the
+/// catalog had already taken it, undone otherwise. The rest waits for its
+/// disk. Runs at start and when a disk is plugged in. A change still running,
+/// in this Shoebox or another (the window and `shoebox-cli`), is left alone.
+pub fn resume(cat: &Catalog) -> Result<Resumed> {
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = Resumed::default();
+    let ids: Vec<String> = cat
+        .db()
+        .prepare("SELECT id FROM ops ORDER BY started, id")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for id in &ids {
+        let Some(lock) = cat.data.try_op_lock(id)? else { continue }; // still running
+        let row: Option<(String, String)> = cat
+            .db()
+            .query_row("SELECT step, plan FROM ops WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let Some((step, plan)) = row else { continue }; // it finished meanwhile
+        let op: Op = match serde_json::from_str(&plan) {
+            Ok(op) => op,
+            Err(e) => {
+                log::warn!("operation {id}: unreadable ({e}), left as it is");
+                continue;
+            }
+        };
+        let what = op.describe(cat);
+        let journal = Journal { id: id.clone(), _lock: lock };
+        match settle(cat, journal, &step, &op) {
+            Ok(Settled::Finished) => {
+                log::info!("cut short, now finished: {what}");
+                out.finished.push(what);
+            }
+            Ok(Settled::Undone) => {
+                log::info!("cut short, now undone: {what}");
+                out.undone.push(what);
+            }
+            Ok(Settled::Waiting) => {
+                log::info!("cut short, waiting for a disk: {what}");
+                out.waiting.push(what);
+            }
+            Err(e) => {
+                log::warn!("cut short, couldn't settle yet: {what}: {e:#}");
+                out.waiting.push(what);
+            }
+        }
+    }
+    // Locks of changes cut short before they were written down: taking one
+    // and letting go removes it.
+    for id in cat.data.op_lock_ids() {
+        if !ids.contains(&id) {
+            drop(cat.data.try_op_lock(&id));
+        }
+    }
+    if !out.finished.is_empty() || !out.undone.is_empty() {
+        let _ = cat.refresh_roots();
+    }
+    Ok(out)
+}
+
+fn settle(cat: &Catalog, journal: Journal, step: &str, op: &Op) -> Result<Settled> {
+    Ok(match (op, step) {
+        (Op::Rename(r), RENAMING) => settle_rename(cat, journal, r)?,
+        (Op::Copy(c), COPYING) => {
+            if !undo_copy(cat, c)? {
+                return Ok(Settled::Waiting);
+            }
+            journal.end(cat);
+            Settled::Undone
+        }
+        (Op::Copy(c), REMOVING) => {
+            let Some(left) = finish_copy(cat, c, true, &mut || {})? else { return Ok(Settled::Waiting) };
+            if !left.is_empty() {
+                log::warn!("move: {} original(s) left behind: {}", left.len(), left.join(", "));
+            }
+            journal.end(cat);
+            Settled::Finished
+        }
+        (Op::Delete(d), DELETING) => settle_delete(cat, journal, d)?,
+        (Op::Delete(d), FORGOTTEN) => {
+            drop_previews(cat, &d.photos)?;
+            journal.end(cat);
+            Settled::Finished
+        }
+        (_, other) => bail!("unknown step {other:?}"),
+    })
+}
+
+/// A rename on one disk, cut short: the catalog never took it (its
+/// transaction ends the journal). If the disk did, the catalog follows.
+fn settle_rename(cat: &Catalog, journal: Journal, r: &RenameOp) -> Result<Settled> {
+    let Some(mount) = cat.mount_of(r.volume_id) else { return Ok(Settled::Waiting) };
+    let from = PathBuf::from(volumes::join(&mount, &r.rel));
+    let to = PathBuf::from(volumes::join(&mount, &r.new_rel));
+    let roots = if r.absorb { Roots::Absorb } else { Roots::Follow };
+    match renamed(&from, &to) {
+        Some(true) => {
+            move_in_catalog(cat, (r.volume_id, &r.rel), (r.volume_id, &r.new_rel), roots, Then::Done(&journal))?;
+            Ok(Settled::Finished)
+        }
+        Some(false) => {
+            journal.end(cat);
+            Ok(Settled::Undone)
+        }
+        None => {
+            log::warn!("neither {} nor {} is there; the catalog stays as it was", from.display(), to.display());
+            journal.end(cat);
+            Ok(Settled::Undone)
+        }
+    }
+}
+
+/// Whether the rename `from` -> `to` happened on the disk; None when neither
+/// is there.
+fn renamed(from: &Path, to: &Path) -> Option<bool> {
+    // "trip" -> "Trip" is one folder on Windows: its exact name tells.
+    let one_folder = from.to_string_lossy().eq_ignore_ascii_case(&to.to_string_lossy());
+    if one_folder && exact_entry(to) {
+        return Some(true);
+    }
+    if from.exists() {
+        Some(false)
+    } else if to.exists() {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// Whether `path`'s folder lists it under exactly that name, case included.
+fn exact_entry(path: &Path) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return false };
+    std::fs::read_dir(parent).into_iter().flatten().flatten().any(|e| e.file_name() == name)
+}
+
+/// (original folder, copy) of a move to another disk, while both disks are plugged in.
+fn copy_paths(cat: &Catalog, c: &CopyOp) -> Option<(PathBuf, PathBuf)> {
+    let from = volumes::join(&cat.mount_of(c.from)?, &c.rel);
+    let to = volumes::join(&cat.mount_of(c.to)?, &c.new_rel);
+    Some((from.into(), to.into()))
+}
+
+/// A disk the catalog knows as plugged in, still there.
+fn plugged(cat: &Catalog, volume_id: i64) -> bool {
+    cat.mount_of(volume_id).is_some_and(|m| Path::new(&m).is_dir())
+}
+
+/// Takes back a copy to another disk whose catalog change never happened:
+/// each copied file whose original is still there (a file whose original
+/// isn't stays), then the folders the copy made, if empty. False while a disk
+/// is missing or a copy can't be removed: tried again later.
+fn undo_copy(cat: &Catalog, c: &CopyOp) -> Result<bool> {
+    let Some((from, to)) = copy_paths(cat, c) else { return Ok(false) };
+    if !to.exists() {
+        return Ok(true);
+    }
+    let mut all = true;
+    for (f, _) in &c.files {
+        let (orig, copy) = (from.join(f), to.join(f));
+        if copy.symlink_metadata().is_err() {
+            continue;
+        }
+        if !orig.is_file() {
+            log::warn!("move: kept {}: its original isn't there", copy.display());
+        } else if let Err(e) = remove_original(&copy) {
+            log::warn!("move: couldn't remove the copy {}: {e}", copy.display());
+            all = false;
+        }
+    }
+    for d in c.dirs.iter().rev().map(|d| to.join(d)).chain(std::iter::once(to.clone())) {
+        if std::fs::remove_dir(&d).is_err() && d.exists() {
+            log::warn!("move: left {} (not empty)", d.display());
+        }
+    }
+    Ok(all && plugged(cat, c.from) && plugged(cat, c.to))
+}
+
+/// The catalog points at the copy: each original goes once its copy is there
+/// and the same, then the folders it leaves empty. `check`: compare every
+/// byte again (after a restart; a move that has just compared them doesn't).
+/// Returns the originals left behind, or None while a disk is missing.
+fn finish_copy(cat: &Catalog, c: &CopyOp, check: bool, done_one: &mut dyn FnMut()) -> Result<Option<Vec<String>>> {
+    let Some((from, to)) = copy_paths(cat, c) else { return Ok(None) };
+    let mut left = Vec::new();
+    for (f, _) in &c.files {
+        let (orig, copy) = (from.join(f), to.join(f));
+        if orig.symlink_metadata().is_ok() {
+            let copied = !check || (copy.is_file() && same_bytes(&orig, &copy).unwrap_or(false));
+            if !copied {
+                log::warn!("move: kept {}: its copy {} isn't the same", orig.display(), copy.display());
+                left.push(orig.to_string_lossy().into_owned());
+            } else if let Err(e) = remove_original(&orig) {
+                log::warn!("move: couldn't remove {}: {e}", orig.display());
+                left.push(orig.to_string_lossy().into_owned());
+            } else {
+                kill_point("copy:removed");
+            }
+        }
+        done_one();
+    }
+    // Folders bottom-up; one that isn't empty (something left, or added meanwhile) stays.
+    for d in c.dirs.iter().rev().map(|d| from.join(d)).chain(std::iter::once(from.clone())) {
+        if std::fs::remove_dir(&d).is_err() && d.exists() {
+            log::warn!("move: left {} (not empty)", d.display());
+        }
+    }
+    kill_point("copy:tidied");
+    // A disk that went away halfway: what it hid is seen to next time.
+    if !plugged(cat, c.from) || !plugged(cat, c.to) {
+        return Ok(None);
+    }
+    Ok(Some(left))
+}
+
+/// A delete cut short: the catalog forgets each file that is gone from its
+/// folder, keeps (still marked) each that is there. A folder that isn't
+/// there says nothing about its files (promise 3): they stay.
+fn settle_delete(cat: &Catalog, journal: Journal, d: &DeleteOp) -> Result<Settled> {
+    let mut gone = Vec::new();
+    for (vid, rel, name) in &d.files {
+        let Some(mount) = cat.mount_of(*vid) else { return Ok(Settled::Waiting) };
+        let folder = PathBuf::from(volumes::join(&mount, rel));
+        if folder.is_dir() && folder.join(name).symlink_metadata().is_err() {
+            gone.push((*vid, rel.clone(), name.clone()));
+        }
+    }
+    let removed = forget_files(cat, &gone, &journal, &d.files)?;
+    drop_previews(cat, &removed)?;
+    journal.end(cat);
+    Ok(if gone.is_empty() { Settled::Undone } else { Settled::Finished })
+}
+
+impl Op {
+    fn describe(&self, cat: &Catalog) -> String {
+        match self {
+            Op::Rename(r) => format!("rename of {} to {}", place(cat, r.volume_id, &r.rel), r.new_rel),
+            Op::Copy(c) => format!("move of {} to {}", place(cat, c.from, &c.rel), place(cat, c.to, &c.new_rel)),
+            Op::Delete(d) => format!("delete of {} file(s)", d.files.len()),
+        }
+    }
+
+    /// The folders it works in.
+    fn folders(&self) -> Vec<(i64, String)> {
+        match self {
+            Op::Rename(r) => vec![(r.volume_id, r.rel.clone()), (r.volume_id, r.new_rel.clone())],
+            Op::Copy(c) => vec![(c.from, c.rel.clone()), (c.to, c.new_rel.clone())],
+            Op::Delete(d) => d.files.iter().map(|(v, rel, _)| (*v, rel.clone())).collect(),
+        }
+    }
+}
+
+/// A folder's full path when its disk is plugged in, else its disk's name and path.
+fn place(cat: &Catalog, volume_id: i64, rel: &str) -> String {
+    if let Some(mount) = cat.mount_of(volume_id) {
+        return volumes::join(&mount, rel);
+    }
+    let label: String = cat
+        .db()
+        .query_row("SELECT label FROM volumes WHERE id = ?1", [volume_id], |r| r.get(0))
+        .unwrap_or_else(|_| format!("disk {volume_id}"));
+    format!("{label}: {rel}")
+}
+
+/// Folders (disk id, path) that a rename, move or delete under way - or cut
+/// short and not settled yet - works in. Scans leave them alone and no other
+/// change may touch them meanwhile.
+pub fn busy_folders(cat: &Catalog) -> Result<Vec<(i64, String)>> {
+    let plans: Vec<String> =
+        cat.db().prepare("SELECT plan FROM ops")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let mut out: Vec<(i64, String)> =
+        plans.iter().filter_map(|p| serde_json::from_str::<Op>(p).ok()).flat_map(|op| op.folders()).collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Refuses a change touching a folder another change is still working in.
+fn refuse_if_busy(cat: &Catalog, folders: &[(i64, &str)]) -> Result<()> {
+    let busy = busy_folders(cat)?;
+    let clash =
+        busy.iter().find(|(v, b)| folders.iter().any(|(fv, f)| fv == v && (db::is_under(f, b) || db::is_under(b, f))));
+    if let Some((v, b)) = clash {
+        bail!(
+            "Shoebox hasn't finished an earlier move, rename or delete in {} yet: it finishes once the disks it \
+             needs are plugged in. Nothing was changed.",
+            place(cat, *v, b)
+        );
+    }
+    Ok(())
+}
+
+/// Tests stop a change dead at a named step, the way a kill would: nothing
+/// after it runs.
+#[doc(hidden)]
+pub mod testing {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// (step, how many more times, end the process)
+        static KILL_AT: Cell<Option<(&'static str, usize, bool)>> = const { Cell::new(None) };
+    }
+
+    /// Stops this thread the `nth` time (from 1) it reaches `step`: a panic,
+    /// so only destructors run (they roll back an open transaction, as a kill does).
+    pub fn kill_at(step: &'static str, nth: usize) {
+        KILL_AT.set(Some((step, nth, false)));
+    }
+
+    /// Ends the whole process there instead (exit code 9): not even
+    /// destructors run, a lock's file stays, the catalog is never closed.
+    pub fn exit_at(step: &'static str, nth: usize) {
+        KILL_AT.set(Some((step, nth, true)));
+    }
+
+    pub(super) fn point(step: &str) {
+        if let Some((at, n, exit)) = KILL_AT.get()
+            && at == step
+        {
+            if n > 1 {
+                KILL_AT.set(Some((at, n - 1, exit)));
+                return;
+            }
+            KILL_AT.set(None);
+            if exit {
+                std::process::exit(9);
+            }
+            panic!("killed at {step}");
+        }
+    }
 }
 
 #[cfg(test)]
