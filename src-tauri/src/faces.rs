@@ -12,7 +12,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -36,6 +36,9 @@ const GROUP_MIN_PX: f32 = 40.0;
 /// Bump when the grouping rules change: catalogs sorted under older rules
 /// get their untouched faces regrouped once at start.
 const GROUPING_RULES: &str = "2";
+/// Bump to look once more, at start, for people found twice
+/// (`join_look_alikes`).
+const JOIN_RULES: &str = "1";
 const DIM: usize = 512;
 /// Where ArcFace expects the eyes, nose and mouth corners in its 112x112 input.
 const ARCFACE_DST: [[f32; 2]; 5] =
@@ -387,6 +390,24 @@ impl FaceIndex {
             let (faces, people) = index.regroup(cat)?;
             log::info!("faces: regrouped {faces} faces into {people} people (rules {GROUPING_RULES})");
         }
+        // Catalogs grouped before people found twice were joined get theirs
+        // joined once.
+        let joined: Option<String> = cat
+            .db()
+            .query_row("SELECT value FROM meta WHERE key = 'look_alikes_joined'", [], |r| r.get(0))
+            .optional()?;
+        if joined.as_deref() != Some(JOIN_RULES) {
+            match index.join_look_alikes(cat) {
+                Ok(_) => {
+                    cat.db().execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('look_alikes_joined', ?1)",
+                        [JOIN_RULES],
+                    )?;
+                }
+                // Faces still work; the next start tries again.
+                Err(e) => log::warn!("faces: joining people found twice failed: {e:#}"),
+            }
+        }
         Ok(index)
     }
 
@@ -424,7 +445,7 @@ impl FaceIndex {
         }
         self.rebuild_centroids(cat)?;
 
-        let mut people_made = 0;
+        let mut people_made: usize = 0;
         let mut i = 0;
         while i < loose.len() {
             let photo = loose[i].1;
@@ -463,7 +484,13 @@ impl FaceIndex {
             i = j;
         }
         cat.db().execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('face_grouping', ?1)", [GROUPING_RULES])?;
-        Ok((loose.len(), people_made))
+        // Only people just made can join someone (the rest have a name, are
+        // ignored or hold a face placed by hand).
+        let joined = self.join_look_alikes(cat).unwrap_or_else(|e| {
+            log::warn!("faces: joining people found twice failed: {e:#}");
+            0
+        });
+        Ok((loose.len(), people_made.saturating_sub(joined)))
     }
 
     fn vector(&self, face_id: i64) -> Result<Option<Vec<f32>>> {
@@ -593,6 +620,13 @@ impl FaceIndex {
             }
         }
         log::info!("faces: {} photos, {total_faces} faces in {:.1} s", p.done, started.elapsed().as_secs_f64());
+        // The faces are saved either way; a failed join is tried again after
+        // the next photos.
+        if total_faces > 0
+            && let Err(e) = self.join_look_alikes(cat)
+        {
+            log::warn!("faces: joining people found twice failed: {e:#}");
+        }
         Ok(())
     }
 
@@ -758,6 +792,102 @@ impl FaceIndex {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// People found twice. A face joins someone only when it is
+    /// `SAME_PERSON` alike to them at that moment, so the same person seen
+    /// from another angle or in other light can start a second person: a
+    /// second card in People, still there after the first is named or
+    /// ignored. An unnamed person whose average face is that alike to
+    /// someone else's joins them - whoever they match best; of two unnamed
+    /// people, the smaller joins the bigger. Never moved: named and ignored
+    /// people (the user's word) and people holding a face placed by hand.
+    /// Two people seen in the same photo never join. Returns how many people
+    /// joined someone.
+    pub fn join_look_alikes(&self, cat: &Catalog) -> Result<usize> {
+        // A join moves an average, which can bring someone else close enough:
+        // again until nobody joins (two or three passes on a real catalog).
+        let mut joined = 0;
+        for _ in 0..10 {
+            let n = self.join_pass(cat)?;
+            joined += n;
+            if n == 0 {
+                break;
+            }
+        }
+        if joined > 0 {
+            log::info!("faces: {joined} people found twice joined the person they are");
+        }
+        Ok(joined)
+    }
+
+    fn join_pass(&self, cat: &Catalog) -> Result<usize> {
+        let (everyone, movable, mut photos) = {
+            let db = cat.db();
+            let everyone: HashSet<i64> =
+                db.prepare("SELECT id FROM people")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            let movable: HashSet<i64> = db
+                .prepare(
+                    "SELECT id FROM people p WHERE p.name IS NULL AND p.ignored = 0
+                       AND NOT EXISTS (SELECT 1 FROM faces f WHERE f.person_id = p.id AND f.by_hand = 1)",
+                )?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut photos: HashMap<i64, HashSet<i64>> = HashMap::new();
+            let mut stmt = db.prepare("SELECT person_id, photo_id FROM faces WHERE person_id IS NOT NULL")?;
+            for r in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+                let (person, photo) = r?;
+                photos.entry(person).or_default().insert(photo);
+            }
+            (everyone, movable, photos)
+        };
+        // Everyone's average face as a unit vector, and how many faces it holds.
+        let average: Vec<(i64, Vec<f32>, u32)> = {
+            let c = self.centroids.read().unwrap();
+            c.iter()
+                .filter(|(id, (_, n))| *n > 0 && everyone.contains(id))
+                .map(|(id, (sum, n))| (*id, unit(sum.clone()), *n))
+                .collect()
+        };
+        // Every join alike enough, best first: (similarity, who moves, to whom).
+        let bigger = |a: (u32, i64), b: (u32, i64)| a.0 > b.0 || (a.0 == b.0 && a.1 < b.1);
+        let mut joins: Vec<(f32, i64, i64)> = Vec::new();
+        for (l, lv, ln) in average.iter().filter(|(id, _, _)| movable.contains(id)) {
+            for (t, tv, tn) in &average {
+                if t == l || (movable.contains(t) && !bigger((*tn, *t), (*ln, *l))) {
+                    continue;
+                }
+                let s = dot(lv, tv);
+                if s >= SAME_PERSON {
+                    joins.push((s, *l, *t));
+                }
+            }
+        }
+        joins.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // One step per pass: nobody joins someone who moves, nobody moves who
+        // was joined.
+        let mut joining: HashMap<i64, Vec<i64>> = HashMap::new();
+        let mut moved: HashSet<i64> = HashSet::new();
+        for (_, l, t) in joins {
+            if moved.contains(&l) || moved.contains(&t) || joining.contains_key(&l) {
+                continue;
+            }
+            let theirs = photos.get(&l).cloned().unwrap_or_default();
+            let target = photos.entry(t).or_default();
+            // Nobody twice in one photo.
+            if !target.is_disjoint(&theirs) {
+                continue;
+            }
+            target.extend(theirs);
+            joining.entry(t).or_default().push(l);
+            moved.insert(l);
+        }
+        for (t, ls) in &joining {
+            let mut ids = ls.clone();
+            ids.push(*t);
+            self.merge(cat, &ids, *t)?;
+        }
+        Ok(moved.len())
     }
 
     /// Makes several people one ("Same person"): the only way two people

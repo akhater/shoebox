@@ -6,6 +6,19 @@ Newest first. Same format and versioning as Argentum.
 
 ### Fixed
 
+- **Someone found twice becomes one person.** A face joins a person only
+  when it looks enough like them at that moment, so the same person seen
+  from another angle or in other light could end up as two people - and the
+  second one stayed in People after the first was named or ignored. Now an
+  unnamed person whose average face matches someone else's joins them: under
+  their name, hidden with them if they were ignored, or into the bigger of
+  two unnamed people. Named and ignored people and faces placed by hand
+  never move, and two people seen in the same photo never join. Runs after
+  each face scan, after regrouping, and once at start.
+- **`shoebox-cli` prints only its JSON on stdout.** Log lines go to stderr
+  (and the log file), so a command that also logs something still gives
+  output a script can parse.
+
 - **A move, rename or delete cut short is never left half-done.** If Shoebox
   is killed or crashes in the middle of one, the next start finishes it if
   the catalog had already taken it, or puts disk and catalog back as they
