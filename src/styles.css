@@ -2302,3 +2302,56 @@ button {
   gap: 4px;
   margin-top: 4px;
 }
+
+/* Folded sidebar: a rail of icons (Ctrl+B), names and counts as tooltips. */
+.app.folded {
+  grid-template-columns: 52px 1fr;
+}
+.foot-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.fold-btn {
+  flex: none;
+  color: var(--muted);
+}
+.fold-btn:hover {
+  color: var(--text);
+}
+.sidebar.folded .brand {
+  justify-content: center;
+  padding: 10px 0 8px;
+}
+/* The box alone: small enough for the rail, same shape as the full header's. */
+.sidebar.folded .brand-mark {
+  width: 39px;
+  height: 36px;
+}
+.sidebar.folded .nav-group {
+  padding: 0 6px;
+}
+.sidebar.folded .sidebar-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 6px;
+}
+.nav-item.rail-item {
+  position: relative;
+  justify-content: center;
+  padding: 9px 0;
+}
+.rail-item .nav-badge {
+  position: absolute;
+  top: 2px;
+  left: calc(50% + 3px);
+  padding: 0 4px;
+  font-size: 9px;
+  line-height: 14px;
+}
+.rail-sep {
+  height: 1px;
+  margin: 10px 12px;
+  background: var(--border);
+}

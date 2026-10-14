@@ -9,6 +9,8 @@ import {
   FolderX,
   HardDrive,
   Images,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Settings,
   Trash2,
@@ -69,6 +71,9 @@ interface Props {
   /** Drag and drop: `folder` goes inside `into`. */
   onMoveFolder: (folder: FolderTarget, into: FolderTarget) => void;
   onSettings: () => void;
+  /** Folded to a rail of icons (Ctrl+B). */
+  folded: boolean;
+  onFold: (folded: boolean) => void;
   /** Gear: renames a camera or lens (onto another's name = merge). */
   onGearRename: (kind: GearKind, name: string, to: string) => void;
   /** Gear: back to the names in its files, kept apart. */
@@ -343,6 +348,18 @@ export function Sidebar(p: Props) {
     e.preventDefault();
   };
 
+  // The fold button swaps for its twin in the other state: keep the keyboard on it.
+  const refold = useRef(false);
+  const fold = (on: boolean) => {
+    refold.current = true;
+    p.onFold(on);
+  };
+  useEffect(() => {
+    if (!refold.current) return;
+    refold.current = false;
+    document.querySelector<HTMLElement>(".sidebar .fold-btn")?.focus();
+  }, [p.folded]);
+
   const anyMenu = menu != null || gearMenu != null;
   useEffect(() => {
     if (!anyMenu) return;
@@ -366,6 +383,102 @@ export function Sidebar(p: Props) {
   const sources = (overview?.volumes ?? [])
     .flatMap((v) => v.roots.map((r) => ({ v, r })))
     .sort((a, b) => a.r.path.localeCompare(b.r.path, undefined, { numeric: true, sensitivity: "base" }));
+
+  if (p.folded) {
+    // Sources and Gear unfold the sidebar on their section; lit when what is shown comes from them.
+    const unfold = (section: string) => {
+      if (!open.has(section)) toggle(section);
+      p.onFold(false);
+    };
+    const from = p.peopleOpen ? null : scope.kind;
+    const inSources = from === "root" || from === "folder" || from === "volume";
+    const inGear = from === "camera" || from === "lens";
+    return (
+      <nav className="sidebar folded">
+        <div className="brand" title="Shoebox - every photo, every disk">
+          <img className="brand-mark" src={boxLogo} alt="Shoebox" />
+        </div>
+        <div className="sidebar-scroll" ref={scroller} onKeyDown={onKey} onFocus={onFocus}>
+          <div className="nav-group">
+            <RailItem
+              label={`All photos · ${fmtNum(overview?.total ?? 0)}`}
+              className={cls({ kind: "all" })}
+              onClick={() => onScope({ kind: "all" })}
+            >
+              <Images size={16} />
+            </RailItem>
+            <RailItem
+              label={`People · ${fmtNum(p.people)}${
+                p.peopleNew > 0 ? ` · ${fmtNum(p.peopleNew)} new or found in new photos` : ""
+              }`}
+              className={`nav-item ${p.peopleOpen ? "active" : ""}`}
+              onClick={p.onPeople}
+            >
+              <Users size={16} />
+              {p.peopleNew > 0 && <span className="nav-badge">{p.peopleNew > 99 ? "99+" : p.peopleNew}</span>}
+            </RailItem>
+            {(overview?.missing ?? 0) > 0 && (
+              <RailItem
+                label={`Missing · ${fmtNum(overview!.missing)}`}
+                className={cls({ kind: "missing" })}
+                onClick={() => onScope({ kind: "missing" })}
+              >
+                <TriangleAlert size={16} className="missing-icon" />
+              </RailItem>
+            )}
+            {((overview?.marked ?? 0) > 0 || scope.kind === "marked") && (
+              <RailItem
+                label={`Marked for deletion · ${fmtNum(overview?.marked ?? 0)}`}
+                className={cls({ kind: "marked" })}
+                onClick={() => onScope({ kind: "marked" })}
+              >
+                <Trash2 size={16} className="marked-icon" />
+              </RailItem>
+            )}
+          </div>
+          <div className="rail-sep" />
+          <div className="nav-group">
+            <RailItem
+              label="Sources: unfold to browse them"
+              className={`nav-item ${inSources ? "active" : ""}`}
+              onClick={() => unfold("sec:disks")}
+            >
+              <HardDrive size={16} />
+            </RailItem>
+            <RailItem
+              label="Gear: unfold to browse cameras and lenses"
+              className={`nav-item ${inGear ? "active" : ""}`}
+              onClick={() => unfold("sec:gear")}
+            >
+              <Camera size={16} />
+            </RailItem>
+          </div>
+        </div>
+        <div className="sidebar-foot">
+          {p.update && (
+            <button
+              className="nav-item rail-item update"
+              onClick={p.onUpdate}
+              title={`Shoebox ${p.update} is out: open its release page`}
+            >
+              <CircleArrowUp size={16} />
+            </button>
+          )}
+          <button className="nav-item rail-item" onClick={p.onAddFolder} title="Add folder">
+            <FolderPlus size={16} />
+          </button>
+          <button
+            className="nav-item rail-item"
+            onClick={p.onSettings}
+            title={`Settings${p.version ? ` · v${p.version}` : ""}`}
+          >
+            <Settings size={16} />
+          </button>
+          <FoldButton folded onFold={fold} />
+        </div>
+      </nav>
+    );
+  }
 
   return (
     <nav className="sidebar">
@@ -517,13 +630,51 @@ export function Sidebar(p: Props) {
           <FolderPlus size={16} />
           <span className="grow">Add folder</span>
         </button>
-        <button className="nav-item" onClick={p.onSettings}>
-          <Settings size={16} />
-          <span className="grow">Settings</span>
-          <span className="version">{p.version && `v${p.version}`}</span>
-        </button>
+        <div className="foot-row">
+          <button className="nav-item" onClick={p.onSettings}>
+            <Settings size={16} />
+            <span className="grow">Settings</span>
+            <span className="version">{p.version && `v${p.version}`}</span>
+          </button>
+          <FoldButton folded={false} onFold={fold} />
+        </div>
       </div>
     </nav>
+  );
+}
+
+/** A row of the folded sidebar: an icon, its name and count as the tooltip. */
+function RailItem({
+  label,
+  className,
+  onClick,
+  children,
+}: {
+  label: string;
+  className: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button {...nav(0)} className={`${className} rail-item`} title={label} aria-label={label} onClick={onClick}>
+      {children}
+    </button>
+  );
+}
+
+/** Folds the sidebar to a rail of icons, or unfolds it. */
+function FoldButton({ folded, onFold }: { folded: boolean; onFold: (folded: boolean) => void }) {
+  const Icon = folded ? PanelLeftOpen : PanelLeftClose;
+  const label = `${folded ? "Unfold" : "Fold"} the sidebar (Ctrl+B)`;
+  return (
+    <button
+      className={folded ? "nav-item rail-item fold-btn" : "icon-btn fold-btn"}
+      onClick={() => onFold(!folded)}
+      title={label}
+      aria-label={label}
+    >
+      <Icon size={16} />
+    </button>
   );
 }
 
