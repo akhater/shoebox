@@ -757,6 +757,7 @@ impl Catalog {
                     volume_id: vid,
                     volume_label: r.get(7)?,
                     path,
+                    folder: rel,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -1502,4 +1503,6 @@ pub struct FileLoc {
     pub volume_id: i64,
     pub volume_label: String,
     pub path: String,
+    /// Its folder on the disk, as `Scope::Folder` takes it (with `volume_id`): "Go to folder".
+    pub folder: String,
 }

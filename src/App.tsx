@@ -37,6 +37,7 @@ import {
   type Filters,
   filtersOn,
   NO_FILTERS,
+  type FileLoc,
   type FolderMoveEvent,
   gearApi,
   type GearKind,
@@ -49,6 +50,7 @@ import {
   type Progress,
   type Report,
   type RootInfo,
+  sameScope,
   type Scope,
   SORTS,
   type Sort,
@@ -108,6 +110,8 @@ interface Place {
   scope: Scope;
   focusId: number | null;
   viewerId: number | null;
+  /** The word search it showed, if any. */
+  query: string;
 }
 
 function deleteSummary(r: DeleteReport) {
@@ -142,6 +146,12 @@ function movedScope(s: Scope, from: { volumeId: number; rel: string }, to: { vol
   if (s.kind === "folder" && s.volumeId === from.volumeId && (s.relPath === from.rel || s.relPath.startsWith(from.rel + "\\")))
     return { kind: "folder", volumeId: to.volumeId, relPath: to.rel + s.relPath.slice(from.rel.length) };
   return s;
+}
+
+/** A folder as the sidebar shows it: a source when it is one, else a folder inside one. */
+function folderScope(ov: Overview | null, volumeId: number, relPath: string): Scope {
+  const root = ov?.volumes.find((v) => v.id === volumeId)?.roots.find((r) => r.relPath === relPath);
+  return root ? { kind: "root", id: root.id } : { kind: "folder", volumeId, relPath };
 }
 
 /** The sidebar's dates and folders, newest first (they come oldest first). */
@@ -467,7 +477,7 @@ export default function App() {
   // Drill-downs (People -> a person, a face in the viewer -> their photos)
   // remember where they came from; Back or Escape returns there.
   const drill = (to: Scope) => {
-    setTrail((t) => [...t, { view, scope, focusId, viewerId }]);
+    setTrail((t) => [...t, { view, scope, focusId, viewerId, query }]);
     setViewerId(null);
     setCalendar(false);
     setView("photos");
@@ -483,6 +493,10 @@ export default function App() {
     setScope(prev.scope);
     setFocusId(prev.viewerId ?? prev.focusId);
     setViewerId(prev.viewerId);
+    if (prev.query !== queryRef.current) {
+      setTyped(prev.query);
+      setQuery(prev.query);
+    }
   }, [trail]);
 
   // A person's new photos are read once you leave their page (like an email):
@@ -758,8 +772,39 @@ export default function App() {
   const viewerIndex = useMemo(() => (viewerId == null ? -1 : shown.ids.indexOf(viewerId)), [viewerId, shown]);
   const focusIndex = useMemo(() => (focusId == null ? null : shown.ids.indexOf(focusId)), [focusId, shown]);
 
-  // A new place starts with nothing selected.
-  useEffect(() => setSelected(new Set()), [scope, query, filters]);
+  // A new place starts with nothing selected, or with the photo it was reached from.
+  const selectOnArrival = useRef<number | null>(null);
+  useEffect(() => {
+    const id = selectOnArrival.current;
+    selectOnArrival.current = null;
+    setSelected(new Set(id == null ? [] : [id]));
+  }, [scope, query, filters]);
+
+  const closeViewer = () => {
+    setFocusId(viewerId);
+    if (viewerId != null) setSelected(new Set([viewerId]));
+    setViewerId(null);
+    setGridFocus((n) => n + 1);
+    if (facesChanged.current) {
+      facesChanged.current = false;
+      refresh();
+    }
+  };
+
+  /** From the viewer: the folder a copy of the photo is in, with the photo
+   *  selected there. Back (Esc) returns to the photo. */
+  const goToFolder = (copy: FileLoc) => {
+    const to = folderScope(overview, copy.volumeId, copy.folder);
+    if (sameScope(to, scope) && !query) return closeViewer();
+    const id = viewerId;
+    drill(to);
+    setTyped("");
+    setQuery("");
+    setFocusId(id);
+    selectOnArrival.current = id;
+    setGridFocus((n) => n + 1);
+    facesChanged.current = false; // the new place is loaded afresh
+  };
 
   // The selected photo's basics, for the status bar.
   const [focusDetail, setFocusDetail] = useState<PhotoDetail | null>(null);
@@ -1217,6 +1262,7 @@ export default function App() {
           onToggleMark={() => setMarked([shown.ids[viewerIndex]], shown.marked[viewerIndex] !== 1)}
           onTagsChanged={refreshSoon}
           onPerson={(id) => drill({ kind: "person", id })}
+          onFolder={goToFolder}
           everyone={peopleList}
           onFacesChanged={() => {
             // The grid waits: on a person's page this photo may leave it.
@@ -1226,16 +1272,7 @@ export default function App() {
               .then(setPeopleList)
               .catch(() => {});
           }}
-          onClose={() => {
-            setFocusId(viewerId);
-            if (viewerId != null) setSelected(new Set([viewerId]));
-            setViewerId(null);
-            setGridFocus((n) => n + 1);
-            if (facesChanged.current) {
-              facesChanged.current = false;
-              refresh();
-            }
-          }}
+          onClose={closeViewer}
         />
       )}
       {tagging && (

@@ -196,6 +196,8 @@ export interface FileLoc {
   volumeId: number;
   volumeLabel: string;
   path: string;
+  /** Its folder on the disk, as a folder scope takes it (with volumeId). */
+  folder: string;
 }
 
 export interface PhotoDetail {
