@@ -219,6 +219,8 @@ export default function App() {
   const [sort, setSort] = useState<Sort>(loadSort);
   // File type (CR3, JPG...) on each thumbnail.
   const [showType, setShowType] = useRemembered("shoebox.showType", false);
+  // The sidebar folded to a rail of icons.
+  const [folded, setFolded] = useRemembered("shoebox.sidebarFolded", false);
   const sortRef = useRef(sort);
   sortRef.current = sort;
   // Word search: what is typed, and what is being shown.
@@ -504,6 +506,19 @@ export default function App() {
     );
   };
 
+  // Ctrl+B folds or unfolds the sidebar, anywhere but in a text box.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "b") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      e.preventDefault();
+      setFolded((f) => !f);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setFolded]);
+
   // Escape closes the calendar first.
   useEffect(() => {
     if (!calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging) return;
@@ -749,8 +764,10 @@ export default function App() {
   const shownPeople = peopleList.filter((p) => !p.ignored && (p.name || p.photos >= 2));
 
   return (
-    <div className="app">
+    <div className={`app ${folded ? "folded" : ""}`}>
       <Sidebar
+        folded={folded}
+        onFold={setFolded}
         overview={overview}
         browse={browse && sort === "newest" ? newestFirst(browse) : browse}
         version={version}
