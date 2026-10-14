@@ -12,7 +12,9 @@
 //!   shoebox-cli photo <id>       one photo's details
 //!   shoebox-cli backup           consistent copies of the databases in backup\ (run it
 //!                                before each Kopia snapshot; see .kopiaignore)
-//!   shoebox-cli list [oldest|newest|name|added] [limit] [filters]   photos in grid order (JSON)
+//!   shoebox-cli list [oldest|newest|name|added] [limit] [filters] [scope]   photos in grid order
+//!                                (JSON); scope = JSON as the window's, e.g. a person's photos found
+//!                                since the user last looked: {"kind":"person","id":42,"newOnly":true}
 //!   shoebox-cli facets [filters]  what each filter offers, with counts (JSON)
 //!   shoebox-cli days [filters]    photos taken each day, as the calendar shows them (JSON)
 //!       filters = JSON, any of {"dates":["2026-09-26"],"cameras":[..],"lenses":[..],
@@ -20,8 +22,9 @@
 //!                               "people":[42],"tags":[3,7] (photos with all of these tags)}
 //!
 //! People (JSON out):
-//!   shoebox-cli people [name]     everyone, or whoever's name matches, best first, as People's
-//!                                 search box finds them (any part of the name, accents ignored)
+//!   shoebox-cli people [name] [--new]   everyone, or whoever's name matches, best first, as
+//!                                 People's search box finds them (any part of the name, accents
+//!                                 ignored); --new: only those new or in new photos ("Only new")
 //!   shoebox-cli photo-faces <photo-id>...     the faces in photos, and who each is
 //!   shoebox-cli person-faces <person-id>      a person's faces, the least like them first
 //!   shoebox-cli look-alikes <face-id>...      who those faces look like most (to suggest a name)
@@ -192,8 +195,13 @@ fn main() -> anyhow::Result<()> {
         }
         Some("people") => {
             let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
-            let name = args[1..].join(" ");
-            let people = if name.trim().is_empty() { faces.people(&cat)? } else { faces.find_people(&cat, &name)? };
+            let new_only = args[1..].iter().any(|a| a == "--new");
+            let name = args[1..].iter().filter(|a| *a != "--new").cloned().collect::<Vec<_>>().join(" ");
+            let mut people =
+                if name.trim().is_empty() { faces.people(&cat)? } else { faces.find_people(&cat, &name)? };
+            if new_only {
+                people.retain(|p| p.has_news());
+            }
             println!("{}", serde_json::to_string_pretty(&people)?);
         }
         Some("people-read") => {
@@ -312,14 +320,15 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some("list") => {
-            // Photos in the grid's order: shoebox-cli list [oldest|newest|name|added] [limit] [filters JSON]
+            // Photos in the grid's order: shoebox-cli list [oldest|newest|name|added] [limit] [filters JSON] [scope JSON]
             let sort: Sort = match args.get(1) {
                 Some(s) => serde_json::from_value(serde_json::Value::String(s.clone()))?,
                 None => Sort::default(),
             };
             let limit: usize = args.get(2).map(|n| n.parse()).transpose()?.unwrap_or(50);
             let filters: Filters = args.get(3).map(|f| serde_json::from_str(f)).transpose()?.unwrap_or_default();
-            let list = cat.list_photos(&Scope::All, sort, &filters)?;
+            let scope: Scope = args.get(4).map(|s| serde_json::from_str(s)).transpose()?.unwrap_or(Scope::All);
+            let list = cat.list_photos(&scope, sort, &filters)?;
             let mut out = Vec::new();
             const STATES: [&str; 3] = ["missing", "offline", "online"];
             for (i, id) in list.ids.iter().take(limit).enumerate() {
@@ -333,6 +342,8 @@ fn main() -> anyhow::Result<()> {
                     "name": d.files.first().map(|f| f.name.clone()),
                     "state": state,
                     "marked": list.marked[i] == 1,
+                    // On a person: found in it since the user last looked at them.
+                    "new": list.fresh[i] == 1,
                 }));
             }
             println!(

@@ -12,6 +12,7 @@ import {
   FolderX,
   RefreshCw,
   Search,
+  Sparkles,
   Tag as TagIcon,
   Trash2,
   Unplug,
@@ -234,6 +235,8 @@ export default function App() {
   const [peopleList, setPeopleList] = useState<Person[]>([]);
   // People's search box: what's typed, and whoever it finds (null: nothing typed).
   const [personTyped, setPersonTyped] = useState("");
+  // People's "Only new": just the people new or found in new photos.
+  const [peopleNewOnly, setPeopleNewOnly] = useState(false);
   const [personFound, setPersonFound] = useState<Person[] | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [straysFor, setStraysFor] = useState<Person | null>(null);
@@ -733,6 +736,8 @@ export default function App() {
   );
   // On a person's page: photos they were found in since you last looked at them.
   const freshHere = useMemo(() => shown.fresh.filter((f) => f === 1).length, [shown]);
+  // ...and "Only new" there: just those photos.
+  const newOnlyHere = scope.kind === "person" && !!scope.newOnly;
   const viewerIndex = useMemo(() => (viewerId == null ? -1 : shown.ids.indexOf(viewerId)), [viewerId, shown]);
   const focusIndex = useMemo(() => (focusId == null ? null : shown.ids.indexOf(focusId)), [focusId, shown]);
 
@@ -807,9 +812,10 @@ export default function App() {
         people={shownPeople.length}
         peopleNew={shownPeople.filter((p) => p.isNew || p.newPhotos > 0).length}
         peopleOpen={view === "people"}
-        onPeople={() => {
+        onPeople={(newOnly = false) => {
           setTrail([]);
           setPersonTyped("");
+          setPeopleNewOnly(newOnly);
           setCalendar(false);
           setView("people");
         }}
@@ -912,8 +918,10 @@ export default function App() {
                 ? personFound
                   ? `${fmtNum(personFound.length)} found`
                   : `${fmtNum(shownPeople.length)} people`
-                : `${fmtNum(shown.ids.length)} ${query ? "matches" : "photos"}`}
-              {view === "photos" && personHere && freshHere > 0 && <b className="new-count"> · {fmtNum(freshHere)} new</b>}
+                : `${fmtNum(shown.ids.length)} ${query ? "matches" : newOnlyHere ? "new photos" : "photos"}`}
+              {view === "photos" && personHere && freshHere > 0 && !newOnlyHere && (
+                <b className="new-count"> · {fmtNum(freshHere)} new</b>
+              )}
               {view === "photos" && selected.size > 1 && ` · ${fmtNum(selected.size)} selected`}
             </span>
             {"sub" in scopeInfo && scopeInfo.sub && <span className="muted path">{scopeInfo.sub}</span>}
@@ -954,6 +962,20 @@ export default function App() {
                 title="Find faces in this person that don't look like them, and move them out"
               >
                 <UserCog size={15} /> Clean up faces…
+              </button>
+            )}
+            {view === "photos" && scope.kind === "person" && (freshHere > 0 || newOnlyHere) && (
+              <button
+                className={`btn ghost ${newOnlyHere ? "on" : ""}`}
+                aria-pressed={newOnlyHere}
+                onClick={() => setScope(newOnlyHere ? { kind: "person", id: scope.id } : { ...scope, newOnly: true })}
+                title={
+                  newOnlyHere
+                    ? `Show all their photos (${fmtNum(personHere?.photos ?? 0)})`
+                    : "Only the photos they were found in since you last looked at them, to check them quickly"
+                }
+              >
+                <Sparkles size={15} /> Only new
               </button>
             )}
             {view === "photos" && (
@@ -1083,7 +1105,12 @@ export default function App() {
             people={peopleList}
             found={personFound}
             query={personTyped}
-            onOpen={(p) => drill({ kind: "person", id: p.id })}
+            newOnly={peopleNewOnly}
+            onNewOnly={setPeopleNewOnly}
+            // From "Only new", straight to what's new in them.
+            onOpen={(p) =>
+              drill({ kind: "person", id: p.id, ...(peopleNewOnly && (p.isNew || p.newPhotos > 0) ? { newOnly: true } : {}) })
+            }
             onChanged={refresh}
             onError={(e) => setMessage({ text: e, warn: true })}
             onOpenModels={() => setSettingsTab("models")}
