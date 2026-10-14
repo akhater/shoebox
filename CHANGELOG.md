@@ -2,7 +2,7 @@
 
 Newest first. Same format and versioning as Argentum.
 
-## 26.42.1 - unreleased
+## 26.42.1 - 2026-10-14
 
 ### Added
 
