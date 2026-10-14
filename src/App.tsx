@@ -16,6 +16,7 @@ import {
   Trash2,
   Unplug,
   UserCog,
+  UserX,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -41,6 +42,7 @@ import {
   type PhotoDetail,
   type FolderNode,
   type Overview,
+  type Moved,
   type Person,
   type PhotoList,
   type Progress,
@@ -63,6 +65,7 @@ import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
 import { Sidebar, type FolderTarget } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { Viewer } from "./components/Viewer";
+import { WhoIsIt } from "./components/WhoIsIt";
 
 const EMPTY: PhotoList = {
   ids: [],
@@ -234,6 +237,10 @@ export default function App() {
   const [personFound, setPersonFound] = useState<Person[] | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [straysFor, setStraysFor] = useState<Person | null>(null);
+  // "Who is this?" for a person's face in the selected photos.
+  const [reassigning, setReassigning] = useState<{ faceIds: number[]; from: Person; photos: number } | null>(null);
+  // Faces changed in the viewer: the grid is reloaded when it closes.
+  const facesChanged = useRef(false);
   // Naming the person whose page this is, from the title.
   const [namingTitle, setNamingTitle] = useState(false);
   const personHere = scope.kind === "person" ? peopleList.find((p) => p.id === scope.id) : undefined;
@@ -482,6 +489,48 @@ export default function App() {
     if (p && (p.isNew || p.newPhotos > 0)) run(people.read([p.id]).then(refresh));
   }, [view, scope, peopleList, refresh]);
 
+  /** From a person's page: the selected photos aren't them. Their face in
+   *  each goes to whoever the user says. */
+  const notThem = (p: Person) => {
+    const ids = shown.ids.filter((id) => selected.has(id));
+    run(
+      people.inPhotos(ids).then((faces) => {
+        const mine = faces.filter((f) => f.personId === p.id);
+        if (mine.length) setReassigning({ faceIds: mine.map((f) => f.id), from: p, photos: ids.length });
+        else setMessage({ text: `No face of ${p.name ?? "this person"} in ${ids.length === 1 ? "this photo" : "these photos"}.` });
+      }),
+    );
+  };
+
+  /** Faces moved: says where, with Undo (every face changed goes back). */
+  const facesMoved = (moved: Moved, to: string, from: Person | null) => {
+    const what = moved.faces === 1 ? "1 face" : `${fmtNum(moved.faces)} faces`;
+    // A face already theirs in the photo made room: say where it went.
+    const where = [...new Set(moved.bumped)].map((id) => {
+      const p = peopleList.find((q) => q.id === id);
+      return p ? (p.name ?? "an unnamed person") : "someone new";
+    });
+    const room = moved.bumped.length
+      ? ` ${to} was already in ${moved.bumped.length === 1 ? "that photo" : `${fmtNum(moved.bumped.length)} of them`}: that face went to ${[...new Set(where)].join(", ")}.`
+      : "";
+    setMessage({
+      text: moved.faces ? `${what} moved${from ? ` from ${from.name ?? "this person"}` : ""} to ${to}.${room}` : `Already ${to}.`,
+      action: moved.undo.length
+        ? {
+            label: "Undo",
+            run: () =>
+              run(
+                people.restore(moved.undo).then(() => {
+                  setMessage({ text: moved.faces === 1 ? "The face is back where it was." : "The faces are back where they were." });
+                  refresh();
+                }),
+              ),
+          }
+        : undefined,
+    });
+    refresh();
+  };
+
   /** From a person's page. Ignoring a stranger goes back to People, with Undo. */
   const ignorePerson = (p: Person) => {
     const ignored = !p.ignored;
@@ -503,7 +552,7 @@ export default function App() {
 
   // Escape closes the calendar first.
   useEffect(() => {
-    if (!calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging) return;
+    if (!calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (e.key !== "Escape" || (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"))) return;
@@ -512,10 +561,10 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging]);
+  }, [calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning]);
 
   useEffect(() => {
-    if (!trail.length || calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging) return;
+    if (!trail.length || calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const t = e.target as HTMLElement | null;
@@ -524,7 +573,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [trail, calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, goBack]);
+  }, [trail, calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning, goBack]);
 
   // Drag and drop of a folder. Same disk: done at once, with Undo. Another
   // disk: asked first, then copied, checked and the original removed in the
@@ -931,6 +980,15 @@ export default function App() {
                 <TagIcon size={15} /> Tag{selected.size > 1 ? ` ${fmtNum(selected.size)}` : ""}…
               </button>
             )}
+            {view === "photos" && selected.size > 0 && personHere && (
+              <button
+                className="btn ghost"
+                onClick={() => notThem(personHere)}
+                title={`Not ${personHere.name ?? "this person"} in ${selected.size === 1 ? "this photo" : "these photos"}: say who it is`}
+              >
+                <UserX size={15} /> Not {personHere.name?.split(" ")[0] ?? "them"}…
+              </button>
+            )}
             {view === "photos" && (
               <button
                 className={`icon-btn type-toggle ${calendar ? "on" : ""}`}
@@ -1057,7 +1115,7 @@ export default function App() {
               onMark={setMarked}
               onTag={setTagging}
               selected={selected}
-              keyboard={viewerIndex < 0 && !calendar && !deleteOpen && !settingsOpen && !straysFor && !tagging}
+              keyboard={viewerIndex < 0 && !calendar && !deleteOpen && !settingsOpen && !straysFor && !tagging && !reassigning}
               focusRequest={gridFocus}
               focusIndex={focusIndex}
               showType={showType}
@@ -1112,11 +1170,24 @@ export default function App() {
           onToggleMark={() => setMarked([shown.ids[viewerIndex]], shown.marked[viewerIndex] !== 1)}
           onTagsChanged={refreshSoon}
           onPerson={(id) => drill({ kind: "person", id })}
+          everyone={peopleList}
+          onFacesChanged={() => {
+            // The grid waits: on a person's page this photo may leave it.
+            facesChanged.current = true;
+            people
+              .list()
+              .then(setPeopleList)
+              .catch(() => {});
+          }}
           onClose={() => {
             setFocusId(viewerId);
             if (viewerId != null) setSelected(new Set([viewerId]));
             setViewerId(null);
             setGridFocus((n) => n + 1);
+            if (facesChanged.current) {
+              facesChanged.current = false;
+              refresh();
+            }
           }}
         />
       )}
@@ -1139,11 +1210,28 @@ export default function App() {
       {straysFor && (
         <StraysDialog
           person={straysFor}
+          everyone={peopleList}
           onClose={() => setStraysFor(null)}
-          onDone={(moved) => {
-            setMessage({ text: `${fmtNum(moved)} faces moved out of ${straysFor.name ?? "this person"}.` });
+          onDone={(moved, to) => {
+            facesMoved(moved, to, straysFor);
             setStraysFor(null);
-            refresh();
+          }}
+        />
+      )}
+      {reassigning && (
+        <WhoIsIt
+          faceIds={reassigning.faceIds}
+          from={reassigning.from}
+          everyone={peopleList}
+          onClose={() => {
+            setReassigning(null);
+            setGridFocus((n) => n + 1);
+          }}
+          onDone={(moved, to) => {
+            facesMoved(moved, to, reassigning.from);
+            setReassigning(null);
+            setSelected(new Set());
+            setGridFocus((n) => n + 1);
           }}
         />
       )}

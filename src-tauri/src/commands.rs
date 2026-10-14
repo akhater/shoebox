@@ -226,10 +226,31 @@ pub fn merge_people(state: State<'_, AppState>, ids: Vec<i64>, into: i64) -> Res
     state.faces.merge(&state.cat, &ids, into).map_err(err)
 }
 
-/// "That's not them": takes a face out of its person.
+/// "Who is this?": faces go to someone, someone new, or (not them, don't
+/// know who) whoever they resemble. Placed by hand.
 #[tauri::command]
-pub fn split_face(state: State<'_, AppState>, face_id: i64) -> Res<i64> {
-    state.faces.split_face(&state.cat, face_id).map_err(err)
+pub fn reassign_faces(
+    state: State<'_, AppState>,
+    face_ids: Vec<i64>,
+    to: crate::faces::FaceTarget,
+) -> Res<crate::faces::Moved> {
+    state.faces.reassign(&state.cat, &face_ids, &to).map_err(err)
+}
+
+/// Undo of a reassign: the faces go back as they were.
+#[tauri::command]
+pub fn restore_faces(state: State<'_, AppState>, placements: Vec<crate::faces::Placement>) -> Res<usize> {
+    state.faces.restore(&state.cat, &placements).map_err(err)
+}
+
+/// The people some faces look like most, to suggest who they are.
+#[tauri::command]
+pub fn look_alikes(
+    state: State<'_, AppState>,
+    face_ids: Vec<i64>,
+    except: Vec<i64>,
+) -> Res<Vec<crate::faces::LookAlike>> {
+    state.faces.look_alikes(&face_ids, &except, 12).map_err(err)
 }
 
 /// Faces in a person that don't look like them, worst first.
@@ -238,15 +259,21 @@ pub fn person_strays(state: State<'_, AppState>, person_id: i64) -> Res<Vec<crat
     state.faces.strays(&state.cat, person_id).map_err(err)
 }
 
-/// Moves faces out of a person, to whoever they resemble (or someone new).
+/// Every face of a person, the least like them first.
 #[tauri::command]
-pub fn move_faces_out(state: State<'_, AppState>, person_id: i64, face_ids: Vec<i64>) -> Res<usize> {
-    state.faces.move_out(&state.cat, person_id, &face_ids).map_err(err)
+pub fn person_faces(state: State<'_, AppState>, person_id: i64) -> Res<Vec<crate::faces::Stray>> {
+    state.faces.person_faces(&state.cat, person_id).map_err(err)
 }
 
 #[tauri::command]
 pub fn photo_faces(state: State<'_, AppState>, photo_id: i64) -> Res<Vec<crate::faces::PhotoFace>> {
     state.faces.photo_faces(&state.cat, photo_id).map_err(err)
+}
+
+/// The faces in some photos (a selection on a person's page).
+#[tauri::command]
+pub fn faces_in_photos(state: State<'_, AppState>, photo_ids: Vec<i64>) -> Res<Vec<crate::faces::PhotoFace>> {
+    state.faces.faces_in(&state.cat, &photo_ids).map_err(err)
 }
 
 #[derive(Serialize)]

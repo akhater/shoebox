@@ -38,7 +38,23 @@ Newest first. Same format and versioning as Argentum.
 - **Back** (button or Escape) from a person's page to where you came from,
   including the photo you were looking at.
 - **Clean up a person**: finds faces that don't look like the rest of them and
-  moves the ones you tick to whoever they resemble, or someone new.
+  moves the ones you tick to whoever they resemble, or someone new. **Show all
+  faces** lists every face of the person, the least alike first, none ticked,
+  so any of them can be picked; **Move to…** sends the ticked ones to someone
+  you pick; **Untick all** / **Tick all**. The faces scroll inside the dialog,
+  the buttons stay in view. Faces moved out are placed by hand, so "Regroup
+  faces" never brings them back.
+- **Who is this?** - the other half of merge: take one photo's face out of a
+  person and say who it is. On a person's page, select photos and click
+  **Not <name>…**; in the viewer, click the icon next to a face (or "Who is
+  this?" on a face too small for Shoebox to recognise). Pick someone from the
+  people that face looks like, find them by name, type a new name, or choose
+  "don't know who" (it joins whoever it resembles most, never the person it
+  left). Your choice sticks: regrouping never moves the face back. A person
+  stays once per photo: if they were already in it, that other face goes to
+  whoever it resembles, and the message says who. Undo in the status bar puts
+  every face changed back as it was. Headless: `shoebox-cli photo-faces`,
+  `person-faces`, `look-alikes`, `move-faces`, `restore-faces`.
 - **Keyboard in the sidebar**: arrows move and open/close folders, Enter shows,
   Home/End, F2 renames, the Menu key opens a folder's menu.
 - **Select in the grid** as in Explorer: click selects, double-click or Enter
