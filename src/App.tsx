@@ -55,7 +55,7 @@ import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
 import { StraysDialog } from "./components/StraysDialog";
 import { TagEditor } from "./components/Tags";
-import { NameEditor, PeopleView } from "./components/PeopleView";
+import { NameEditor, PeopleView, PersonSearch } from "./components/PeopleView";
 import { PhotoGrid } from "./components/PhotoGrid";
 import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
 import { Sidebar, type FolderTarget } from "./components/Sidebar";
@@ -224,6 +224,9 @@ export default function App() {
   // "people" shows the People view instead of the photo grid.
   const [view, setView] = useState<"photos" | "people">("photos");
   const [peopleList, setPeopleList] = useState<Person[]>([]);
+  // People's search box: what's typed, and whoever it finds (null: nothing typed).
+  const [personTyped, setPersonTyped] = useState("");
+  const [personFound, setPersonFound] = useState<Person[] | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [straysFor, setStraysFor] = useState<Person | null>(null);
   // Naming the person whose page this is, from the title.
@@ -318,6 +321,21 @@ export default function App() {
       /* per-viewer convenience only */
     }
   }, [sort]);
+
+  // People are found as you type, and again when People changes (a rename, a
+  // merge). Only the latest answer counts.
+  const findSeq = useRef(0);
+  useEffect(() => {
+    const seq = ++findSeq.current;
+    if (!personTyped.trim()) {
+      setPersonFound(null);
+      return;
+    }
+    people
+      .find(personTyped)
+      .then((found) => seq === findSeq.current && setPersonFound(found))
+      .catch((e) => setMessage({ text: String(e), warn: true }));
+  }, [personTyped, peopleList]);
 
   // Search as you type, once typing pauses.
   useEffect(() => {
@@ -717,6 +735,7 @@ export default function App() {
         peopleOpen={view === "people"}
         onPeople={() => {
           setTrail([]);
+          setPersonTyped("");
           setCalendar(false);
           setView("people");
         }}
@@ -815,30 +834,44 @@ export default function App() {
               <h1>{view === "people" ? "People" : scopeInfo.title}</h1>
             )}
             <span className="muted">
-              {fmtNum(shown.ids.length)} {query ? "matches" : "photos"}
+              {view === "people"
+                ? personFound
+                  ? `${fmtNum(personFound.length)} found`
+                  : `${fmtNum(shownPeople.length)} people`
+                : `${fmtNum(shown.ids.length)} ${query ? "matches" : "photos"}`}
               {view === "photos" && personHere && freshHere > 0 && <b className="new-count"> · {fmtNum(freshHere)} new</b>}
               {view === "photos" && selected.size > 1 && ` · ${fmtNum(selected.size)} selected`}
             </span>
             {"sub" in scopeInfo && scopeInfo.sub && <span className="muted path">{scopeInfo.sub}</span>}
           </div>
-          <div className="search">
-            <Search size={15} />
-            <input
-              value={typed}
-              onChange={(e) => setTyped(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") setQuery(typed.trim());
-                if (e.key === "Escape") setTyped("");
-              }}
-              placeholder="Search in words: succulent, airport lounge, kids on a beach…"
-              spellCheck={false}
+          {/* On People the box finds a person by name; elsewhere it searches photos in words. */}
+          {view === "people" ? (
+            <PersonSearch
+              value={personTyped}
+              found={personFound}
+              onChange={setPersonTyped}
+              onOpen={(p) => drill({ kind: "person", id: p.id })}
             />
-            {typed && (
-              <button className="icon-btn tiny-x" onClick={() => setTyped("")} aria-label="Clear search">
-                <X size={14} />
-              </button>
-            )}
-          </div>
+          ) : (
+            <div className="search">
+              <Search size={15} />
+              <input
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") setQuery(typed.trim());
+                  if (e.key === "Escape") setTyped("");
+                }}
+                placeholder="Search in words: succulent, airport lounge, kids on a beach…"
+                spellCheck={false}
+              />
+              {typed && (
+                <button className="icon-btn tiny-x" onClick={() => setTyped("")} aria-label="Clear search">
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+          )}
           <div className="tools">
             {view === "photos" && scope.kind === "person" && (
               <button
@@ -965,6 +998,8 @@ export default function App() {
         {view === "people" ? (
           <PeopleView
             people={peopleList}
+            found={personFound}
+            query={personTyped}
             onOpen={(p) => drill({ kind: "person", id: p.id })}
             onChanged={refresh}
             onError={(e) => setMessage({ text: e, warn: true })}

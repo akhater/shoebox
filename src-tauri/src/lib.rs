@@ -578,6 +578,7 @@ pub fn run() {
             commands::catalog_stats,
             commands::search_photos,
             commands::people,
+            commands::find_people,
             commands::read_people,
             commands::read_all_people,
             commands::rename_person,
