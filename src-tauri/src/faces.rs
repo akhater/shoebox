@@ -6,7 +6,7 @@
 //! fingerprints live in `faces.db` (rebuildable, kept out of backups).
 
 use crate::catalog::Catalog;
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use image::{DynamicImage, GenericImageView, RgbImage, imageops::FilterType};
 use ort::session::Session;
 use ort::value::Tensor;
@@ -734,12 +734,17 @@ impl FaceIndex {
         Ok(cat.db().execute("UPDATE faces SET seen = 1 WHERE seen = 0", [])?)
     }
 
+    /// Names someone (an empty name: unnamed again). A name already taken
+    /// stays two people called the same: only `merge` makes them one.
     pub fn rename(&self, cat: &Catalog, person_id: i64, name: &str) -> Result<()> {
         let name = name.trim();
-        cat.db().execute(
+        let n = cat.db().execute(
             "UPDATE people SET name = ?1 WHERE id = ?2",
             params![(!name.is_empty()).then_some(name), person_id],
         )?;
+        if n == 0 {
+            bail!("no person {person_id}");
+        }
         Ok(())
     }
 
@@ -755,7 +760,9 @@ impl FaceIndex {
         Ok(())
     }
 
-    /// Makes several people one. Keeps `into`'s name, or the first name found.
+    /// Makes several people one ("Same person"): the only way two people
+    /// join - sharing a name never does it. Keeps `into`'s name, or the
+    /// first name found.
     pub fn merge(&self, cat: &Catalog, ids: &[i64], into: i64) -> Result<()> {
         let others: Vec<i64> = ids.iter().copied().filter(|&i| i != into).collect();
         if others.is_empty() {
@@ -764,8 +771,10 @@ impl FaceIndex {
         {
             let mut db = cat.db();
             let tx = db.transaction()?;
-            let into_name: Option<String> =
-                tx.query_row("SELECT name FROM people WHERE id = ?1", [into], |r| r.get(0)).optional()?.flatten();
+            let into_name: Option<String> = tx
+                .query_row("SELECT name FROM people WHERE id = ?1", [into], |r| r.get(0))
+                .optional()?
+                .ok_or_else(|| anyhow!("no person {into}"))?;
             if into_name.is_none() {
                 for o in &others {
                     let n: Option<String> =

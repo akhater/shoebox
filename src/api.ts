@@ -509,6 +509,20 @@ export interface PhotoFace {
 
 export const faceUrl = (faceId: number) => `http://shoebox.localhost/face/${faceId}`;
 
+/** A name's words, lower case and without accents: "Mary-Ann" = "mary ann". */
+const nameWords = (s: string) =>
+  s
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .join(" ");
+
+/** Two names that read the same ("jane  smith" and "Jane Smith"). Never a
+ *  reason to join two people: only "Same person" does that. */
+export const sameName = (a: string, b: string) => nameWords(a) === nameWords(b);
+
 export interface Stray {
   faceId: number;
   photoId: number;

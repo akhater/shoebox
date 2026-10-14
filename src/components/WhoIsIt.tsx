@@ -1,6 +1,6 @@
-import { UserPlus, UserX, X } from "lucide-react";
+import { Square, UserPlus, UserX, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { faceUrl, fmtNum, people, type FaceTarget, type Moved, type Person } from "../api";
+import { faceUrl, fmtNum, people, sameName, type FaceTarget, type Moved, type Person } from "../api";
 
 /** How many face pictures the dialog shows before "+N". */
 const SHOWN = 24;
@@ -21,7 +21,11 @@ type Row = { person: Person; hint?: string } | { name: string };
 /** "Who is this?": faces go to someone in People (suggested by likeness, or
  *  found by name), to someone new by the name typed, or - not them, don't
  *  know who - to whoever they resemble most. Placed by hand: regrouping never
- *  moves them back. ↑↓ and Enter pick, Esc closes. */
+ *  moves them back. ↑↓ and Enter pick, Esc closes.
+ *
+ *  A name is never enough to join someone: two people can share one. Typed,
+ *  the name is someone new (Enter); people already called that are listed
+ *  under it, and the faces join one of them only on its "Same person". */
 export function WhoIsIt({ faceIds, from, everyone, onDone, onClose }: Props) {
   const [text, setText] = useState("");
   const [found, setFound] = useState<Person[] | null>(null);
@@ -63,10 +67,11 @@ export function WhoIsIt({ faceIds, from, everyone, onDone, onClose }: Props) {
   useEffect(() => setActive(0), [found, alike]);
 
   const typed = text.trim();
-  const rows: Row[] = [
-    ...(found ?? alike).map((p) => ({ person: p, hint: found ? undefined : "looks like" })),
-    ...(typed ? [{ name: typed }] : []),
-  ];
+  const rows: Row[] = typed
+    ? [{ name: typed }, ...(found ?? []).map((p) => ({ person: p }))]
+    : alike.map((p) => ({ person: p, hint: "looks like" }));
+  // Someone (maybe the person they leave) already has exactly this name.
+  const namesake = !!typed && [...(found ?? []), ...(from ? [from] : [])].some((p) => p.name && sameName(p.name, typed));
 
   const go = async (to: FaceTarget, label: string) => {
     if (busy) return;
@@ -111,8 +116,8 @@ export function WhoIsIt({ faceIds, from, everyone, onDone, onClose }: Props) {
           {faceIds.length > SHOWN && <span className="muted">+{fmtNum(faceIds.length - SHOWN)}</span>}
         </div>
         <p className="muted small">
-          {fromName ? `Not ${fromName}? ` : ""}Pick who {one ? "it is" : "they are"}, or type a new name. Shoebox
-          won't move {one ? "it" : "them"} again.
+          {fromName ? `Not ${fromName}? ` : ""}Pick who {one ? "it is" : "they are"}, or type a name: Enter makes someone
+          new, “Same person” joins someone already called that. Shoebox won't move {one ? "it" : "them"} again.
         </p>
         <input
           className="who-input"
@@ -129,44 +134,80 @@ export function WhoIsIt({ faceIds, from, everyone, onDone, onClose }: Props) {
               e.preventDefault();
               setActive((a) => Math.max(0, Math.min(rows.length - 1, a + (e.key === "ArrowDown" ? 1 : -1))));
             } else if (e.key === "Enter" && rows[active]) pick(rows[active]);
+            else if (e.key === "Tab" && found?.length) {
+              // Completes the name; Enter then makes someone new by it.
+              e.preventDefault();
+              const r = rows[active];
+              setText((r && "person" in r ? r.person : found[0]).name!);
+            }
           }}
           role="combobox"
           aria-expanded={rows.length > 0}
           aria-autocomplete="list"
         />
-        <div className="who-list" role="listbox">
-          {rows.map((r, i) => (
-            <button
-              key={"person" in r ? r.person.id : "new"}
-              role="option"
-              aria-selected={i === active}
-              className={`name-suggest-row ${i === active ? "active" : ""}`}
-              onMouseEnter={() => setActive(i)}
-              onClick={() => pick(r)}
-              disabled={busy}
-            >
-              {"person" in r ? (
-                <>
-                  <img src={faceUrl(r.person.cover)} alt="" />
-                  <span className={`grow ellipsis ${r.person.name ? "" : "unnamed"}`}>{r.person.name ?? "Unnamed person"}</span>
-                  <span className="muted small">
-                    {r.hint && `${r.hint} · `}
-                    {r.person.ignored && "ignored · "}
-                    {fmtNum(r.person.photos)} photos
-                  </span>
-                </>
-              ) : (
-                <>
+        {/* The keyboard stays in the name box: Enter there is what the list says. */}
+        <div className="who-list" role="listbox" onMouseDown={(e) => e.preventDefault()}>
+          {rows.map((r, i) => {
+            const row = {
+              role: "option",
+              "aria-selected": i === active,
+              className: `name-suggest-row ${i === active ? "active" : ""}`,
+              onMouseEnter: () => setActive(i),
+            };
+            if (!("person" in r)) {
+              return (
+                <button key="new" {...row} onClick={() => pick(r)} disabled={busy}>
                   <span className="who-new">
                     <UserPlus size={15} />
                   </span>
                   <span className="grow ellipsis">
-                    New person “<b>{r.name}</b>”
+                    {namesake ? "New person, also called" : "New person"} “<b>{r.name}</b>”
                   </span>
-                </>
-              )}
-            </button>
-          ))}
+                </button>
+              );
+            }
+            const p = r.person;
+            const counts = (
+              <span className="muted small">
+                {r.hint && `${r.hint} · `}
+                {p.ignored && "ignored · "}
+                {fmtNum(p.photos)} photos
+              </span>
+            );
+            // Picked by likeness: the row is the choice.
+            if (!typed) {
+              return (
+                <button key={p.id} {...row} onClick={() => pick(r)} disabled={busy}>
+                  <img src={faceUrl(p.cover)} alt="" />
+                  <span className={`grow ellipsis ${p.name ? "" : "unnamed"}`}>{p.name ?? "Unnamed person"}</span>
+                  {counts}
+                </button>
+              );
+            }
+            // Found by name: the name alone is someone new; "Same person" joins them.
+            return (
+              <div key={p.id} {...row}>
+                <img src={faceUrl(p.cover)} alt="" />
+                <button
+                  className="grow"
+                  onClick={() => setText(p.name!)}
+                  disabled={busy}
+                  title="Use this name for someone new (a different person)"
+                >
+                  <span className="ellipsis">{p.name}</span>
+                  {counts}
+                </button>
+                <button
+                  className="same-person"
+                  onClick={() => pick(r)}
+                  disabled={busy}
+                  title={`Same person: ${one ? "it's" : "they're"} this ${p.name}`}
+                >
+                  <Square size={13} /> Same person
+                </button>
+              </div>
+            );
+          })}
         </div>
         {error && <p className="note warn">{error}</p>}
         <div className="modal-foot">
