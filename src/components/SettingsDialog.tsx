@@ -2,7 +2,17 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderInput, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, fmtBytes, fmtNum, type FolderCheck, type MoveProgress, type Settings, type Stats } from "../api";
+import {
+  api,
+  fmtBytes,
+  fmtNum,
+  type FolderCheck,
+  type MoveProgress,
+  type Settings,
+  type Stats,
+  type UpdateStatus,
+  updatesApi,
+} from "../api";
 import { ModelsTab } from "./ModelsTab";
 
 const SIZES = [720, 1080, 1440, 2048, 2560, 3840];
@@ -23,11 +33,13 @@ interface Props {
   initialTab: SettingsTab;
   dataDir: string;
   version: string;
+  /** What the last look for a newer Shoebox found. */
+  update: UpdateStatus | null;
   onRegenerateAll: () => void;
   onClose: () => void;
 }
 
-export function SettingsDialog({ initialTab, dataDir, version, onRegenerateAll, onClose }: Props) {
+export function SettingsDialog({ initialTab, dataDir, version, update, onRegenerateAll, onClose }: Props) {
   const [tab, setTab] = useState(initialTab);
   const [stats, setStats] = useState<Stats | null>(null);
   const [s, setS] = useState<Settings | null>(null);
@@ -256,6 +268,22 @@ export function SettingsDialog({ initialTab, dataDir, version, onRegenerateAll, 
                 </div>
               )}
             </div>
+            <div className="field">
+              <span className="field-label">Updates</span>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={s.checkUpdates}
+                  onChange={(e) => setS({ ...s, checkUpdates: e.target.checked })}
+                />
+                Tell me when a new version is out
+              </label>
+              <UpdateLine version={version} status={update} />
+              <small>
+                Shoebox asks GitHub which release is the latest when it starts and every 6 hours. Only a published
+                release counts. Nothing about your photos is sent, and nothing is downloaded or installed by itself.
+              </small>
+            </div>
           </div>
         )}
         {error && <p className="note warn">{error}</p>}
@@ -321,6 +349,52 @@ function BackupLine() {
         Previews never change once made, so a daily snapshot only adds what's new.
       </small>
       {note && <small>{note}</small>}
+    </div>
+  );
+}
+
+/** This version, the latest release, and "Check now". */
+function UpdateLine({ version, status }: { version: string; status: UpdateStatus | null }) {
+  const [busy, setBusy] = useState(false);
+  const [checked, setChecked] = useState<UpdateStatus | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const u = checked ?? status;
+  const check = async () => {
+    setBusy(true);
+    setFailed(null);
+    try {
+      setChecked(await updatesApi.check());
+    } catch (e) {
+      setFailed(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const published = u?.published ? ` (${new Date(u.published).toLocaleDateString()})` : "";
+  const found = !u
+    ? "Not checked yet."
+    : u.newer
+      ? `Shoebox ${u.latest} is out${published}.`
+      : u.latest
+        ? `Up to date: ${u.latest}${published} is the latest release.`
+        : u.error
+          ? ""
+          : "No release published yet.";
+  return (
+    <div className="row">
+      <span className="grow">
+        <b>v{version}</b> <span className={u?.newer ? "update-text" : "muted"}>· {found}</span>
+        {(u?.error || failed) && <span className="warn-text"> Couldn't reach GitHub.</span>}
+        {u && <span className="muted small"> Checked {new Date(u.checked * 1000).toLocaleTimeString()}.</span>}
+      </span>
+      {u?.newer && (
+        <button className="btn small primary" onClick={() => updatesApi.openPage()}>
+          Get it
+        </button>
+      )}
+      <button className="btn small" onClick={check} disabled={busy}>
+        {busy ? "Checking…" : "Check now"}
+      </button>
     </div>
   );
 }
