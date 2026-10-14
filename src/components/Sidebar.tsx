@@ -3,6 +3,7 @@ import {
   Camera,
   ChevronRight,
   CircleArrowUp,
+  Clock,
   Ellipsis,
   Folder,
   FolderPlus,
@@ -46,6 +47,8 @@ interface Props {
   browse: Browse | null;
   scope: Scope;
   scanningRoot: number | null;
+  /** Folders waiting for their scan, one scan running at a time. */
+  queuedRoots: number[];
   version: string;
   /** A newer published release ("26.43.1"), or null. */
   update: string | null;
@@ -149,6 +152,9 @@ function folderKeys(e: ReactKeyboardEvent<HTMLElement>, t: FolderTarget, f: Fold
 
 /** A whole disk added as a source goes by the disk's name; renaming it renames the disk (in Shoebox only). */
 const shownName = (t: FolderTarget) => (t.relPath ? t.name : t.v.label);
+
+/** A source added or rescanned while another scan runs waits its turn. */
+const WAITING = "Waiting: scans when the one running now ends";
 
 /** The folder's name, or a box to type its new name. */
 function FolderName({ t, f }: { t: FolderTarget; f: FolderUi }) {
@@ -746,6 +752,7 @@ function FolderMenu({
 }) {
   const here = t.v.online && (!t.root || t.root.found);
   const busy = p.scanningRoot === t.rootId;
+  const waiting = p.queuedRoots.includes(t.rootId);
   const act = (fn: () => void) => () => {
     onClose();
     fn();
@@ -787,7 +794,7 @@ function FolderMenu({
         {t.relPath ? "Rename" : "Rename disk"} <span className="shortcut">F2</span>
       </button>
       <hr />
-      <button disabled={!t.v.online || busy} onClick={act(() => p.onRescan(t.rootId))}>
+      <button disabled={!t.v.online || busy || waiting} onClick={act(() => p.onRescan(t.rootId))}>
         Scan again
       </button>
       {t.root && (
@@ -829,6 +836,7 @@ function Source({
   const s: Scope = { kind: "root", id: r.id };
   const key = `r:${r.id}`;
   const busy = p.scanningRoot === r.id;
+  const waiting = !busy && p.queuedRoots.includes(r.id);
   const lost = v.online && !r.found;
   const tree = p.browse?.folders.find((x) => x.rootId === r.id)?.children ?? [];
   const t: FolderTarget = { v, relPath: r.relPath, name: r.name, rootId: r.id, root: r, key, path: r.path, count: r.photos };
@@ -851,7 +859,7 @@ function Source({
         title={
           lost
             ? `Folder not found at ${r.path}\nIts photos stay in the catalog, shown from Shoebox's copies.`
-            : `${r.path}\n${where}\n${fmtAgo(r.lastScan)}`
+            : `${r.path}\n${where}\n${waiting ? WAITING : fmtAgo(r.lastScan)}`
         }
       >
         <Twisty open={open.has(key)} onClick={() => toggle(key)} hidden={!tree.length} />
@@ -867,15 +875,15 @@ function Source({
         <span className={`dot ${v.online ? "on" : "off"}`} />
         <button
           tabIndex={-1}
-          className={`icon-btn tiny ${busy ? "spin" : ""}`}
-          disabled={!v.online || busy}
+          className={`icon-btn tiny ${busy ? "spin" : waiting ? "shown" : ""}`}
+          disabled={!v.online || busy || waiting}
           onClick={(e) => {
             e.stopPropagation();
             p.onRescan(r.id);
           }}
-          title={v.online ? "Scan again" : "Plug the disk in to scan"}
+          title={waiting ? WAITING : v.online ? "Scan again" : "Plug the disk in to scan"}
         >
-          <RefreshCw size={12} />
+          {waiting ? <Clock size={12} /> : <RefreshCw size={12} />}
         </button>
         <button
           tabIndex={-1}
