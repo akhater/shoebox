@@ -444,11 +444,25 @@ fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lens
                 let _ = cat.refresh_roots();
                 let _ = app.emit("volumes-changed", ());
                 lenses.kick();
+                resume_changes(app.clone(), cat.clone());
             }
             Ok(false) => {}
             Err(e) => log::warn!("volume refresh failed: {e:#}"),
         }
     }
+}
+
+/// Settles the folder moves, renames and deletes cut short by a stop (see
+/// [`organize::resume`]), in the background: checking a copy again can take a
+/// while. Those still waiting for a disk get another go when one is plugged in.
+fn resume_changes(app: AppHandle, cat: Arc<Catalog>) {
+    std::thread::spawn(move || match organize::resume(&cat) {
+        Ok(r) if !r.finished.is_empty() || !r.undone.is_empty() => {
+            let _ = app.emit("catalog-changed", ());
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("settling changes cut short: {e:#}"),
+    });
 }
 
 /// Looks for a newer Shoebox: a published release on GitHub, never a commit on
@@ -604,6 +618,8 @@ pub fn run() {
             let handle = app.handle().clone();
             let (c, u) = (cat.clone(), update_status.clone());
             std::thread::Builder::new().name("updates".into()).spawn(move || update_checker(handle, c, u))?;
+            // A folder move, rename or delete cut short last time: finished or undone.
+            resume_changes(app.handle().clone(), cat.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

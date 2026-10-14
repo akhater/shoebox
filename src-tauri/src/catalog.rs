@@ -122,6 +122,29 @@ impl Catalog {
         Ok(changed)
     }
 
+    /// Tests only: `folder` stands for a disk of its own called `name`,
+    /// plugged in until the catalog next looks at which disks are (as
+    /// [`Catalog::open`] does). Returns its disk id, the same for the same name.
+    #[doc(hidden)]
+    pub fn plug_in_test_disk(&self, name: &str, folder: &Path) -> Result<i64> {
+        let serial = i64::from(u32::from_le_bytes(blake3::hash(name.as_bytes()).as_bytes()[..4].try_into()?));
+        let id = {
+            let db = self.db();
+            db.execute(
+                "INSERT OR IGNORE INTO volumes (serial, fs, size_bytes, label) VALUES (?1, 'test', 0, ?2)",
+                params![serial, name],
+            )?;
+            db.query_row(
+                "SELECT id FROM volumes WHERE serial = ?1 AND fs = 'test' AND size_bytes = 0",
+                [serial],
+                |r| r.get(0),
+            )?
+        };
+        self.online.write().unwrap().insert(id, folder.to_string_lossy().into_owned());
+        self.refresh_roots()?;
+        Ok(id)
+    }
+
     /// Adds a folder to the catalog and returns its root id.
     /// A folder inside an existing root is refused; roots inside the new folder
     /// are absorbed into it.

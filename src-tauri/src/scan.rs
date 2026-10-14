@@ -13,6 +13,7 @@ use crate::catalog::Catalog;
 use crate::db::{self, FILE_MISSING, FILE_PRESENT, PREVIEW_FAILED, PREVIEW_OK, PREVIEW_PENDING, under_sql};
 use crate::formats::{self, Kind};
 use crate::imaging::{self, Meta};
+use crate::organize;
 use crate::settings::Settings;
 use crate::volumes;
 use anyhow::{Result, anyhow, bail};
@@ -101,6 +102,17 @@ pub fn scan_root(
     if !base.is_dir() {
         bail!("{} can't be found. Nothing was changed in the catalog.", base.display());
     }
+    // Folders a move, rename or delete is working in (or one cut short, until
+    // it is settled) are left as they are: neither read nor marked missing.
+    let busy: Vec<String> =
+        organize::busy_folders(cat)?.into_iter().filter(|(v, _)| *v == root.volume_id).map(|(_, rel)| rel).collect();
+    if busy.iter().any(|b| db::is_under(&root.rel_path, b)) {
+        bail!(
+            "Shoebox is still finishing a move, rename or delete in {}: it finishes once the disks it needs are \
+             plugged in. Nothing was changed in the catalog.",
+            base.display()
+        );
+    }
     let root_name =
         base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| base.display().to_string());
 
@@ -111,7 +123,7 @@ pub fn scan_root(
 
     // 1. List.
     let mut folder_ids: HashMap<String, i64> = HashMap::new();
-    let mut errored: Vec<String> = Vec::new();
+    let mut errored: Vec<String> = busy.iter().filter(|b| db::is_under(b, &root.rel_path)).cloned().collect();
     let mut batch: Vec<Seen> = Vec::new();
     let mut jobs: Vec<Job> = Vec::new();
     let mut last_emit = Instant::now();
@@ -121,7 +133,8 @@ pub fn scan_root(
         !(e.depth() > 0
             && e.file_type().is_dir()
             && (formats::skip_dir(&e.file_name().to_string_lossy())
-                || e.path().to_string_lossy().to_lowercase() == own))
+                || e.path().to_string_lossy().to_lowercase() == own
+                || busy.iter().any(|b| db::is_under(&rel_of(&mount, e.path()), b))))
     });
     for entry in walker {
         if cancel.load(Ordering::Relaxed) {

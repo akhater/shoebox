@@ -183,8 +183,24 @@ fn migrate(conn: &Connection) -> Result<()> {
             if has_lens_read { "" } else { "ALTER TABLE photos ADD COLUMN lens_read INTEGER NOT NULL DEFAULT 0;" };
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V8} {lens_read} PRAGMA user_version = 8; COMMIT;"))?;
     }
+    if version < 9 {
+        conn.execute_batch(&format!("BEGIN; {SCHEMA_V9} PRAGMA user_version = 9; COMMIT;"))?;
+    }
     Ok(())
 }
+
+/// Folder moves, renames and deletes under way (see organize.rs): what the
+/// next start needs to finish or undo one that was cut short. Each step
+/// changes here in the same transaction as the catalog change it goes with,
+/// so the two never disagree. Empty when nothing is under way.
+const SCHEMA_V9: &str = r#"
+CREATE TABLE IF NOT EXISTS ops (
+    id          TEXT    PRIMARY KEY,
+    step        TEXT    NOT NULL,
+    plan        TEXT    NOT NULL,   -- JSON
+    started     INTEGER NOT NULL
+);
+"#;
 
 /// Gear names (see gear.rs): what a camera or lens is shown as, by the name
 /// its files give. `by_hand` = the user's (renamed, merged, split: backed up with

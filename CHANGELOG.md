@@ -4,6 +4,18 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.42.2 - unreleased
 
+### Fixed
+
+- **A move, rename or delete cut short is never left half-done.** If Shoebox
+  is killed or crashes in the middle of one, the next start finishes it if
+  the catalog had already taken it, or puts disk and catalog back as they
+  were: a partial copy on the other disk is removed (so the move can simply
+  be done again), a renamed folder is followed, files already in the Recycle
+  Bin leave the catalog. An original is removed only once its copy has been
+  compared byte for byte, checked again after a restart. Whatever needs an
+  unplugged disk waits for it; meanwhile scans and other changes leave those
+  folders alone. `shoebox-cli` does the same when it starts.
+
 ## 26.42.1 - 2026-10-14
 
 ### Added
