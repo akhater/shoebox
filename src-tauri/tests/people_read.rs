@@ -60,9 +60,13 @@ fn people_are_new_until_their_page_is_seen() {
     assert_eq!(badge(&faces, &cat, 1), (false, 1));
     assert_eq!(badge(&faces, &cat, 2), (true, 1));
     // On Ana's page, that photo carries the New tag.
-    let list = cat.list_photos(&Scope::Person { id: 1 }, Sort::default(), &Filters::default()).unwrap();
+    let ana = |new_only| Scope::Person { id: 1, new_only };
+    let list = cat.list_photos(&ana(false), Sort::default(), &Filters::default()).unwrap();
     let fresh: Vec<(i64, i64)> = list.ids.iter().copied().zip(list.fresh.iter().copied()).collect();
     assert!(fresh.contains(&(a, 0)) && fresh.contains(&(b, 1)), "{fresh:?}");
+    // "Only new" on her page: just that photo.
+    let new = cat.list_photos(&ana(true), Sort::default(), &Filters::default()).unwrap();
+    assert_eq!((new.ids, new.fresh), (vec![b], vec![1]));
     // Not on other pages.
     let all = cat.list_photos(&Scope::All, Sort::default(), &Filters::default()).unwrap();
     assert!(all.fresh.iter().all(|&f| f == 0));
