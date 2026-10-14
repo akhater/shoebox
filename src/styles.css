@@ -1989,6 +1989,17 @@ button {
   color: var(--accent);
   font-size: 12px;
 }
+/* People in the sidebar: how many are new or in new photos. */
+.nav-badge {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+}
 
 /* Tags */
 .filter-note {
