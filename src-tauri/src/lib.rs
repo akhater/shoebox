@@ -368,7 +368,8 @@ pub fn setup_logging(data: &DataDir) {
         .level(log::LevelFilter::Info)
         // rawler warns about every format feature it lacks; only its errors matter here.
         .level_for("rawler", log::LevelFilter::Error)
-        .chain(std::io::stdout())
+        // stderr: shoebox-cli's stdout is its JSON, nothing else.
+        .chain(std::io::stderr())
         .chain(file)
         .apply();
 }
