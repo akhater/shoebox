@@ -390,6 +390,8 @@ export function Sidebar(p: Props) {
   const sources = (overview?.volumes ?? [])
     .flatMap((v) => v.roots.map((r) => ({ v, r })))
     .sort((a, b) => a.r.path.localeCompare(b.r.path, undefined, { numeric: true, sensitivity: "base" }));
+  // Every source's count as wide as the widest, so the dots and buttons before it line up.
+  const countWidth = `${Math.max(1, ...sources.map(({ r }) => fmtNum(r.photos).length))}ch`;
 
   if (p.folded) {
     // Sources and Gear unfold the sidebar on their section; lit when what is shown comes from them.
@@ -591,6 +593,7 @@ export function Sidebar(p: Props) {
               v={v}
               r={r}
               sameName={sources.filter((x) => x.r.name.toLowerCase() === r.name.toLowerCase()).length > 1}
+              countWidth={countWidth}
               p={p}
               open={open}
               toggle={toggle}
@@ -817,6 +820,7 @@ function Source({
   v,
   r,
   sameName,
+  countWidth,
   p,
   open,
   toggle,
@@ -827,6 +831,8 @@ function Source({
   r: RootInfo;
   /** Another source has the same name (Photos on two disks): show the disk too. */
   sameName: boolean;
+  /** The widest source count: every source's count takes it, so the dots line up. */
+  countWidth: string;
   p: Props;
   open: Set<string>;
   toggle: (id: string) => void;
@@ -897,7 +903,9 @@ function Source({
         >
           <Ellipsis size={12} />
         </button>
-        <span className="count">{fmtNum(r.photos)}</span>
+        <span className="count source-count" style={{ minWidth: countWidth }}>
+          {fmtNum(r.photos)}
+        </span>
       </div>
       {open.has(key) &&
         tree.map((n) => (

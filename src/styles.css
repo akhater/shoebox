@@ -185,6 +185,10 @@ button {
   flex-shrink: 1;
   max-width: 40%;
 }
+.source-count {
+  flex: none;
+  text-align: right;
+}
 .dot {
   width: 7px;
   height: 7px;
