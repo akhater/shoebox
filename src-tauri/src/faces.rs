@@ -541,10 +541,22 @@ impl FaceIndex {
     }
 
     /// Records a photo's faces: each joins the person it resembles, or starts a new one.
-    fn store(&self, cat: &Catalog, photo_id: i64, img: &DynamicImage, faces: Vec<(Detected, Vec<f32>)>) -> Result<()> {
+    /// The photo counts as looked at only once its faces, their fingerprints and
+    /// their pictures are all saved: a Shoebox stopped halfway looks at it
+    /// again, rather than leaving faces with no picture or fingerprint.
+    pub fn store(
+        &self,
+        cat: &Catalog,
+        photo_id: i64,
+        img: &DynamicImage,
+        faces: Vec<(Detected, Vec<f32>)>,
+    ) -> Result<()> {
         let (w, h) = img.dimensions();
         let (fw, fh) = (w as f64, h as f64);
+        // Cut out before the catalog is held.
+        let thumbs: Vec<Option<Vec<u8>>> = faces.iter().map(|(d, _)| face_thumb(img, &d.bbox).ok()).collect();
         let mut written = Vec::new();
+        let mut joined = Vec::new();
         let mut taken: Vec<i64> = Vec::new();
         {
             let mut db = cat.db();
@@ -582,11 +594,25 @@ impl FaceIndex {
                         d.score
                     ],
                 )?;
-                let fid = tx.last_insert_rowid();
-                if let Some(pid) = pid {
-                    self.add_to(pid, v, 1.0);
+                written.push(tx.last_insert_rowid());
+                joined.extend(pid.map(|pid| (pid, v)));
+            }
+            {
+                let mut emb = self.db.lock().unwrap();
+                let etx = emb.transaction()?;
+                for (fid, (_, v)) in written.iter().zip(&faces) {
+                    let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+                    etx.execute("INSERT OR REPLACE INTO emb (face_id, vec) VALUES (?1, ?2)", params![fid, blob])?;
                 }
-                written.push((fid, d.bbox, v.clone()));
+                etx.commit()?;
+            }
+            for (fid, thumb) in written.iter().zip(&thumbs) {
+                let path = cat.data.face_path(*fid);
+                match thumb {
+                    Some(bytes) => cat.data.write(&path, bytes)?,
+                    // Not a picture left by an attempt that never finished.
+                    None => cat.data.remove(&path)?,
+                }
             }
             tx.execute(
                 "INSERT OR REPLACE INTO face_scan (photo_id, model, faces) VALUES (?1, ?2, ?3)",
@@ -594,19 +620,9 @@ impl FaceIndex {
             )?;
             tx.commit()?;
         }
-        {
-            let mut db = self.db.lock().unwrap();
-            let tx = db.transaction()?;
-            for (fid, _, v) in &written {
-                let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
-                tx.execute("INSERT OR REPLACE INTO emb (face_id, vec) VALUES (?1, ?2)", params![fid, blob])?;
-            }
-            tx.commit()?;
-        }
-        for (fid, bbox, _) in &written {
-            if let Ok(bytes) = face_thumb(img, bbox) {
-                let _ = cat.data.write(&cat.data.face_path(*fid), &bytes);
-            }
+        // Only now that they're saved do these faces count for their person.
+        for (pid, v) in joined {
+            self.add_to(pid, v, 1.0);
         }
         Ok(())
     }
