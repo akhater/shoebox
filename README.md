@@ -1,74 +1,175 @@
 # Shoebox
 
-*Every photo, every disk.*
+**Every photo, every disk.**
 
-An offline catalog of every photo on every disk, for a photographer whose
-archive lives on USB disks that are usually unplugged. Browse, search and
-organise all of it with the disks in a drawer; plug one in and Shoebox picks
-up where it left off.
+Shoebox is a desktop catalog for photo archives spread across external drives.
+Browse, search and organize your whole collection while the drives sit
+unplugged in a drawer; plug one in and Shoebox picks up where it left off.
 
-Windows first. Rust + Tauri 2 + React.
+> **Status: early development.** Windows is the supported platform. macOS and
+> Linux builds are previews (see [Platforms](#platforms)).
 
-## What it promises
+## Features
 
-1. **It never writes to a photo file.** Photos are opened read-only. Every
-   file write lives in one module and is refused outside Shoebox's own
-   folders; a test fails if write code appears anywhere else. The only
-   exception is what you ask for explicitly - moving a folder, deleting the
-   photos you marked - and that lives in its own module with its own checks
-   (a move to another disk is copied, verified byte for byte, and only then is
-   the original removed).
-2. **An unplugged disk never changes the catalog.** Its photos stay,
-   browsable from Shoebox's own previews, marked offline.
-3. **Nothing is removed because it wasn't found.** A file is *missing* only
-   after a complete scan of a plugged-in disk, and stays in the catalog.
-4. **A photo is its content, not its path.** Moves and copies keep the same
-   photo, with its tags and people. Disks are known by serial number, never by
-   drive letter, so a disk mounted at `E:` today and at
-   `C:\Mounts\Disk1` tomorrow is the same disk.
+- **Browse everything offline.** Shoebox keeps a preview of every photo, so
+  the whole archive stays browsable when its drives are unplugged. Offline
+  photos are marked as such, never removed.
+- **Reads what your cameras write.** RAW files from most cameras (CR2, CR3,
+  NEF, ARW, RAF, ORF, DNG and more), plus JPEG, HEIC, TIFF, PNG, WebP and AVIF.
+- **Search by description.** Type "kids on a beach" and find the matching
+  photos. It runs on your own GPU, from the previews, so it works on unplugged
+  drives too.
+- **People.** Faces are detected and grouped automatically. Name a person once
+  and find every photo they appear in.
+- **Filters** by person, tag, date, camera, lens, file type and status
+  (online, offline, missing).
+- **Tags** that stay with the photo, even when the file is moved or copied.
+- **Gear.** Each camera and lens is listed under one name, however each file
+  spells it; rename or merge them from the sidebar.
+- **Navigate by date** with a date rail on the grid and a calendar of every
+  day you took photos.
+- **Culling.** Mark photos as you review them, then send them all to the
+  Recycle Bin in one step. A RAW's camera JPEG goes with it.
+- **Organize folders.** Rename, create and move folders by drag and drop. The
+  catalog updates in the same step, with no rescan.
+- **Full-screen viewer**, sharp from the original when its drive is connected,
+  with 100% zoom and a filmstrip.
+- **Scriptable.** Everything the window does is also available from
+  `shoebox-cli`, with JSON output, for scripts and AI agents.
 
-## What it does
+## Your photos are safe
 
-- Catalogs every RAW format plus JPEG, HEIC, TIFF, PNG, WebP, AVIF; keeps a
-  preview of each so everything stays browsable offline.
-- Word search ("kids on a beach") and face recognition, on the GPU, from the
-  previews - so they work on unplugged disks too.
-- Filters: people, tags, date (to the day), camera, lens, file type, status.
-- Tags that stay with the photo wherever it goes.
-- Culling: mark, review, then send to the Recycle Bin (a RAW takes its JPEG
-  twin and its Argentum edits along).
-- Reorganise by drag and drop; rename and create folders in place.
-- A viewer that fills the screen, sharp from the original when its disk is
-  plugged in, with 100% zoom and a filmstrip.
-- Built to be usable without its window: `shoebox-cli` already does most of
-  it in JSON, for scripts and AI agents; an MCP server is next.
+- **Shoebox never writes to a photo file.** Photos are opened read-only. The
+  only file operations are the ones you ask for (moving a folder, deleting
+  photos you marked), and they go through a dedicated module with its own
+  checks: a move to another drive is copied, verified byte for byte, and only
+  then is the original removed.
+- **An unplugged drive never changes the catalog.**
+- **Nothing is removed because it wasn't found.** A file is marked *missing*
+  only after a complete scan of its connected drive. It stays in the catalog
+  and is relinked automatically if it turns up again.
+- **A photo is its content, not its path.** Photos are identified by a content
+  fingerprint, so moved, renamed and copied files keep their tags and people.
+  Drives are identified by serial number, not by drive letter.
+- **Everything stays on your computer.** No account, no cloud, no telemetry.
+  Shoebox connects to the internet only to download the AI models you choose
+  and to check for new releases (which can be turned off in Settings).
 
-## Build
+## Download
+
+Download the latest version from the
+[Releases page](https://github.com/akhater/shoebox/releases).
+
+| Platform | Installer | Portable |
+|---|---|---|
+| Windows (x64, ARM64) | `.exe` setup, per user, no admin rights needed | `.zip` |
+| macOS (Intel, Apple silicon) | `.dmg` | `.tar.gz` |
+| Linux (x64, ARM64) | `.deb`, `.rpm`, `.AppImage` | `.tar.gz` |
+
+The portable version keeps its catalog and models in its own folder, so it can
+run from anywhere, including an external drive.
+
+> No release has been published yet. Until then, Shoebox can be
+> [built from source](#building-from-source).
+
+The builds are not code-signed yet, so Windows SmartScreen or macOS Gatekeeper
+may show a warning on first launch.
+
+### Platforms
+
+- **Windows 10 and 11.** Fully supported. HEIC photos are read through
+  Windows' own HEIF support (Microsoft's HEIF Image Extensions).
+- **macOS and Linux.** Preview builds: drive identification is not implemented
+  on these systems yet, so folders cannot be added, and HEIC is not supported
+  there yet.
+
+## Getting started
+
+1. Install and open Shoebox.
+2. Click **Add folder** in the sidebar and choose a folder of photos, or a
+   whole drive. Shoebox scans it and builds a preview of each photo.
+3. Repeat for each drive. Once scanned, a drive can be unplugged; when it is
+   connected again, Shoebox notices and catches up on its own.
+4. For word search and people, open **Settings > AI models** and download the
+   models.
+
+## AI models
+
+Word search and face recognition run entirely on your computer. The models
+are not bundled with the app: Shoebox downloads them on request from their
+original publishers and verifies each file against a pinned SHA-256 hash.
+
+| Feature | Model | Size |
+|---|---|---|
+| Word search | CLIP ViT-B-32 (as packaged by Immich) | 581 MB |
+| Faces | InsightFace buffalo_l (as packaged by Immich) | 182 MB |
+| AI runtime | Microsoft ONNX Runtime 1.22, on the GPU (DirectML) or the CPU | |
+
+Download, verify or delete them in **Settings > AI models**, or with
+`shoebox-cli models`.
+
+The buffalo_l face model is licensed by InsightFace for non-commercial use
+only.
+
+## Where your catalog lives
+
+| | Catalog | AI models |
+|---|---|---|
+| Installed on Windows | `%USERPROFILE%\.shoebox` | `models` in the install folder |
+| Installed on macOS / Linux | `~/.shoebox` | `~/.shoebox/models` |
+| Portable | `data` next to the app | `models` next to the app |
+
+The catalog can be moved to any folder or drive from **Settings**. It is made
+of a small database plus one preview and one thumbnail file per photo, so
+incremental backups stay small. **Settings > Make backup copies now** (or
+`shoebox-cli backup`) writes consistent copies of the databases while Shoebox
+runs, for backup tools such as Kopia.
+
+## Command line
+
+`shoebox-cli` ships with the app and covers what the window does, with JSON
+output for most commands:
 
 ```bash
+shoebox-cli add "D:\Photos"      # add a folder and scan it
+shoebox-cli scan                 # rescan every connected folder
+shoebox-cli stats                # catalog overview
+shoebox-cli search kids on a beach
+shoebox-cli people               # everyone found, with their names
+shoebox-cli models               # which AI models are installed
+```
+
+The full list of commands is documented at the top of
+[`shoebox-cli.rs`](src-tauri/src/bin/shoebox-cli.rs). Set `SHOEBOX_DATA` to a
+folder to use a different catalog. An MCP server is planned.
+
+## Building from source
+
+Requirements: [Rust](https://rustup.rs) (stable), [Node.js](https://nodejs.org)
+22, and the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)
+for your system.
+
+```bash
+git clone https://github.com/akhater/shoebox.git
+cd shoebox
 npm install
 npm run tauri dev
 ```
 
-The AI models are not in the repository. Shoebox looks for them in `models/`
-next to the app: the repository root in dev, the portable folder, or the
-install folder on Windows. Installed on macOS or Linux, where the app's folder
-can't be written, they go in `~/.shoebox/models`. Settings > AI models (or
-`shoebox-cli models download <id>`) fetches the missing ones from their
-publishers and checks each file's SHA-256.
+In development, the catalog and the AI models live in `data/` and `models/`
+at the repository root. `SHOEBOX_DATA=<folder>` and `SHOEBOX_MODELS=<folder>`
+point the app or the CLI at other folders, for example throwaway ones for
+testing.
 
 ```bash
 cd src-tauri
 cargo run --bin shoebox-cli -- stats
 ```
 
-`SHOEBOX_DATA=<folder>` points the app or the CLI at a throwaway catalog,
-`SHOEBOX_MODELS=<folder>` at a throwaway models folder.
+## Contributing
 
-## Working on it
-
-`main` is protected: every change goes through a pull request, and merges
-only when CI passes (format, lint, tests including the write guards,
-typecheck, build). Builds for download (Windows, macOS, Linux; Intel/AMD
-and ARM) are made only when a release is published. See
-[CHANGELOG.md](CHANGELOG.md).
+Issues and pull requests are welcome. Every change goes through a pull request
+and is merged only when CI passes: formatting, lint, tests (including the
+guards that keep photo files read-only), type check and build. Release builds
+are produced only when a release is published. See
+[CHANGELOG.md](CHANGELOG.md) for what changed in each version.
