@@ -11,7 +11,7 @@ use image::{DynamicImage, GenericImageView, RgbImage, imageops::FilterType};
 use ort::session::Session;
 use ort::value::Tensor;
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +27,8 @@ const MIN_FACE_PX: f32 = 24.0;
 /// Two faces are the same person when their fingerprints are at least this
 /// similar (Immich: maximum distance 0.5).
 const SAME_PERSON: f32 = 0.5;
+/// Less alike than the same person, but enough to suggest who a face may be.
+const LOOKS_LIKE: f32 = 0.3;
 /// Faces smaller than this (short side, in the preview) give fingerprints too
 /// weak to group automatically. They are kept, ungrouped, for a later pass on
 /// the full-size photo.
@@ -270,6 +272,53 @@ pub struct Stray {
     pub photo_id: i64,
     /// Likeness to the person's dominant face, 0..1.
     pub similarity: f32,
+    /// The user put it in this person.
+    pub by_hand: bool,
+}
+
+/// Where faces go when the user says who they are.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum FaceTarget {
+    /// Someone already in People.
+    Person { id: i64 },
+    /// Someone new - one person for all the faces moved - named or not.
+    New { name: Option<String> },
+    /// "Not them, don't know who": each face joins whoever it resembles
+    /// most - never the person it leaves - or becomes someone new.
+    Elsewhere,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Moved {
+    /// Faces that changed person.
+    pub faces: usize,
+    /// Who they went to.
+    pub people: Vec<i64>,
+    /// Faces that made room (their new person was already in the photo):
+    /// who each went to.
+    pub bumped: Vec<i64>,
+    /// Every face changed, as it was: `restore` puts them back (Undo).
+    pub undo: Vec<Placement>,
+}
+
+/// Where a face is: its person, and whether the user put it there and has seen it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Placement {
+    pub face_id: i64,
+    pub person_id: Option<i64>,
+    pub by_hand: bool,
+    pub seen: bool,
+}
+
+/// Someone a face looks like (`look_alikes`).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LookAlike {
+    pub person_id: i64,
+    pub similarity: f32,
 }
 
 #[derive(Clone, Serialize)]
@@ -300,6 +349,7 @@ impl Person {
 #[serde(rename_all = "camelCase")]
 pub struct PhotoFace {
     pub id: i64,
+    pub photo_id: i64,
     pub person_id: Option<i64>,
     pub name: Option<String>,
     /// 0..1 of the photo: x1, y1, x2, y2
@@ -744,38 +794,178 @@ impl FaceIndex {
         Ok(())
     }
 
-    /// "That's not them": the face leaves its person and becomes someone new,
-    /// and is never regrouped automatically.
-    pub fn split_face(&self, cat: &Catalog, face_id: i64) -> Result<i64> {
-        let old: Option<i64> = cat
-            .db()
-            .query_row("SELECT person_id FROM faces WHERE id = ?1", [face_id], |r| r.get(0))
-            .optional()?
-            .flatten();
-        let new_pid = {
+    /// The user says who faces are - one photo's face, or several picked on a
+    /// person's page or in Clean up. Each face is placed by hand: regrouping
+    /// never moves it again, so it can't drift back to the person it left.
+    ///
+    /// A person stays once per photo: if the face's new person was already in
+    /// its photo, that other face makes room - it goes to whoever it resembles
+    /// most among the people not in the photo, or becomes someone new. Faces
+    /// Shoebox places itself (`Elsewhere`, and faces making room) count as new
+    /// for the person they join, so they show up there to be checked.
+    pub fn reassign(&self, cat: &Catalog, face_ids: &[i64], to: &FaceTarget) -> Result<Moved> {
+        let mut moved = Moved::default();
+        // Fingerprint changes, applied to the people's averages once saved.
+        let mut changes: Vec<(i64, Option<i64>, i64)> = Vec::new();
+        {
             let mut db = cat.db();
             let tx = db.transaction()?;
-            tx.execute("INSERT INTO people (name, created_at) VALUES (NULL, ?1)", [crate::db::now()])?;
-            let pid = tx.last_insert_rowid();
-            tx.execute("UPDATE faces SET person_id = ?1, by_hand = 1 WHERE id = ?2", params![pid, face_id])?;
-            tx.commit()?;
-            pid
-        };
-        if let Some(v) = self.vector(face_id)? {
-            if let Some(old) = old {
-                self.add_to(old, &v, -1.0);
+            let new_person = match to {
+                FaceTarget::New { name } => {
+                    let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+                    tx.execute(
+                        "INSERT INTO people (name, created_at) VALUES (?1, ?2)",
+                        params![name, crate::db::now()],
+                    )?;
+                    Some(tx.last_insert_rowid())
+                }
+                FaceTarget::Person { id } => {
+                    let known: Option<i64> =
+                        tx.query_row("SELECT id FROM people WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+                    known.ok_or_else(|| anyhow!("no person {id}"))?;
+                    Some(*id)
+                }
+                FaceTarget::Elsewhere => None,
+            };
+            for &fid in face_ids {
+                let row: Option<(i64, Option<i64>)> = tx
+                    .query_row("SELECT photo_id, person_id FROM faces WHERE id = ?1", [fid], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .optional()?;
+                let Some((photo, from)) = row else { continue };
+                remember(&tx, &mut moved.undo, fid)?;
+                let dest = match new_person {
+                    Some(p) => p,
+                    None => {
+                        let mut taken = people_in(&tx, photo, fid)?;
+                        taken.extend(from);
+                        self.place(&tx, fid, &taken)?
+                    }
+                };
+                if from == Some(dest) {
+                    // Already them: now it's the user's word, not Shoebox's guess.
+                    tx.execute("UPDATE faces SET by_hand = 1 WHERE id = ?1", [fid])?;
+                    continue;
+                }
+                let seen = new_person.is_some() as i64;
+                tx.execute(
+                    "UPDATE faces SET person_id = ?1, by_hand = 1, seen = ?2 WHERE id = ?3",
+                    params![dest, seen, fid],
+                )?;
+                changes.push((fid, from, dest));
+                moved.faces += 1;
+                if !moved.people.contains(&dest) {
+                    moved.people.push(dest);
+                }
+                // Make room: `dest` was already in this photo.
+                let others: Vec<i64> = tx
+                    .prepare("SELECT id FROM faces WHERE photo_id = ?1 AND person_id = ?2 AND id <> ?3")?
+                    .query_map(params![photo, dest, fid], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for other in others {
+                    remember(&tx, &mut moved.undo, other)?;
+                    let taken = people_in(&tx, photo, other)?;
+                    let to = self.place(&tx, other, &taken)?;
+                    tx.execute(
+                        "UPDATE faces SET person_id = ?1, by_hand = 0, seen = 0 WHERE id = ?2",
+                        params![to, other],
+                    )?;
+                    changes.push((other, Some(dest), to));
+                    moved.bumped.push(to);
+                }
             }
-            self.add_to(new_pid, &v, 1.0);
+            tx.commit()?;
         }
-        Ok(new_pid)
+        for (fid, from, to) in changes {
+            if let Some(v) = self.vector(fid)? {
+                if let Some(from) = from {
+                    self.add_to(from, &v, -1.0);
+                }
+                self.add_to(to, &v, 1.0);
+            }
+        }
+        Ok(moved)
     }
 
-    /// Faces in a person that don't look like the rest of them (a group named
-    /// before the grouping rules were tightened can hold other people), worst
-    /// first. "The rest of them" is the person's dominant face: the average of
-    /// the faces close to the average, refined a few times, so a minority of
-    /// strangers can't pull it their way. Faces placed by hand are never offered.
-    pub fn strays(&self, cat: &Catalog, person_id: i64) -> Result<Vec<Stray>> {
+    /// Undo: puts faces back as they were (`Moved::undo`). Returns how many
+    /// changed.
+    pub fn restore(&self, cat: &Catalog, placements: &[Placement]) -> Result<usize> {
+        let mut changes: Vec<(i64, Option<i64>, Option<i64>)> = Vec::new();
+        {
+            let mut db = cat.db();
+            let tx = db.transaction()?;
+            for p in placements {
+                let now: Option<Option<i64>> =
+                    tx.query_row("SELECT person_id FROM faces WHERE id = ?1", [p.face_id], |r| r.get(0)).optional()?;
+                let Some(now) = now else { continue };
+                tx.execute(
+                    "UPDATE faces SET person_id = ?1, by_hand = ?2, seen = ?3 WHERE id = ?4",
+                    params![p.person_id, p.by_hand as i64, p.seen as i64, p.face_id],
+                )?;
+                changes.push((p.face_id, now, p.person_id));
+            }
+            tx.commit()?;
+        }
+        for &(fid, from, to) in &changes {
+            if from == to {
+                continue;
+            }
+            if let Some(v) = self.vector(fid)? {
+                if let Some(from) = from {
+                    self.add_to(from, &v, -1.0);
+                }
+                if let Some(to) = to {
+                    self.add_to(to, &v, 1.0);
+                }
+            }
+        }
+        Ok(changes.len())
+    }
+
+    /// Who a face goes to when the user doesn't say: whoever it resembles most,
+    /// other than `taken`, or someone new.
+    fn place(&self, tx: &rusqlite::Transaction, face_id: i64, taken: &[i64]) -> Result<i64> {
+        if let Some(p) = self.vector(face_id)?.and_then(|v| self.closest(&v, taken)) {
+            return Ok(p);
+        }
+        tx.execute("INSERT INTO people (name, created_at) VALUES (NULL, ?1)", [crate::db::now()])?;
+        Ok(tx.last_insert_rowid())
+    }
+
+    /// The people these faces look most like, best first, to suggest who
+    /// they are: by each person's average face, not counting `except`.
+    pub fn look_alikes(&self, face_ids: &[i64], except: &[i64], n: usize) -> Result<Vec<LookAlike>> {
+        let mut vs = Vec::new();
+        for &fid in face_ids {
+            if let Some(v) = self.vector(fid)? {
+                vs.push(v);
+            }
+        }
+        if vs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let face = mean(&vs.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let c = self.centroids.read().unwrap();
+        let mut out: Vec<LookAlike> = c
+            .iter()
+            .filter(|(pid, (_, n))| *n > 0 && !except.contains(pid))
+            .map(|(pid, (sum, _))| {
+                let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::EPSILON);
+                LookAlike { person_id: *pid, similarity: dot(sum, &face) / norm }
+            })
+            .filter(|l| l.similarity >= LOOKS_LIKE)
+            .collect();
+        out.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
+        out.truncate(n);
+        Ok(out)
+    }
+
+    /// Every face of a person, the least like them first: how much each looks
+    /// like the person's dominant face - the average of the faces close to
+    /// the average, refined a few times, so a minority of strangers can't
+    /// pull it their way. Faces without a fingerprint are left out.
+    pub fn person_faces(&self, cat: &Catalog, person_id: i64) -> Result<Vec<Stray>> {
         let faces: Vec<(i64, i64, bool)> = cat
             .db()
             .prepare("SELECT id, photo_id, by_hand FROM faces WHERE person_id = ?1")?
@@ -787,82 +977,85 @@ impl FaceIndex {
                 faces_v.push((fid, photo, by_hand, v));
             }
         }
-        // Too few faces to tell who the person "really" is.
-        if faces_v.len() < 3 {
+        if faces_v.is_empty() {
             return Ok(Vec::new());
         }
         let centre = dominant(&faces_v.iter().map(|f| f.3.as_slice()).collect::<Vec<_>>());
         let mut out: Vec<Stray> = faces_v
             .iter()
-            .filter(|f| !f.2)
-            .map(|f| Stray { face_id: f.0, photo_id: f.1, similarity: dot(&f.3, &centre) })
-            .filter(|s| s.similarity < SAME_PERSON)
+            .map(|f| Stray { face_id: f.0, photo_id: f.1, similarity: dot(&f.3, &centre), by_hand: f.2 })
             .collect();
         out.sort_by(|a, b| a.similarity.total_cmp(&b.similarity));
         Ok(out)
     }
 
-    /// Moves faces out of a person: each joins whoever it resembles most -
-    /// never the person it left, never someone already in its photo - or
-    /// starts someone new. Returns how many moved.
-    pub fn move_out(&self, cat: &Catalog, person_id: i64, face_ids: &[i64]) -> Result<usize> {
-        let mut moved = 0;
-        for &fid in face_ids {
-            let row: Option<(i64, Option<i64>)> = cat
-                .db()
-                .query_row("SELECT photo_id, person_id FROM faces WHERE id = ?1", [fid], |r| Ok((r.get(0)?, r.get(1)?)))
-                .optional()?;
-            let Some((photo, Some(cur))) = row else { continue };
-            if cur != person_id {
-                continue;
-            }
-            let Some(v) = self.vector(fid)? else { continue };
-            self.add_to(person_id, &v, -1.0);
-            let mut taken: Vec<i64> = cat
-                .db()
-                .prepare("SELECT person_id FROM faces WHERE photo_id = ?1 AND person_id IS NOT NULL AND id <> ?2")?
-                .query_map(params![photo, fid], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            taken.push(person_id);
-            let to = {
-                let mut db = cat.db();
-                let tx = db.transaction()?;
-                let to = match self.closest(&v, &taken) {
-                    Some(p) => p,
-                    None => {
-                        tx.execute("INSERT INTO people (name, created_at) VALUES (NULL, ?1)", [crate::db::now()])?;
-                        tx.last_insert_rowid()
-                    }
-                };
-                tx.execute("UPDATE faces SET person_id = ?1 WHERE id = ?2", params![to, fid])?;
-                tx.commit()?;
-                to
-            };
-            self.add_to(to, &v, 1.0);
-            moved += 1;
+    /// Faces in a person that don't look like the rest of them (a group named
+    /// before the grouping rules were tightened can hold other people), worst
+    /// first. Faces placed by hand are never offered, and a person with fewer
+    /// than 3 faces has no "rest of them" to compare with.
+    pub fn strays(&self, cat: &Catalog, person_id: i64) -> Result<Vec<Stray>> {
+        let all = self.person_faces(cat, person_id)?;
+        if all.len() < 3 {
+            return Ok(Vec::new());
         }
-        Ok(moved)
+        Ok(all.into_iter().filter(|s| !s.by_hand && s.similarity < SAME_PERSON).collect())
     }
 
     /// The faces found in one photo, for the viewer.
     pub fn photo_faces(&self, cat: &Catalog, photo_id: i64) -> Result<Vec<PhotoFace>> {
+        self.faces_in(cat, &[photo_id])
+    }
+
+    /// The faces found in some photos, photo by photo, left to right.
+    pub fn faces_in(&self, cat: &Catalog, photo_ids: &[i64]) -> Result<Vec<PhotoFace>> {
         let db = cat.db();
-        let faces = db
-            .prepare(
-                "SELECT f.id, f.person_id, p.name, f.x1, f.y1, f.x2, f.y2 FROM faces f
-                   LEFT JOIN people p ON p.id = f.person_id WHERE f.photo_id = ?1 ORDER BY f.x1",
-            )?
-            .query_map([photo_id], |r| {
+        let mut stmt = db.prepare(
+            "SELECT f.id, f.photo_id, f.person_id, p.name, f.x1, f.y1, f.x2, f.y2 FROM faces f
+               LEFT JOIN people p ON p.id = f.person_id WHERE f.photo_id = ?1 ORDER BY f.x1",
+        )?;
+        let mut out = Vec::new();
+        for photo in photo_ids {
+            let faces = stmt.query_map([photo], |r| {
                 Ok(PhotoFace {
                     id: r.get(0)?,
-                    person_id: r.get(1)?,
-                    name: r.get(2)?,
-                    bbox: [r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?],
+                    photo_id: r.get(1)?,
+                    person_id: r.get(2)?,
+                    name: r.get(3)?,
+                    bbox: [r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?],
                 })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(faces)
+            })?;
+            for f in faces {
+                out.push(f?);
+            }
+        }
+        Ok(out)
     }
+}
+
+/// Notes where a face is before it changes (once: the first state is the one
+/// Undo goes back to).
+fn remember(tx: &rusqlite::Transaction, undo: &mut Vec<Placement>, face_id: i64) -> Result<()> {
+    if undo.iter().any(|p| p.face_id == face_id) {
+        return Ok(());
+    }
+    let p = tx.query_row("SELECT person_id, by_hand, seen FROM faces WHERE id = ?1", [face_id], |r| {
+        Ok(Placement {
+            face_id,
+            person_id: r.get(0)?,
+            by_hand: r.get::<_, i64>(1)? != 0,
+            seen: r.get::<_, i64>(2)? != 0,
+        })
+    })?;
+    undo.push(p);
+    Ok(())
+}
+
+/// The people in a photo, but for one of its faces.
+fn people_in(tx: &rusqlite::Transaction, photo: i64, except_face: i64) -> Result<Vec<i64>> {
+    Ok(tx
+        .prepare("SELECT person_id FROM faces WHERE photo_id = ?1 AND person_id IS NOT NULL AND id <> ?2")?
+        .query_map(params![photo, except_face], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 /// A square 160 px picture of the face, with some margin.

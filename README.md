@@ -14,6 +14,9 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
 - **Browse everything offline.** Shoebox keeps a preview of every photo, so
   the whole archive stays browsable when its drives are unplugged. Offline
   photos are marked as such, never removed.
+- **Backup drives welcome.** The same photos on two drives are one photo with
+  two copies, not duplicates. Adding the backup drive builds no new previews,
+  and each photo opens from whichever of its drives is connected.
 - **Reads what your cameras write.** RAW files from most cameras (CR2, CR3,
   NEF, ARW, RAF, ORF, DNG and more), plus JPEG, HEIC, TIFF, PNG, WebP and AVIF.
 - **Search by description.** Type "kids on a beach" and find the matching
@@ -88,6 +91,8 @@ may show a warning on first launch.
 1. Install and open Shoebox.
 2. Click **Add folder** in the sidebar and choose a folder of photos, or a
    whole drive. Shoebox scans it and builds a preview of each photo.
+   You can start with a few folders and add their parent later: the folders
+   already scanned become part of it and are not read again.
 3. Repeat for each drive. Once scanned, a drive can be unplugged; when it is
    connected again, Shoebox notices and catches up on its own.
 4. For word search and people, open **Settings > AI models** and download the

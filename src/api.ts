@@ -500,6 +500,7 @@ export interface Person {
 
 export interface PhotoFace {
   id: number;
+  photoId: number;
   personId: number | null;
   name: string | null;
   /** 0..1 of the photo: x1, y1, x2, y2 */
@@ -513,6 +514,30 @@ export interface Stray {
   photoId: number;
   /** Likeness to the person's usual face, 0..1. */
   similarity: number;
+  /** Put in this person by hand. */
+  byHand: boolean;
+}
+
+/** Where faces go: someone in People, someone new, or (not them, don't know
+ *  who) whoever they resemble most. */
+export type FaceTarget = { kind: "person"; id: number } | { kind: "new"; name: string | null } | { kind: "elsewhere" };
+
+export interface Moved {
+  /** Faces that changed person. */
+  faces: number;
+  /** Who they went to. */
+  people: number[];
+  /** Faces that made room (their new person was already in the photo): who each went to. */
+  bumped: number[];
+  /** Every face changed, as it was: `people.restore` puts them back. */
+  undo: Placement[];
+}
+
+export interface Placement {
+  faceId: number;
+  personId: number | null;
+  byHand: boolean;
+  seen: boolean;
 }
 
 export const people = {
@@ -529,12 +554,19 @@ export const people = {
   ignore: (ids: number[], ignored: boolean) => invoke<void>("ignore_people", { ids, ignored }),
   /** Re-sorts faces not named, ignored or placed by hand. [faces, new people] */
   regroup: () => invoke<[number, number]>("regroup_faces"),
-  split: (faceId: number) => invoke<number>("split_face", { faceId }),
+  /** "Who is this?": the faces go there, placed by hand (never regrouped back). */
+  reassign: (faceIds: number[], to: FaceTarget) => invoke<Moved>("reassign_faces", { faceIds, to }),
+  /** Undo of `reassign`: the faces go back as they were. */
+  restore: (placements: Placement[]) => invoke<number>("restore_faces", { placements }),
+  /** Who these faces look like most, best first, to suggest who they are. */
+  lookAlikes: (faceIds: number[], except: number[]) =>
+    invoke<{ personId: number; similarity: number }[]>("look_alikes", { faceIds, except }),
   /** Faces in a person that don't look like them, worst first. */
   strays: (personId: number) => invoke<Stray[]>("person_strays", { personId }),
-  /** Moves faces out, to whoever they resemble (or someone new). */
-  moveOut: (personId: number, faceIds: number[]) => invoke<number>("move_faces_out", { personId, faceIds }),
+  /** Every face of a person, the least like them first. */
+  faces: (personId: number) => invoke<Stray[]>("person_faces", { personId }),
   inPhoto: (photoId: number) => invoke<PhotoFace[]>("photo_faces", { photoId }),
+  inPhotos: (photoIds: number[]) => invoke<PhotoFace[]>("faces_in_photos", { photoIds }),
 };
 
 /** One AI model in Settings > AI models. */
