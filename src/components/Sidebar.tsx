@@ -200,7 +200,28 @@ function useOpenSet(key: string, initial: string[]) {
       else n.add(id);
       return n;
     });
-  return [open, toggle] as const;
+  const openAll = (ids: string[]) => setOpen((s) => (ids.every((id) => s.has(id)) ? s : new Set([...s, ...ids])));
+  return [open, toggle, openAll] as const;
+}
+
+/** The tree rows to open to reach a folder: its source, then each folder above it. */
+function pathTo(browse: Browse | null, volumeId: number, relPath: string): string[] {
+  const walk = (ns: FolderNode[], above: string[]): string[] | null => {
+    for (const n of ns) {
+      if (n.volumeId !== volumeId) continue;
+      if (n.relPath === relPath) return above;
+      if (relPath.startsWith(n.relPath + "\\")) {
+        const found = walk(n.children, [...above, `f:${n.volumeId}:${n.relPath}`]);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  for (const r of browse?.folders ?? []) {
+    const found = walk(r.children, [`r:${r.rootId}`]);
+    if (found) return found;
+  }
+  return [];
 }
 
 /** A row the keyboard can reach: its depth in the tree and, if it opens, its key. */
@@ -208,7 +229,7 @@ const nav = (depth: number, key?: string) => ({ "data-nav": "", "data-depth": de
 
 export function Sidebar(p: Props) {
   const { overview, scope, onScope } = p;
-  const [open, toggle] = useOpenSet("shoebox.sidebar", ["sec:disks"]);
+  const [open, toggle, openAll] = useOpenSet("shoebox.sidebar", ["sec:disks"]);
   const [menu, setMenu] = useState<{ t: FolderTarget; x: number; y: number } | null>(null);
   const [gearMenu, setGearMenu] = useState<GearMenuAt | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -294,6 +315,20 @@ export function Sidebar(p: Props) {
     // Name it straight away, as Explorer does; the row appears with the next refresh.
     setRenaming(folderId(t.v.id, rel));
   };
+
+  // The folder shown is open in the tree and on screen, however it was reached
+  // (a photo's "Go to folder", Back, a move). Only when it changes: a folder
+  // closed by hand afterwards stays closed.
+  const [reveal, setReveal] = useState(0);
+  const scopeKey = JSON.stringify(scope);
+  useEffect(() => {
+    if (scope.kind !== "root" && scope.kind !== "folder") return;
+    openAll(["sec:disks", ...(scope.kind === "folder" ? pathTo(p.browse, scope.volumeId, scope.relPath) : [])]);
+    setReveal((n) => n + 1);
+  }, [scopeKey]);
+  useEffect(() => {
+    if (reveal) scroller.current?.querySelector(".nav-item.active")?.scrollIntoView({ block: "nearest" });
+  }, [reveal]);
 
   // One Tab stop for the whole sidebar: the row last focused, else the one shown, else the first.
   useEffect(() => {

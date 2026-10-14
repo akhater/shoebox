@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, ExternalLink, FolderOpen, ImageOff, Trash2, Undo2, UserX, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, FolderInput, FolderOpen, ImageOff, Trash2, Undo2, UserX, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   api,
@@ -10,6 +10,7 @@ import {
   people,
   previewUrl,
   thumbUrl,
+  type FileLoc,
   type PhotoDetail,
   type Person,
   type PhotoFace,
@@ -33,6 +34,8 @@ interface Props {
   onToggleMark: () => void;
   /** Show a person's photos. */
   onPerson: (personId: number) => void;
+  /** Show the folder a copy of the photo is in. */
+  onFolder: (copy: FileLoc) => void;
   /** Tags were added or taken off (filter counts follow). */
   onTagsChanged: () => void;
   /** Everyone in People, to say who a face is. */
@@ -48,7 +51,7 @@ const STATE_LABEL = {
   missing: "Missing",
 } as const;
 
-export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, onTagsChanged, everyone, onFacesChanged }: Props) {
+export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, onFolder, onTagsChanged, everyone, onFacesChanged }: Props) {
   const tagBox = useRef<HTMLInputElement>(null);
   const id = list.ids[index];
   const rev = list.rev[index];
@@ -374,16 +377,25 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
                   <div className="loc-path" title={f.path}>
                     {f.path}
                   </div>
-                  {f.state === "online" && (
-                    <div className="loc-actions">
-                      <button className="btn small" onClick={() => act(api.revealFile(f.id))}>
-                        <FolderOpen size={14} /> Show in Explorer
-                      </button>
-                      <button className="btn small" onClick={() => act(api.openFile(f.id))}>
-                        <ExternalLink size={14} /> Open
-                      </button>
-                    </div>
-                  )}
+                  <div className="loc-actions">
+                    <button
+                      className="btn small"
+                      onClick={() => onFolder(f)}
+                      title={`Show “${f.folder.split("\\").pop() || f.volumeLabel}” here in Shoebox, with this photo selected`}
+                    >
+                      <FolderInput size={14} /> Go to folder
+                    </button>
+                    {f.state === "online" && (
+                      <>
+                        <button className="btn small" onClick={() => act(api.revealFile(f.id))}>
+                          <FolderOpen size={14} /> Show in Explorer
+                        </button>
+                        <button className="btn small" onClick={() => act(api.openFile(f.id))}>
+                          <ExternalLink size={14} /> Open
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </li>
               ))}
             </ul>

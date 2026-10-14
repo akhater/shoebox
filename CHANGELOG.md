@@ -6,6 +6,11 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **Go to folder.** Each copy of a photo in the viewer's Location has a
+  "Go to folder" button: it shows that folder in the grid with the photo
+  selected, and opens the sidebar tree down to it. It works with the disk
+  unplugged, and Back (Esc) returns to the photo. `shoebox-cli photo` gives
+  each copy's `folder`, to list it with `shoebox-cli list`.
 - **`shoebox-cli people-ignore <person-id>... [--show]`**: ignore strangers
   (or show them again) headless, as the eye in People does. An unknown id
   changes nobody and fails.
