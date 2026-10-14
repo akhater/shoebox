@@ -46,6 +46,8 @@ interface Props {
   version: string;
   /** People shown in the People view. */
   people: number;
+  /** Of those, the ones new or found in new photos since you last looked. */
+  peopleNew: number;
   peopleOpen: boolean;
   onPeople: () => void;
   onScope: (s: Scope) => void;
@@ -416,6 +418,14 @@ export function Sidebar(p: Props) {
           <button {...nav(0)} className={`nav-item ${p.peopleOpen ? "active" : ""}`} onClick={p.onPeople}>
             <Users size={16} />
             <span className="grow">People</span>
+            {p.peopleNew > 0 && (
+              <span
+                className="nav-badge"
+                title={`${fmtNum(p.peopleNew)} ${p.peopleNew === 1 ? "person" : "people"} new or found in new photos`}
+              >
+                {fmtNum(p.peopleNew)}
+              </span>
+            )}
             <span className="count">{fmtNum(p.people)}</span>
           </button>
           {(overview?.missing ?? 0) > 0 && (
