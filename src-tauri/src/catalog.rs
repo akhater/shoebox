@@ -558,7 +558,14 @@ impl Catalog {
             ),
             Scope::Camera { name } => (format!("{CAMERA_SQL} = ?2"), 0, name.clone()),
             Scope::Lens { name } => (format!("{LENS_SQL} = ?2"), 0, name.clone()),
-            Scope::Person { id } => ("p.id IN (SELECT photo_id FROM faces WHERE person_id = ?1)".into(), *id, String::new()),
+            Scope::Person { id, new_only } => (
+                format!(
+                    "p.id IN (SELECT photo_id FROM faces WHERE person_id = ?1{})",
+                    if *new_only { " AND seen = 0" } else { "" }
+                ),
+                *id,
+                String::new(),
+            ),
             Scope::Marked => ("p.marked = 1".into(), 0, String::new()),
         };
         Ok((filter, p1, p2))
@@ -1063,6 +1070,10 @@ pub enum Scope {
     },
     Person {
         id: i64,
+        /// Only the photos they were found in since the user last looked at them
+        /// ("Only new", to check quickly what was found).
+        #[serde(default)]
+        new_only: bool,
     },
     /// Marked for deletion.
     Marked,
