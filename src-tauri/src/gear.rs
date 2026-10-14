@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Version of the grouping rules; a catalog grouped with older ones is grouped again at start.
-const GEAR_RULES: &str = "1";
+const GEAR_RULES: &str = "2";
 
 /// The camera as its files name it, on photo `p`, NULL when they don't. One
 /// name whatever wrote the file: rawler says "EOS R6 Mark III", the camera's
@@ -224,6 +224,106 @@ fn camera_key(make: Option<&str>, model: Option<&str>) -> Key {
     Key { maker: first.filter(|w| !w.is_empty()), rest: squash(&rest.join(" ")) }
 }
 
+/// What a lens is, as its name says: focal range (mm), and widest aperture
+/// at both ends of a zoom (the same twice for a prime or a constant zoom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Spec {
+    short: f32,
+    long: f32,
+    wide_f: f32,
+    tele_f: f32,
+}
+
+impl Spec {
+    /// A photo's lens named by what it is (`photo`) could be this lens.
+    /// Its apertures at both ends, when it gives both ("f/3.5-5.6"), or the
+    /// one it gives (some cameras say the widest at the focal length used).
+    fn holds(&self, photo: &Spec) -> bool {
+        let near = |a: f32, b: f32| (a - b).abs() < 0.6;
+        let close = |a: f32, b: f32| (a / b).ln().abs() < 0.06;
+        let aperture = if photo.tele_f > photo.wide_f + 0.05 {
+            close(photo.wide_f, self.wide_f) && close(photo.tele_f, self.tele_f)
+        } else {
+            photo.wide_f >= self.wide_f * 0.97 && photo.wide_f <= self.tele_f * 1.03
+        };
+        near(self.short, photo.short) && near(self.long, photo.long) && aperture
+    }
+}
+
+/// Standard f-numbers, in thirds of a stop: an aperture shows as the nearest.
+const F_STOPS: [f32; 31] = [
+    1.0, 1.1, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6, 6.3, 7.1, 8.0, 9.0, 10.0, 11.0,
+    13.0, 14.0, 16.0, 18.0, 20.0, 22.0, 25.0, 29.0, 32.0,
+];
+
+/// A lens named by what it is - its focal range, and widest aperture at both
+/// ends - for files that say no more (no name, no id it can be found by):
+/// "24-70mm f/2.8", "18-55mm f/3.5-5.6", "50mm".
+pub fn spec_name(short: f32, long: f32, aperture: Option<(f32, f32)>) -> Option<String> {
+    if !(short > 0.0 && long >= short && long < 10_000.0) {
+        return None;
+    }
+    let num = |v: f32| {
+        let r = (v * 10.0).round() / 10.0;
+        if r.fract() == 0.0 { format!("{}", r as i64) } else { format!("{r}") }
+    };
+    let focal = if long - short < 0.05 { num(short) } else { format!("{}-{}", num(short), num(long)) };
+    let stop =
+        |a: f32| F_STOPS.iter().copied().min_by(|x, y| (x.ln() - a.ln()).abs().total_cmp(&(y.ln() - a.ln()).abs()));
+    let f = |a: f32| Some(a).filter(|a| (0.7..=64.0).contains(a)).and_then(stop);
+    Some(match aperture.and_then(|(w, t)| f(w).map(|w| (w, f(t).unwrap_or(w)))) {
+        Some((w, t)) if t > w => format!("{focal}mm f/{}-{}", num(w), num(t)),
+        Some((w, _)) => format!("{focal}mm f/{}", num(w)),
+        None => format!("{focal}mm"),
+    })
+}
+
+/// "4.5-5.6" -> (4.5, 5.6); "2.8" -> (2.8, 2.8).
+fn num_range(s: &str) -> Option<(f32, f32)> {
+    let mut parts = s.split('-');
+    let a: f32 = parts.next()?.parse().ok()?;
+    let b: f32 = match parts.next() {
+        Some(x) => x.parse().ok()?,
+        None => a,
+    };
+    (parts.next().is_none() && a > 0.0 && b >= a).then_some((a, b))
+}
+
+/// What a lens's name says it is, in any maker's style: "Canon EF
+/// 100-400mm f/4.5-5.6L IS USM", "XF23mmF1.4 R", "FE 24-70mm F2.8 GM",
+/// "24.0-70.0 mm f/2.8". None without both a focal length and an aperture.
+fn spec_of(name: &str) -> Option<Spec> {
+    let lower = name.to_lowercase();
+    let is_num = |c: char| c.is_ascii_digit() || c == '.' || c == '-';
+    for (at, _) in lower.match_indices("mm") {
+        let head = lower[..at].trim_end();
+        let start = head.char_indices().rev().find(|&(_, c)| !is_num(c)).map_or(0, |(i, c)| i + c.len_utf8());
+        let Some((short, long)) = num_range(head[start..].trim_matches('-')) else { continue };
+        let tail = &lower[at + 2..];
+        for (i, c) in tail.char_indices() {
+            if c != 'f' {
+                continue;
+            }
+            let rest = tail[i + 1..].trim_start_matches('/');
+            let end = rest.find(|c: char| !is_num(c)).unwrap_or(rest.len());
+            if let Some((wide_f, tele_f)) = num_range(rest[..end].trim_matches('-')) {
+                return Some(Spec { short, long, wide_f, tele_f });
+            }
+        }
+        return None;
+    }
+    None
+}
+
+/// A name that is only what a lens is, no maker or model: "24-70mm f/2.8"
+/// (Shoebox's, for an older Canon), "24.0-70.0 mm f/2.8" (Lightroom's).
+fn is_spec_only(name: &str) -> bool {
+    let s: String = name.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    let Some((focal, f)) = s.split_once("mm") else { return false };
+    let range = |r: &str| num_range(r).is_some();
+    range(focal) && (f.is_empty() || f.strip_prefix('f').map(|x| x.strip_prefix('/').unwrap_or(x)).is_some_and(range))
+}
+
 /// Two names of the same lens, as [`tidy`] would group them.
 pub fn same_lens(a: &str, b: &str) -> bool {
     let (a, b) = (lens_key(a), lens_key(b));
@@ -286,6 +386,7 @@ pub fn tidy(db: &Connection) -> Result<()> {
             .query_map([kind.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
 
+        let mut auto: HashMap<&str, String> = HashMap::new();
         let mut groups: BTreeMap<&str, Vec<(&str, &Key, i64)>> = BTreeMap::new();
         for (name, (key, n)) in &names {
             groups.entry(key.rest.as_str()).or_default().push((name, key, *n));
@@ -305,6 +406,31 @@ pub fn tidy(db: &Connection) -> Result<()> {
             };
             for (name, _, _) in group {
                 if *name != target && !hand.contains_key(*name) {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO gear_names (kind, name, shown, by_hand) VALUES (?1, ?2, ?3, 0)",
+                        params![kind.as_str(), name, target],
+                    )?;
+                    auto.insert(name, target.clone());
+                }
+            }
+        }
+        if kind == Kind::Lens {
+            // A lens named only by what it is ("24-70mm f/2.8": an older Canon
+            // records no lens id) is the catalog's lens of that focal range and
+            // aperture - when exactly one fits. Two that fit (a Canon and a
+            // Tamron 24-70 f/2.8): left as it is.
+            let shown = |n: &str| hand.get(n).or_else(|| auto.get(n)).cloned().unwrap_or_else(|| n.to_string());
+            for name in names.keys().filter(|n| is_spec_only(n) && !hand.contains_key(*n)) {
+                let Some(spec) = spec_of(name) else { continue };
+                let fits: BTreeSet<String> = names
+                    .keys()
+                    .filter(|other| !is_spec_only(other) && spec_of(other).is_some_and(|o| o.holds(&spec)))
+                    .map(|other| shown(other))
+                    .collect();
+                if fits.len() == 1
+                    && let Some(target) = fits.into_iter().next()
+                    && target != *name
+                {
                     tx.execute(
                         "INSERT OR REPLACE INTO gear_names (kind, name, shown, by_hand) VALUES (?1, ?2, ?3, 0)",
                         params![kind.as_str(), name, target],
@@ -634,6 +760,77 @@ mod tests {
         assert_eq!(list(&db).unwrap().lenses.len(), 5);
         assert!(rename(&db, Kind::Lens, "Unknown lens", "50mm").is_err());
         assert!(rename(&db, Kind::Lens, "Nothing like it", "50mm").is_err());
+    }
+
+    #[test]
+    fn a_lens_by_what_it_is() {
+        assert_eq!(spec_name(24.0, 70.0, Some((2.83, 2.83))).as_deref(), Some("24-70mm f/2.8"));
+        assert_eq!(spec_name(50.0, 50.0, Some((1.78, 1.78))).as_deref(), Some("50mm f/1.8"));
+        assert_eq!(spec_name(12.0, 24.0, Some((4.0, 4.0))).as_deref(), Some("12-24mm f/4"));
+        assert_eq!(spec_name(100.0, 400.0, Some((5.66, 5.66))).as_deref(), Some("100-400mm f/5.6"));
+        assert_eq!(spec_name(18.0, 55.0, Some((3.5, 5.6))).as_deref(), Some("18-55mm f/3.5-5.6"));
+        assert_eq!(spec_name(50.0, 50.0, None).as_deref(), Some("50mm"));
+        assert_eq!(spec_name(0.0, 0.0, Some((2.8, 2.8))), None);
+
+        let spec = |n: &str| spec_of(n).map(|s| (s.short, s.long, s.wide_f, s.tele_f));
+        assert_eq!(spec("Canon EF 24-70mm f/2.8L USM"), Some((24.0, 70.0, 2.8, 2.8)));
+        assert_eq!(spec("EF100-400mm f/4.5-5.6L IS USM"), Some((100.0, 400.0, 4.5, 5.6)));
+        assert_eq!(spec("EF-S18-55mm f/3.5-5.6 IS STM"), Some((18.0, 55.0, 3.5, 5.6)));
+        assert_eq!(spec("XF23mmF1.4 R"), Some((23.0, 23.0, 1.4, 1.4)));
+        assert_eq!(spec("Sony FE 24-70mm F2.8 GM"), Some((24.0, 70.0, 2.8, 2.8)));
+        assert_eq!(spec("Leica Summilux-M 50mm f/1.4 ASPH."), Some((50.0, 50.0, 1.4, 1.4)));
+        assert_eq!(spec("24.0-70.0 mm f/2.8"), Some((24.0, 70.0, 2.8, 2.8)));
+        assert_eq!(spec("iPhone 13 Pro back camera"), None);
+
+        assert!(is_spec_only("24-70mm f/2.8"));
+        assert!(is_spec_only("24.0-70.0 mm f/2.8"));
+        assert!(is_spec_only("50mm"));
+        assert!(!is_spec_only("Canon EF 50mm f/1.4 USM"));
+        assert!(!is_spec_only("EF50mm f/1.8 II"));
+    }
+
+    #[test]
+    fn a_lens_by_what_it_is_joins_the_one_lens_that_fits() {
+        let db = catalog();
+        add(&db, "Canon", "Canon EOS 5D Mark II", Some("Canon EF 24-70mm f/2.8L USM"), 2);
+        add(&db, "Canon", "Canon EOS 5D Mark II", Some("Canon EF 50mm f/1.4 USM"), 1);
+        add(&db, "Canon", "Canon EOS 5D Mark II", Some("EF100-400mm f/4.5-5.6L IS USM"), 1);
+        add(&db, "Canon", "EOS 10D", Some("24-70mm f/2.8"), 3);
+        add(&db, "Canon", "EOS 10D", Some("50mm f/1.8"), 1); // not the f/1.4
+        add(&db, "Canon", "EOS 10D", Some("12-24mm f/4"), 1); // no such lens here
+        add(&db, "Canon", "EOS 10D", Some("100-400mm f/5.6"), 1); // a zoom, at its long end
+        add(&db, "Nikon", "D700", Some("100-400mm f/4.5-5.6"), 1); // the same, both ends given
+        add(&db, "Nikon", "D700", Some("100-400mm f/4-5.6"), 1); // not the same
+        tidy(&db).unwrap();
+        let g = list(&db).unwrap();
+        assert_eq!(
+            shown(&g.lenses),
+            [
+                ("Canon EF 24-70mm f/2.8L USM", 5),
+                ("EF100-400mm f/4.5-5.6L IS USM", 3),
+                ("100-400mm f/4-5.6", 1),
+                ("12-24mm f/4", 1),
+                ("50mm f/1.8", 1),
+                ("Canon EF 50mm f/1.4 USM", 1)
+            ]
+        );
+        assert_eq!(g.lenses[0].in_files, ["24-70mm f/2.8", "Canon EF 24-70mm f/2.8L USM"]);
+
+        // The user's name for the lens: it joins that.
+        rename(&db, Kind::Lens, "Canon EF 24-70mm f/2.8L USM", "My 24-70").unwrap();
+        tidy(&db).unwrap();
+        assert_eq!(shown(&list(&db).unwrap().lenses)[0], ("My 24-70", 5));
+
+        // Two lenses fit (a Canon and a Tamron 24-70 f/2.8): no guess.
+        let db = catalog();
+        add(&db, "Canon", "Canon EOS 5D Mark II", Some("Canon EF 24-70mm f/2.8L USM"), 2);
+        add(&db, "Canon", "Canon EOS 5D Mark II", Some("Tamron SP 24-70mm F/2.8 Di VC USD"), 1);
+        add(&db, "Canon", "EOS 10D", Some("24-70mm f/2.8"), 3);
+        tidy(&db).unwrap();
+        assert_eq!(
+            shown(&list(&db).unwrap().lenses),
+            [("24-70mm f/2.8", 3), ("Canon EF 24-70mm f/2.8L USM", 2), ("Tamron SP 24-70mm F/2.8 Di VC USD", 1)]
+        );
     }
 
     #[test]
