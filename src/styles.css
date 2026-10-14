@@ -1817,6 +1817,17 @@ button {
 .who-list .name-suggest-row.active {
   background: var(--hover);
 }
+/* Someone found by name: the name and "Same person" are two buttons. */
+.who-list div.name-suggest-row {
+  cursor: default;
+}
+/* Enter on that row means "Same person": show it. */
+.who-list .name-suggest-row.active .same-person {
+  color: var(--text);
+}
+.who-list .name-suggest-row.active .same-person svg {
+  color: var(--accent);
+}
 .who-list .unnamed {
   color: var(--muted);
 }

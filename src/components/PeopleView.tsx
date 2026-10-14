@@ -1,6 +1,6 @@
 import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Search, Sparkles, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { faceUrl, fmtNum, modelsApi, people as peopleApi, type Person } from "../api";
+import { faceUrl, fmtNum, modelsApi, people as peopleApi, sameName, type Person } from "../api";
 
 interface Props {
   people: Person[];
@@ -301,7 +301,8 @@ export function PeopleView({ people, found, query, newOnly, onNewOnly, onOpen, o
 
 /** Typing a name: people with a matching name are suggested (face, name,
  *  photos). Clicking one takes its name - a different person can share a
- *  name; ticking "Same person" merges into them. Enter keeps what's typed. */
+ *  name; ticking "Same person" merges into them. Enter keeps what's typed:
+ *  a name already taken makes two people called the same, never one. */
 export function NameEditor({
   person,
   everyone,
@@ -327,6 +328,7 @@ export function NameEditor({
         .sort((a, b) => Number(!a.name!.toLowerCase().startsWith(q)) - Number(!b.name!.toLowerCase().startsWith(q)) || b.photos - a.photos)
         .slice(0, 6)
     : [];
+  const namesake = matches.some((m) => sameName(m.name!, text));
   const finish = (f: () => void) => {
     if (done) return;
     setDone(true);
@@ -367,6 +369,9 @@ export function NameEditor({
               </button>
             </div>
           ))}
+          {namesake && (
+            <p className="muted small person-suggest-note">Enter keeps them two people · “Same person” makes them one</p>
+          )}
         </div>
       )}
     </div>

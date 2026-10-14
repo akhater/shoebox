@@ -34,6 +34,10 @@
 //!       a face already theirs in that photo makes room
 //!   shoebox-cli restore-faces '<undo JSON>'   undo a move-faces (its "undo" output)
 //!   shoebox-cli person-strays <person-id> [--apply]   Clean up: faces unlike the person
+//!   shoebox-cli person-rename <person-id> ["name"]    name someone (no name: unnamed again).
+//!       A name already taken makes two people called the same, never one
+//!   shoebox-cli people-merge <person-id>... --into <person-id>   "Same person": they become
+//!       one, keeping --into's name (or the first name among them)
 //!
 //! People found since the user last looked at them show "(new)" / "(+N new photos)" in
 //! `shoebox-cli faces`; the window marks a person read when the user leaves their page:
@@ -269,6 +273,27 @@ fn main() -> anyhow::Result<()> {
             } else {
                 println!("{}", serde_json::to_string_pretty(&strays)?);
             }
+        }
+        Some("person-rename") => {
+            let usage = || anyhow::anyhow!("person-rename <person-id> [\"name\"]");
+            let pid: i64 = args.get(1).ok_or_else(usage)?.parse()?;
+            let name = args[2..].join(" ");
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            faces.rename(&cat, pid, &name)?;
+            let name = name.trim();
+            println!("{}", serde_json::json!({ "person": pid, "name": (!name.is_empty()).then_some(name) }));
+        }
+        Some("people-merge") => {
+            let usage = || anyhow::anyhow!("people-merge <person-id>... --into <person-id>");
+            let flag = args.iter().position(|a| a == "--into").ok_or_else(usage)?;
+            let into: i64 = args.get(flag + 1).ok_or_else(usage)?.parse()?;
+            let ids = args[1..flag].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+            if ids.is_empty() {
+                return Err(usage());
+            }
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            faces.merge(&cat, &ids, into)?;
+            println!("{}", serde_json::json!({ "merged": ids, "into": into }));
         }
         Some("photo-faces") => {
             let ids = args[1..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
