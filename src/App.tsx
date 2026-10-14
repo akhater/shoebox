@@ -201,7 +201,7 @@ export default function App() {
   const [viewerId, setViewerId] = useState<number | null>(null);
   const [focusId, setFocusId] = useState<number | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
-  const [queued, setQueued] = useState(0);
+  const [queued, setQueued] = useState<number[]>([]);
   const [message, setMessage] = useState<Message | null>(null);
   // A folder on its way to another disk, and where it came from.
   const [folderMove, setFolderMove] = useState<FolderMoveEvent | null>(null);
@@ -366,7 +366,7 @@ export default function App() {
   useEffect(() => {
     api.scanStatus().then((s) => {
       setProgress(s.current);
-      setQueued(s.queued.length);
+      setQueued(s.queued);
     });
     const subs = [
       listen("catalog-changed", refreshSoon),
@@ -383,7 +383,7 @@ export default function App() {
       listen<Progress>("scan-progress", (e) => {
         lastRootName.current = e.payload.rootName;
         setProgress(e.payload);
-        api.scanStatus().then((s) => setQueued(s.queued.length));
+        api.scanStatus().then((s) => setQueued(s.queued));
       }),
       listen<FolderMoveEvent>("folder-move", (e) => {
         const ev = e.payload;
@@ -410,6 +410,7 @@ export default function App() {
       }),
       listen<Report>("scan-done", (e) => {
         setProgress(null);
+        api.scanStatus().then((s) => setQueued(s.queued)); // a Stop empties the queue
         // A disk just plugged in had files that couldn't be read: a word only if some are fine now.
         const r = e.payload;
         if (r.retry && r.errors === r.found) return;
@@ -417,6 +418,7 @@ export default function App() {
       }),
       listen<{ rootId: number; message: string }>("scan-error", (e) => {
         setProgress(null);
+        api.scanStatus().then((s) => setQueued(s.queued));
         setMessage({ text: e.payload.message, warn: true });
       }),
     ];
@@ -824,6 +826,7 @@ export default function App() {
         onUpdate={() => run(updatesApi.openPage())}
         scope={scope}
         scanningRoot={progress?.rootId ?? null}
+        queuedRoots={queued}
         onRegenerate={(id) => regenerate(id)}
         onRemove={removeFolder}
         people={shownPeople.length}
@@ -1196,7 +1199,7 @@ export default function App() {
           overview={overview}
           progress={progress}
           aiProgress={aiProgress}
-          queued={queued}
+          queued={queued.length}
           message={message}
           onCancel={() => run(api.cancelScan())}
           move={folderMove}
