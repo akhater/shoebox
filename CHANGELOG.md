@@ -4,6 +4,12 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.42.2 - unreleased
 
+### Added
+
+- **`shoebox-cli people-ignore <person-id>... [--show]`**: ignore strangers
+  (or show them again) headless, as the eye in People does. An unknown id
+  changes nobody and fails.
+
 ### Fixed
 
 - **Someone found twice becomes one person.** A face joins a person only

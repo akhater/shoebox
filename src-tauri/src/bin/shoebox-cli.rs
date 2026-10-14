@@ -38,6 +38,8 @@
 //!       A name already taken makes two people called the same, never one
 //!   shoebox-cli people-merge <person-id>... --into <person-id>   "Same person": they become
 //!       one, keeping --into's name (or the first name among them)
+//!   shoebox-cli people-ignore <person-id>... [--show]   strangers: hidden from People, their
+//!       future faces still joining them (--show: shown again)
 //!
 //! People found since the user last looked at them show "(new)" / "(+N new photos)" in
 //! `shoebox-cli faces`; the window marks a person read when the user leaves their page:
@@ -302,6 +304,17 @@ fn main() -> anyhow::Result<()> {
             let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
             faces.merge(&cat, &ids, into)?;
             println!("{}", serde_json::json!({ "merged": ids, "into": into }));
+        }
+        Some("people-ignore") => {
+            let show = args[1..].iter().any(|a| a == "--show");
+            let ids =
+                args[1..].iter().filter(|a| *a != "--show").map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+            if ids.is_empty() {
+                anyhow::bail!("people-ignore <person-id>... [--show]");
+            }
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            faces.set_ignored(&cat, &ids, !show)?;
+            println!("{}", serde_json::json!({ "people": ids, "ignored": !show }));
         }
         Some("photo-faces") => {
             let ids = args[1..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
