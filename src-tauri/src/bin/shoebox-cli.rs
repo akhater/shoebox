@@ -25,6 +25,15 @@
 //!   shoebox-cli people [name] [--new]   everyone, or whoever's name matches, best first, as
 //!                                 People's search box finds them (any part of the name, accents
 //!                                 ignored); --new: only those new or in new photos ("Only new")
+//!   shoebox-cli photo-faces <photo-id>...     the faces in photos, and who each is
+//!   shoebox-cli person-faces <person-id>      a person's faces, the least like them first
+//!   shoebox-cli look-alikes <face-id>...      who those faces look like most (to suggest a name)
+//!   shoebox-cli move-faces <face-id>... --to <person-id> | --new ["name"] | --elsewhere
+//!       "who is this": placed by hand, never regrouped back. --elsewhere = not them, don't
+//!       know who: whoever they resemble, or someone new. A person stays once per photo:
+//!       a face already theirs in that photo makes room
+//!   shoebox-cli restore-faces '<undo JSON>'   undo a move-faces (its "undo" output)
+//!   shoebox-cli person-strays <person-id> [--apply]   Clean up: faces unlike the person
 //!
 //! People found since the user last looked at them show "(new)" / "(+N new photos)" in
 //! `shoebox-cli faces`; the window marks a person read when the user leaves their page:
@@ -247,10 +256,56 @@ fn main() -> anyhow::Result<()> {
             let strays = faces.strays(&cat, pid)?;
             if args.get(2).is_some_and(|a| a == "--apply") {
                 let ids: Vec<i64> = strays.iter().map(|s| s.face_id).collect();
-                println!("{}", serde_json::json!({ "moved": faces.move_out(&cat, pid, &ids)? }));
+                let moved = faces.reassign(&cat, &ids, &shoebox_lib::faces::FaceTarget::Elsewhere)?;
+                println!("{}", serde_json::json!({ "moved": moved.faces }));
             } else {
                 println!("{}", serde_json::to_string_pretty(&strays)?);
             }
+        }
+        Some("photo-faces") => {
+            let ids = args[1..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+            if ids.is_empty() {
+                anyhow::bail!("photo-faces <photo-id>...");
+            }
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            println!("{}", serde_json::to_string_pretty(&faces.faces_in(&cat, &ids)?)?);
+        }
+        Some("person-faces") => {
+            let pid: i64 = args.get(1).ok_or_else(|| anyhow::anyhow!("person-faces <person-id>"))?.parse()?;
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            println!("{}", serde_json::to_string_pretty(&faces.person_faces(&cat, pid)?)?);
+        }
+        Some("look-alikes") => {
+            let ids = args[1..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+            if ids.is_empty() {
+                anyhow::bail!("look-alikes <face-id>...");
+            }
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            println!("{}", serde_json::to_string_pretty(&faces.look_alikes(&ids, &[], 6)?)?);
+        }
+        Some("move-faces") => {
+            use shoebox_lib::faces::FaceTarget;
+            let usage = || anyhow::anyhow!("move-faces <face-id>... --to <person-id> | --new [\"name\"] | --elsewhere");
+            let flag = args.iter().position(|a| a.starts_with("--")).ok_or_else(usage)?;
+            let ids = args[1..flag].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+            let to = match args[flag].as_str() {
+                "--to" => FaceTarget::Person { id: args.get(flag + 1).ok_or_else(usage)?.parse()? },
+                "--new" => FaceTarget::New { name: args.get(flag + 1).cloned() },
+                "--elsewhere" => FaceTarget::Elsewhere,
+                _ => return Err(usage()),
+            };
+            if ids.is_empty() {
+                return Err(usage());
+            }
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            println!("{}", serde_json::to_string_pretty(&faces.reassign(&cat, &ids, &to)?)?);
+        }
+        Some("restore-faces") => {
+            // Undo of move-faces: shoebox-cli restore-faces '<its "undo" JSON>'
+            let json = args.get(1).ok_or_else(|| anyhow::anyhow!("restore-faces '<undo JSON from move-faces>'"))?;
+            let placements: Vec<shoebox_lib::faces::Placement> = serde_json::from_str(json)?;
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            println!("{}", serde_json::json!({ "restored": faces.restore(&cat, &placements)? }));
         }
         Some("probe") => {
             // Prints a model's inputs and outputs: shoebox-cli probe <model.onnx>

@@ -11,10 +11,12 @@ import {
   previewUrl,
   thumbUrl,
   type PhotoDetail,
+  type Person,
   type PhotoFace,
   type PhotoList,
 } from "../api";
 import { TagEditor } from "./Tags";
+import { WhoIsIt } from "./WhoIsIt";
 
 /** Where in the photo a zoom is centred, 0..1 of its width and height. */
 interface Zoom {
@@ -33,6 +35,10 @@ interface Props {
   onPerson: (personId: number) => void;
   /** Tags were added or taken off (filter counts follow). */
   onTagsChanged: () => void;
+  /** Everyone in People, to say who a face is. */
+  everyone: Person[];
+  /** A face went to someone else. */
+  onFacesChanged: () => void;
 }
 
 const STATE_LABEL = {
@@ -42,7 +48,7 @@ const STATE_LABEL = {
   missing: "Missing",
 } as const;
 
-export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, onTagsChanged }: Props) {
+export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, onTagsChanged, everyone, onFacesChanged }: Props) {
   const tagBox = useRef<HTMLInputElement>(null);
   const id = list.ids[index];
   const rev = list.rev[index];
@@ -51,6 +57,8 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [faces, setFaces] = useState<PhotoFace[]>([]);
+  // The face being said who it is ("Who is this?").
+  const [who, setWho] = useState<PhotoFace | null>(null);
   // Plugged in: a sharp picture from the original, sized to the screen, swaps in
   // over the preview; a click zooms to 100% from the full-size original.
   const reachable = list.state[index] === 2;
@@ -155,6 +163,7 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (who) return; // "Who is this?" is open
       if (e.key === "Escape") {
         if (zoom) setZoom(null);
         else onClose();
@@ -330,20 +339,19 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
                           {f.name ?? "Unnamed"}
                         </button>
                       ) : (
-                        <span className="name unnamed" title="Too small to recognise reliably">
-                          Too small
-                        </span>
+                        <button
+                          className="name who"
+                          title="Too small for Shoebox to recognise: say who it is"
+                          onClick={() => setWho(f)}
+                        >
+                          Who is this?
+                        </button>
                       )}
                       {f.personId != null && (
                         <button
                           className="not-them"
-                          title="Not this person: take this face out"
-                          onClick={() =>
-                            people
-                              .split(f.id)
-                              .then(() => people.inPhoto(id).then(setFaces))
-                              .catch((e) => setError(String(e)))
-                          }
+                          title={`Not ${f.name ?? "this person"}? Say who it is`}
+                          onClick={() => setWho(f)}
                         >
                           <UserX size={13} />
                         </button>
@@ -383,6 +391,22 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
         )}
         {error && <p className="note warn">{error}</p>}
       </aside>
+      {who && (
+        <WhoIsIt
+          faceIds={[who.id]}
+          from={who.personId != null ? { id: who.personId, name: who.name } : null}
+          everyone={everyone}
+          onClose={() => setWho(null)}
+          onDone={() => {
+            setWho(null);
+            onFacesChanged();
+            people
+              .inPhoto(id)
+              .then(setFaces)
+              .catch((e) => setError(String(e)));
+          }}
+        />
+      )}
     </div>
   );
 }

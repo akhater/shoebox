@@ -1684,6 +1684,17 @@ button {
 /* Clean up a person */
 .strays-modal {
   width: 600px;
+  /* The faces scroll; the buttons stay in view (a person can have 1,000+). */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.strays-modal .strays-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px;
+  align-content: start;
 }
 .strays-modal > p {
   line-height: 1.45;
@@ -1725,6 +1736,104 @@ button {
 .strays-grid + .note,
 .strays-modal .modal-foot {
   margin-top: 4px;
+}
+.strays-tick-all {
+  margin-right: auto;
+}
+.strays-modal .modal-head .btn {
+  margin-left: auto;
+  margin-right: 8px;
+}
+.stray .by-hand {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0 5px;
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+/* "Who is this?": move faces to someone else */
+.who-modal {
+  width: 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.who-modal > p {
+  margin: 0;
+  line-height: 1.45;
+}
+.who-faces {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.who-faces img {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.who-faces.one img {
+  width: 96px;
+  height: 96px;
+}
+.who-input {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.who-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.who-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.who-list .name-suggest-row {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.who-list .name-suggest-row.active {
+  background: var(--hover);
+}
+.who-list .unnamed {
+  color: var(--muted);
+}
+.who-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--accent);
+}
+.face-chip .who {
+  color: var(--muted);
+  font-weight: 400;
+  text-decoration: underline dotted;
+}
+.face-chip .who:hover {
+  color: var(--text);
 }
 
 /* Filters: one bar above the grid */
