@@ -283,6 +283,12 @@ button {
   padding: 4px 9px;
   font-size: 12px;
 }
+/* A switch that is on ("Only new"). */
+.btn.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 .btn:disabled {
   opacity: 0.5;
   cursor: default;

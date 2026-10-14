@@ -1,4 +1,4 @@
-import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Search, Square, X } from "lucide-react";
+import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Search, Sparkles, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { faceUrl, fmtNum, modelsApi, people as peopleApi, type Person } from "../api";
 
@@ -8,6 +8,9 @@ interface Props {
   found: Person[] | null;
   /** What's typed in it. */
   query: string;
+  /** "Only new": just the people new or found in new photos, to check them. */
+  newOnly: boolean;
+  onNewOnly: (on: boolean) => void;
   onOpen: (p: Person) => void;
   onChanged: () => void;
   onError: (e: string) => void;
@@ -40,7 +43,7 @@ function useFolded() {
 
 /** Everyone the face recogniser found: open, name, merge, ignore strangers.
  *  Named people and people still to name are two groups that fold away. */
-export function PeopleView({ people, found, query, onOpen, onChanged, onError, onOpenModels }: Props) {
+export function PeopleView({ people, found, query, newOnly, onNewOnly, onOpen, onChanged, onError, onOpenModels }: Props) {
   const [selected, setSelected] = useState<number[]>([]);
   // With nobody yet: is the face model (and a runtime) here at all?
   const [facesReady, setFacesReady] = useState<boolean | null>(null);
@@ -56,24 +59,30 @@ export function PeopleView({ people, found, query, onOpen, onChanged, onError, o
   const [showOnce, setShowOnce] = useState(false);
   const [folded, fold] = useFolded();
 
-  // Searching: only whoever's name matches, in the search's order. Nobody
-  // still to name has a name to match.
+  // New people, and people found in new photos, since the last visit.
+  const isFresh = (p: Person) => p.isNew || p.newPhotos > 0;
+  const fresh = (list: Person[]) => list.filter(isFresh).length;
+  // Narrowed by the search box (whoever's name matches, in its order) and by
+  // "Only new". Nobody still to name has a name to match.
   const rank = found && new Map(found.map((p, i) => [p.id, i]));
-  const only = (list: Person[]) =>
-    rank ? list.filter((p) => rank.has(p.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!) : list;
+  const narrowed = !!rank || newOnly;
+  const only = (list: Person[]) => {
+    const kept = rank ? list.filter((p) => rank.has(p.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!) : list;
+    return newOnly ? kept.filter(isFresh) : kept;
+  };
   const active = people.filter((p) => !p.ignored);
   const ignored = only(people.filter((p) => p.ignored));
   // People seen in one photo only are mostly passers-by: hidden unless asked.
   const seenOnce = active.filter((p) => !p.name && p.photos < 2);
   const named = only(active.filter((p) => p.name));
-  const toName = rank ? [] : active.filter((p) => !p.name && (showOnce || p.photos >= 2));
+  const toName = rank ? [] : only(active.filter((p) => !p.name && (showOnce || p.photos >= 2)));
+  // What "Only new" offers: the new among the people shown (as the sidebar counts them).
+  const freshShown = fresh(named) + fresh(toName);
   const selecting = selected.length > 0;
   // With only ignored people selected, the bar offers "Show again" instead of "Ignore".
   const allIgnored = selecting && selected.every((id) => people.find((p) => p.id === id)?.ignored);
 
   const toggle = (id: number) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
-  // New people, and people found in new photos, since the last visit.
-  const fresh = (list: Person[]) => list.filter((p) => p.isNew || p.newPhotos > 0).length;
 
   const act = async (f: () => Promise<void>) => {
     try {
@@ -183,9 +192,9 @@ export function PeopleView({ people, found, query, onOpen, onChanged, onError, o
     );
   };
 
-  // While searching, every group with a match is open and the others are gone.
+  // Narrowed, groups with nobody left are gone; while searching, the others are open.
   const group = (g: Group, title: string, list: Person[], empty: string) => {
-    if (rank && !list.length) return null;
+    if (narrowed && !list.length) return null;
     const open = !!rank || !folded.includes(g);
     return (
       <section className="people-group">
@@ -238,6 +247,20 @@ export function PeopleView({ people, found, query, onOpen, onChanged, onError, o
             </button>
           </>
         )}
+        {(newOnly || freshShown > 0) && (
+          <button
+            className={`btn small ghost ${newOnly ? "on" : ""}`}
+            aria-pressed={newOnly}
+            onClick={() => onNewOnly(!newOnly)}
+            title={
+              newOnly
+                ? "Show everyone again"
+                : "Only the people who are new or were found in new photos. Open one to see just their new photos; once seen, they leave this list"
+            }
+          >
+            <Sparkles size={14} /> Only new{freshShown > 0 && ` (${fmtNum(freshShown)})`}
+          </button>
+        )}
         {fresh(people) > 0 && (
           <button
             className="btn small ghost"
@@ -255,9 +278,18 @@ export function PeopleView({ people, found, query, onOpen, onChanged, onError, o
           Regroup faces
         </button>
       </div>
-      {found && !found.length && (
+      {narrowed && !named.length && !toName.length && !ignored.length && (
         <p className="muted people-none">
-          No one named “{query.trim()}”. Only people with a name can be found: name them under their face.
+          {found && !found.length
+            ? `No one named “${query.trim()}”. Only people with a name can be found: name them under their face.`
+            : found
+              ? `No one new named “${query.trim()}”.`
+              : "Nothing new left to check."}{" "}
+          {newOnly && (
+            <button className="btn small ghost" onClick={() => onNewOnly(false)}>
+              Show everyone
+            </button>
+          )}
         </p>
       )}
       {group("named", "Named", named, "Nobody named yet. Click “Add a name” under a face.")}
