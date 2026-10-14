@@ -11,7 +11,8 @@ export type Scope =
   /** A camera or a lens, by the name shown (Gear). */
   | { kind: "camera"; name: string }
   | { kind: "lens"; name: string }
-  | { kind: "person"; id: number }
+  /** `newOnly`: only the photos they were found in since you last looked at them. */
+  | { kind: "person"; id: number; newOnly?: boolean }
   /** Marked for deletion. */
   | { kind: "marked" };
 

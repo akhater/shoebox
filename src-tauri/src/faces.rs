@@ -289,6 +289,13 @@ pub struct Person {
     pub new_photos: i64,
 }
 
+impl Person {
+    /// New, or found in new photos: what "Only new" in People shows.
+    pub fn has_news(&self) -> bool {
+        self.is_new || self.new_photos > 0
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhotoFace {
