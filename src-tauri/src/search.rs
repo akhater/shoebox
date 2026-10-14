@@ -9,7 +9,7 @@ use crate::catalog::Catalog;
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
 
@@ -39,9 +39,26 @@ impl SearchIndex {
         let conn = Connection::open(cat.data.root.join("search.db"))?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // A photo's id is used again once it leaves the catalog, so each
+        // description also keeps the fingerprint of the photo it describes.
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS clip (photo_id INTEGER PRIMARY KEY, model TEXT NOT NULL, vec BLOB NOT NULL);",
+            "CREATE TABLE IF NOT EXISTS clip (photo_id INTEGER PRIMARY KEY, model TEXT NOT NULL, vec BLOB NOT NULL,
+                                              fingerprint TEXT);",
         )?;
+        if !conn.prepare("SELECT 1 FROM pragma_table_info('clip') WHERE name = 'fingerprint'")?.exists([])? {
+            // Descriptions made before: their photo's fingerprint today.
+            let photos: Vec<(i64, String)> = cat
+                .db()
+                .prepare("SELECT id, fingerprint FROM photos")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("ALTER TABLE clip ADD COLUMN fingerprint TEXT;")?;
+            for (id, fp) in photos {
+                tx.execute("UPDATE clip SET fingerprint = ?1 WHERE photo_id = ?2", params![fp, id])?;
+            }
+            tx.commit()?;
+        }
         let mut ids = Vec::new();
         let mut vecs = Vec::new();
         {
@@ -75,14 +92,13 @@ impl SearchIndex {
         self.ids.read().unwrap().len()
     }
 
-    /// Describes every photo that has a preview and no description yet, and
-    /// forgets descriptions of photos that left the catalog.
+    /// Describes every photo that has a preview and no description yet, after
+    /// forgetting those that no longer fit ([`SearchIndex::tidy`]).
     pub fn index_pending(&self, cat: &Catalog, cancel: &AtomicBool, progress: &dyn Fn(&AiProgress)) -> Result<()> {
-        let ready = cat.preview_ready_ids()?;
-        let ready_set: HashSet<i64> = ready.iter().copied().collect();
-        self.forget_missing(&ready_set)?;
+        let ready = cat.preview_ready()?;
+        self.forget_stale(&ready)?;
         let have: HashSet<i64> = self.ids.read().unwrap().iter().copied().collect();
-        let todo: Vec<i64> = ready.into_iter().filter(|id| !have.contains(id)).collect();
+        let todo: Vec<(i64, String)> = ready.into_iter().filter(|(id, _)| !have.contains(id)).collect();
         if todo.is_empty() {
             return Ok(());
         }
@@ -98,14 +114,14 @@ impl SearchIndex {
         log::info!("search: describing {} photos ({})", todo.len(), if p.gpu { "GPU" } else { "CPU" });
 
         let started = std::time::Instant::now();
-        let mut batch: Vec<(i64, Vec<f32>)> = Vec::new();
-        for (n, id) in todo.iter().enumerate() {
+        let mut batch: Vec<(i64, String, Vec<f32>)> = Vec::new();
+        for (n, (id, fp)) in todo.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             match image::open(cat.data.preview_path(*id)) {
                 Ok(img) => match model.embed(&img) {
-                    Ok(v) if v.len() == CLIP_DIM => batch.push((*id, v)),
+                    Ok(v) if v.len() == CLIP_DIM => batch.push((*id, fp.clone(), v)),
                     Ok(v) => log::warn!("search: photo {id}: unexpected vector length {}", v.len()),
                     Err(e) => log::warn!("search: photo {id}: {e:#}"),
                 },
@@ -122,42 +138,61 @@ impl SearchIndex {
         Ok(())
     }
 
-    fn store(&self, batch: &mut Vec<(i64, Vec<f32>)>) -> Result<()> {
+    fn store(&self, batch: &mut Vec<(i64, String, Vec<f32>)>) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        for (id, v) in batch.iter() {
+        for (id, fp, v) in batch.iter() {
             let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
             tx.execute(
-                "INSERT OR REPLACE INTO clip (photo_id, model, vec) VALUES (?1, ?2, ?3)",
-                params![id, CLIP_MODEL, blob],
+                "INSERT OR REPLACE INTO clip (photo_id, model, vec, fingerprint) VALUES (?1, ?2, ?3, ?4)",
+                params![id, CLIP_MODEL, blob, fp],
             )?;
         }
         tx.commit()?;
         let mut ids = self.ids.write().unwrap();
         let mut vecs = self.vecs.write().unwrap();
-        for (id, v) in batch.drain(..) {
+        for (id, _, v) in batch.drain(..) {
             ids.push(id);
             vecs.extend(v);
         }
         Ok(())
     }
 
-    fn forget_missing(&self, keep: &HashSet<i64>) -> Result<()> {
-        let gone: Vec<i64> = self.ids.read().unwrap().iter().copied().filter(|id| !keep.contains(id)).collect();
+    /// Forgets descriptions that no longer fit their photo: it left the
+    /// catalog (or has no preview right now), or its id now belongs to
+    /// another photo - ids are used again, once the newest photo leaves.
+    /// Returns how many. Done before every round of describing.
+    pub fn tidy(&self, cat: &Catalog) -> Result<usize> {
+        self.forget_stale(&cat.preview_ready()?)
+    }
+
+    fn forget_stale(&self, ready: &[(i64, String)]) -> Result<usize> {
+        let ready: HashMap<i64, &str> = ready.iter().map(|(id, fp)| (*id, fp.as_str())).collect();
+        let mut db = self.db.lock().unwrap();
+        let described: Vec<(i64, Option<String>)> = db
+            .prepare("SELECT photo_id, fingerprint FROM clip WHERE model = ?1")?
+            .query_map([CLIP_MODEL], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let gone: Vec<i64> = described
+            .into_iter()
+            .filter(|(id, fp)| ready.get(id).is_none_or(|now| fp.as_deref() != Some(*now)))
+            .map(|(id, _)| id)
+            .collect();
         if gone.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         {
-            let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
             for id in &gone {
                 tx.execute("DELETE FROM clip WHERE photo_id = ?1", [id])?;
             }
             tx.commit()?;
         }
+        drop(db);
+        let n = gone.len();
         let gone: HashSet<i64> = gone.into_iter().collect();
         let mut ids = self.ids.write().unwrap();
         let mut vecs = self.vecs.write().unwrap();
@@ -170,7 +205,7 @@ impl SearchIndex {
         }
         *ids = new_ids;
         *vecs = new_vecs;
-        Ok(())
+        Ok(n)
     }
 
     /// Photos matching `query`, best first, with their scores, and the score

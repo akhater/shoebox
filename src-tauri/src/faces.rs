@@ -379,14 +379,13 @@ impl FaceIndex {
         conn.execute_batch("CREATE TABLE IF NOT EXISTS emb (face_id INTEGER PRIMARY KEY, vec BLOB NOT NULL);")?;
         let index = Self { db: Mutex::new(conn), models: Mutex::new(None), centroids: RwLock::new(HashMap::new()) };
         index.rebuild_centroids(cat)?;
-        // Catalogs grouped under older rules get regrouped once.
+        // Catalogs grouped under older rules get regrouped once, and so does
+        // one whose regrouping was cut short.
         let done: Option<String> =
             cat.db().query_row("SELECT value FROM meta WHERE key = 'face_grouping'", [], |r| r.get(0)).optional()?;
         if done.as_deref() != Some(GROUPING_RULES) {
             let (faces, people) = index.regroup(cat)?;
             log::info!("faces: regrouped {faces} faces into {people} people (rules {GROUPING_RULES})");
-            cat.db()
-                .execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('face_grouping', ?1)", [GROUPING_RULES])?;
         }
         Ok(index)
     }
@@ -394,6 +393,11 @@ impl FaceIndex {
     /// Sorts again every face the user hasn't touched - not in a named or ignored
     /// person, not placed by hand - with the current rules. Names, ignored
     /// strangers and hand placements are never changed. Returns (faces, people).
+    ///
+    /// The faces are first taken out of their people, then sorted photo by
+    /// photo. The catalog counts as sorted only once the last photo is done:
+    /// a Shoebox stopped halfway sorts them all again at its next start,
+    /// rather than leaving faces with nobody.
     pub fn regroup(&self, cat: &Catalog) -> Result<(usize, usize)> {
         let loose: Vec<(i64, i64, [f64; 4])> = cat
             .db()
@@ -415,6 +419,7 @@ impl FaceIndex {
                    AND NOT EXISTS (SELECT 1 FROM faces f WHERE f.person_id = people.id)",
                 [],
             )?;
+            tx.execute("DELETE FROM meta WHERE key = 'face_grouping'", [])?;
             tx.commit()?;
         }
         self.rebuild_centroids(cat)?;
@@ -457,6 +462,7 @@ impl FaceIndex {
             tx.commit()?;
             i = j;
         }
+        cat.db().execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('face_grouping', ?1)", [GROUPING_RULES])?;
         Ok((loose.len(), people_made))
     }
 

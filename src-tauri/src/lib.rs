@@ -322,6 +322,24 @@ struct ScanError {
     message: String,
 }
 
+/// A catalog move a stopped Shoebox left halfway is undone, before the
+/// catalog opens: the catalog stays where it was, whole.
+pub fn undo_unfinished_move(data: &DataDir) {
+    match data.undo_move() {
+        Ok(Some(to)) => log::info!("the catalog move to {} didn't finish: undone", to.display()),
+        Ok(None) => {}
+        Err(e) => log::warn!("couldn't undo an unfinished catalog move: {e}"),
+    }
+}
+
+/// Temporary files a stopped Shoebox left mid-write are removed.
+pub fn remove_stray_temp_files(data: &DataDir) {
+    let n = data.remove_stray_temp_files();
+    if n > 0 {
+        log::info!("{n} temporary files left by unfinished writes removed");
+    }
+}
+
 /// The folder a catalog move left behind goes to the Recycle Bin, now that
 /// the new catalog has opened.
 pub fn tidy_old_catalog(data: &DataDir) {
@@ -399,8 +417,9 @@ fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQ
 
 /// Notices disks being plugged in or out. Polls the drive-letter mask every
 /// 2 s (free) and re-reads volume details on change or every 15 s. A disk
-/// holding files that couldn't be read gets them read again when it shows up
-/// (and at start, for the disks already there); lenses not read yet too.
+/// holding files that couldn't be read, or were left half-read by a Shoebox
+/// stopped mid-scan, gets them read again when it shows up (and at start, for
+/// the disks already there); lenses not read yet too.
 fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lenses: Arc<Kick>) {
     let mut mask = volumes::drive_mask();
     let mut last_full = Instant::now();
@@ -509,12 +528,16 @@ pub fn run() {
     }
     setup_logging(&data);
     log::info!("Shoebox {} starting, data in {}", env!("CARGO_PKG_VERSION"), data.root.display());
+    undo_unfinished_move(&data);
     let cat = Arc::new(Catalog::open(data.clone()).expect("open catalog"));
     if let Err(e) = scan::heal_saved_previews(&cat) {
         log::warn!("checking previews of unreadable photos: {e:#}");
     }
     let opened = data.clone();
-    std::thread::spawn(move || tidy_old_catalog(&opened));
+    std::thread::spawn(move || {
+        tidy_old_catalog(&opened);
+        remove_stray_temp_files(&opened);
+    });
     let scans = Arc::new(ScanQueue::default());
     let index = Arc::new(search::SearchIndex::open(&cat).expect("open search index"));
     let face_index = Arc::new(faces::FaceIndex::open(&cat).expect("open face index"));
