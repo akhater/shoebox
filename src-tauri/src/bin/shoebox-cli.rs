@@ -9,7 +9,9 @@
 //!   shoebox-cli stats            catalog overview
 //!   shoebox-cli version          this version and the latest published release (JSON; asks
 //!                                GitHub - a commit on a branch never counts)
-//!   shoebox-cli photo <id>       one photo's details
+//!   shoebox-cli photo <id>       one photo's details; each copy's volumeId and folder make the
+//!                                scope of its folder ("Go to folder") for list:
+//!                                {"kind":"folder","volumeId":3,"relPath":"<folder>"}
 //!   shoebox-cli backup           consistent copies of the databases in backup\ (run it
 //!                                before each Kopia snapshot; see .kopiaignore)
 //!   shoebox-cli list [oldest|newest|name|added] [limit] [filters] [scope]   photos in grid order
