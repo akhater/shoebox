@@ -184,6 +184,12 @@ pub fn people(state: State<'_, AppState>) -> Res<Vec<crate::faces::Person>> {
     state.faces.people(&state.cat).map_err(err)
 }
 
+/// People's search box: whoever's name matches what's typed, best first.
+#[tauri::command]
+pub fn find_people(state: State<'_, AppState>, query: String) -> Res<Vec<crate::faces::Person>> {
+    state.faces.find_people(&state.cat, &query).map_err(err)
+}
+
 /// The user has seen these people's new photos (they left their page).
 #[tauri::command]
 pub fn read_people(state: State<'_, AppState>, ids: Vec<i64>) -> Res<usize> {

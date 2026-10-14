@@ -632,6 +632,11 @@ impl FaceIndex {
         Ok(people)
     }
 
+    /// People's search box: whoever's name matches what's typed, best first.
+    pub fn find_people(&self, cat: &Catalog, query: &str) -> Result<Vec<Person>> {
+        Ok(find(self.people(cat)?, query))
+    }
+
     /// The user has seen these people's photos (they left their page): no longer new.
     /// Returns how many faces that was.
     pub fn mark_read(&self, cat: &Catalog, person_ids: &[i64]) -> Result<usize> {
@@ -843,9 +848,117 @@ fn face_thumb(img: &DynamicImage, bbox: &[f32; 4]) -> Result<Vec<u8>> {
     crate::imaging::encode_jpeg(&small, 85)
 }
 
+/// Finding someone by name, as you type. Every word typed starts a word of
+/// their name, in any order ("smi jan" finds "Jane Smith"), or the text is
+/// somewhere in it ("maryann" finds "Mary-Ann"). Case and accents
+/// don't count ("zoe" finds "Zoé"). Names that start with the text
+/// come first, then those whose words do, then the rest; among equals,
+/// whoever is in more photos. Ignored people come last. Unnamed people have
+/// no name to match, and typing nothing finds nobody.
+pub fn find(people: Vec<Person>, query: &str) -> Vec<Person> {
+    let q = words(query);
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let (q_spaced, q_joined) = (q.join(" "), q.concat());
+    let mut hits: Vec<(u8, Person)> = people
+        .into_iter()
+        .filter_map(|p| {
+            let name = words(p.name.as_deref()?);
+            let rank = if name.join(" ").starts_with(&q_spaced) {
+                0
+            } else if q.iter().all(|w| name.iter().any(|n| n.starts_with(w.as_str()))) {
+                1
+            } else if name.concat().contains(&q_joined) {
+                2
+            } else {
+                return None;
+            };
+            Some((rank, p))
+        })
+        .collect();
+    hits.sort_by_key(|(rank, p)| (p.ignored, *rank, std::cmp::Reverse(p.photos), p.id));
+    hits.into_iter().map(|(_, p)| p).collect()
+}
+
+/// A name's words, lower case and without accents: "Mary-Ann Doe" ->
+/// ["mary", "ann", "doe"].
+fn words(s: &str) -> Vec<String> {
+    use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+    let mut folded = String::new();
+    for c in s.nfd().filter(|c| !is_combining_mark(*c)).flat_map(char::to_lowercase) {
+        match c {
+            // Letters with no accent to take off.
+            'ø' => folded.push('o'),
+            'ł' => folded.push('l'),
+            'đ' => folded.push('d'),
+            'ı' => folded.push('i'),
+            'æ' => folded.push_str("ae"),
+            'œ' => folded.push_str("oe"),
+            'ß' => folded.push_str("ss"),
+            _ => folded.push(c),
+        }
+    }
+    folded.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn person(id: i64, name: Option<&str>, photos: i64, ignored: bool) -> Person {
+        Person {
+            id,
+            name: name.map(str::to_string),
+            faces: photos,
+            photos,
+            cover: id,
+            ignored,
+            is_new: false,
+            new_photos: 0,
+        }
+    }
+
+    fn found(people: &[Person], query: &str) -> Vec<i64> {
+        find(people.to_vec(), query).iter().map(|p| p.id).collect()
+    }
+
+    #[test]
+    fn a_person_is_found_by_any_part_of_their_name() {
+        let people = [
+            person(1, Some("Jane Smith"), 283, false),
+            person(2, Some("Mary-Ann Doe"), 21, false),
+            person(3, Some("Zoé Bœuf"), 5, false),
+            person(4, None, 400, false),
+        ];
+        assert_eq!(found(&people, "jane"), [1]);
+        assert_eq!(found(&people, "SMI"), [1]);
+        assert_eq!(found(&people, "smi jan"), [1]);
+        assert_eq!(found(&people, "ann"), [2]);
+        assert_eq!(found(&people, "mary ann"), [2]);
+        assert_eq!(found(&people, "maryann"), [2]);
+        assert_eq!(found(&people, "doe"), [2]);
+        assert_eq!(found(&people, "zoe boeuf"), [3]);
+        assert_eq!(found(&people, "  Zoé  "), [3]);
+        assert_eq!(found(&people, "ith"), [1]);
+        assert!(found(&people, "zz").is_empty());
+        assert!(found(&people, "").is_empty());
+        assert!(found(&people, " - ").is_empty());
+    }
+
+    #[test]
+    fn the_best_match_comes_first_and_ignored_people_last() {
+        let people = [
+            person(1, Some("Omar Doe"), 30, false),
+            person(2, Some("Jane Marlow"), 105, false),
+            person(3, Some("Mara"), 2, false),
+            person(4, Some("Marie Roe"), 50, false),
+            person(5, Some("Marco"), 900, true),
+        ];
+        // Names starting "mar" (most photos first), then a word starting
+        // "mar", then "mar" inside a word, then the ignored one.
+        assert_eq!(found(&people, "mar"), [4, 3, 2, 1, 5]);
+    }
 
     /// A unit vector mostly along axis `a`, with a little of axis `b`.
     fn near(a: usize, b: usize, t: f32) -> Vec<f32> {

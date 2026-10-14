@@ -516,6 +516,9 @@ export interface Stray {
 
 export const people = {
   list: () => invoke<Person[]>("people"),
+  /** People's search box: whoever's name matches, best first (any part of
+   *  the name, case and accents ignored). */
+  find: (query: string) => invoke<Person[]>("find_people", { query }),
   /** Their new photos have been seen (you left their page). */
   read: (ids: number[]) => invoke<number>("read_people", { ids }),
   /** "Mark all as read" in People. */

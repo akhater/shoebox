@@ -19,6 +19,10 @@
 //!                               "types":["cr3"],"status":["online","offline","missing"],
 //!                               "people":[42],"tags":[3,7] (photos with all of these tags)}
 //!
+//! People (JSON out):
+//!   shoebox-cli people [name]     everyone, or whoever's name matches, best first, as People's
+//!                                 search box finds them (any part of the name, accents ignored)
+//!
 //! People found since the user last looked at them show "(new)" / "(+N new photos)" in
 //! `shoebox-cli faces`; the window marks a person read when the user leaves their page:
 //!   shoebox-cli people-read <person-id>... | --all
@@ -176,6 +180,12 @@ fn main() -> anyhow::Result<()> {
                     if p.ignored { " (ignored)" } else { "" }
                 );
             }
+        }
+        Some("people") => {
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            let name = args[1..].join(" ");
+            let people = if name.trim().is_empty() { faces.people(&cat)? } else { faces.find_people(&cat, &name)? };
+            println!("{}", serde_json::to_string_pretty(&people)?);
         }
         Some("people-read") => {
             let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
