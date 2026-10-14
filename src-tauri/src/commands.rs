@@ -4,6 +4,7 @@ use crate::AppState;
 use crate::catalog::{
     Browse, Facets, Filters, FolderCheck, Overview, PhotoDetail, PhotoList, RemoveReport, Scope, Sort, Stats,
 };
+use crate::gear;
 use crate::models;
 use crate::organize::{self, DeletePlan, DeleteReport};
 use crate::scan::Progress;
@@ -548,6 +549,18 @@ pub fn tags_remove(state: State<'_, AppState>, photo_ids: Vec<i64>, tag_ids: Vec
 #[tauri::command]
 pub fn tag_rename(state: State<'_, AppState>, tag_id: i64, name: String) -> Res<()> {
     tags::rename(&state.cat, tag_id, &name).map_err(err)
+}
+
+/// Gear: renames a camera or lens (onto a name shown = merge); returns the name it goes by.
+#[tauri::command]
+pub fn gear_rename(state: State<'_, AppState>, kind: gear::Kind, name: String, to: String) -> Res<String> {
+    gear::rename(&state.cat.db(), kind, &name, &to).map_err(err)
+}
+
+/// Gear: back to the names in the files, kept apart.
+#[tauri::command]
+pub fn gear_split(state: State<'_, AppState>, kind: gear::Kind, name: String) -> Res<Vec<String>> {
+    gear::split(&state.cat.db(), kind, &name).map_err(err)
 }
 
 #[tauri::command]

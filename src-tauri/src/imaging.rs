@@ -9,10 +9,16 @@ use crate::formats::Kind;
 use anyhow::{Result, anyhow};
 use chrono::NaiveDateTime;
 use image::{DynamicImage, GenericImageView, codecs::jpeg::JpegEncoder, imageops::FilterType};
+use rawler::formats::tiff::{GenericTiffReader, IFD, Value as TiffValue, reader::TiffReader};
+use rawler::rawsource::RawSource;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Cursor, Read, Seek};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
+
+/// Version of how lenses are read. Photos an older version read without
+/// finding their lens are read again ([`crate::gear::find_lenses`]).
+pub const LENS_READER: i64 = 1;
 
 #[derive(Default, Debug, Clone)]
 pub struct Meta {
@@ -52,10 +58,200 @@ pub struct Loaded {
 }
 
 pub fn load(path: &Path, kind: Kind, long_edge: u32) -> Loaded {
-    match kind {
+    let mut loaded = match kind {
         Kind::Raw => load_raw(path, long_edge),
         Kind::Image => load_image(path, long_edge),
+    };
+    loaded.meta.lens = loaded.meta.lens.as_deref().and_then(crate::gear::file_name);
+    loaded
+}
+
+/// The lens a photo was taken with, from its metadata only - never the
+/// picture: a few KB of the file, through a memory map. rawler's lens table
+/// (which sets up a whole decoder) only when the file doesn't name it.
+pub fn read_lens(path: &Path, kind: Kind) -> Option<String> {
+    let lens = match kind {
+        Kind::Raw => catch_unwind(AssertUnwindSafe(|| {
+            let src = RawSource::new(path).ok()?;
+            file_lens(&src).or_else(|| rawler_lens(&src))
+        }))
+        .ok()
+        .flatten(),
+        Kind::Image => exif_meta(path).and_then(|m| m.lens),
+    };
+    lens.as_deref().and_then(crate::gear::file_name)
+}
+
+/// A RAW's lens: as the file records it, else rawler's lens table. The
+/// table's name is kept when it is the same lens, for its maker's name
+/// ("Canon EF 70-200mm f/4L IS USM" for "EF70-200mm f/4L IS USM"); when they
+/// disagree the file wins (lenses share ids, so the table can guess wrong).
+fn raw_lens(src: &RawSource, table: Option<String>) -> Option<String> {
+    match (file_lens(src), table) {
+        (Some(f), Some(t)) if crate::gear::same_lens(&f, &t) => Some(t),
+        (Some(f), _) => Some(f),
+        (None, t) => t,
     }
+}
+
+/// rawler's name for the lens, from its lens table (by the lens's name or id).
+fn rawler_lens(src: &RawSource) -> Option<String> {
+    let decoder = rawler::get_decoder(src).ok()?;
+    let md = decoder.raw_metadata(src, &rawler::decoders::RawDecodeParams::default()).ok()?;
+    md.lens.as_ref().and_then(|l| non_empty(&format!("{} {}", l.lens_make, l.lens_model)))
+}
+
+const MAKE: u16 = 0x010F;
+const EXIF_IFD: u16 = 0x8769;
+const MAKER_NOTE: u16 = 0x927C;
+const LENS_MODEL: u16 = 0xA434;
+/// Canon's maker note: the lens's name (cameras since about 2008), and the
+/// camera settings (lens id at 22, its focal range at 23-25).
+const CANON_LENS_MODEL: u16 = 0x0095;
+const CANON_CAMERA_SETTINGS: u16 = 0x0001;
+/// The same camera settings in a CRW (CIFF) file.
+const CIFF_CAMERA_SETTINGS: u16 = 0x102D;
+
+/// The lens as a RAW file records it, read where each format keeps it: EXIF
+/// LensModel in TIFF-based RAWs (CR2, NEF, ARW, ORF, PEF, DNG...), in a CR3's
+/// boxes, in the JPEG inside a Fuji RAF; else Canon's maker note (the lens's
+/// name, or its id), or a CRW's lens id.
+fn file_lens(src: &RawSource) -> Option<String> {
+    let buf = src.buf();
+    let head = buf.get(..16)?;
+    if &head[4..8] == b"ftyp" {
+        let bmff = rawler::formats::bmff::Bmff::new(src.reader()).ok()?;
+        let cr3 = bmff.filebox.moov.cr3desc.as_ref()?;
+        return ascii(cr3.cmt2.tiff.root_ifd(), LENS_MODEL).or_else(|| canon_note_lens(cr3.cmt3.tiff.root_ifd()));
+    }
+    if &head[6..14] == b"HEAPCCDR" {
+        return ciff_lens(buf);
+    }
+    if head.starts_with(b"FUJIFILM") {
+        // The camera's JPEG: offset and length at 84, big-endian.
+        let at = |i: usize| buf.get(i..i + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
+        let (off, len) = (at(84)?, at(88)?);
+        let jpeg = buf.get(off..off.checked_add(len)?)?;
+        let ex = exif::Reader::new().read_from_container(&mut Cursor::new(jpeg)).ok()?;
+        return exif_lens(&ex);
+    }
+    if head.starts_with(b"II") || head.starts_with(b"MM") {
+        let mut r = src.reader();
+        let tiff = GenericTiffReader::new(&mut r, 0, 0, None, &[]).ok()?;
+        return tiff_lens(&tiff, &mut r);
+    }
+    None
+}
+
+/// The lens in a parsed EXIF block (a JPEG's, HEIC's...): LensModel, else
+/// Canon's maker note.
+fn exif_lens(ex: &exif::Exif) -> Option<String> {
+    let buf = ex.buf();
+    let tiff = GenericTiffReader::new_with_buffer(buf, 0, 0, None).ok()?;
+    tiff_lens(&tiff, &mut Cursor::new(buf))
+}
+
+/// EXIF LensModel, else - for a Canon - its maker note. Other makers' maker
+/// notes are their own formats; rawler's lens table covers those.
+fn tiff_lens<R: Read + Seek>(tiff: &GenericTiffReader, r: &mut R) -> Option<String> {
+    let root = tiff.root_ifd();
+    let exif = root.get_sub_ifd(EXIF_IFD);
+    if let Some(name) = exif.and_then(|e| ascii(e, LENS_MODEL)).or_else(|| ascii(root, LENS_MODEL)) {
+        return Some(name);
+    }
+    if !ascii(root, MAKE)?.to_ascii_lowercase().starts_with("canon") {
+        return None;
+    }
+    let exif = exif?;
+    let at = exif.get_entry(MAKER_NOTE)?.offset()? as u32;
+    let note = IFD::new(r, at, 0, 0, exif.endian, &[]).ok()?;
+    canon_note_lens(&note)
+}
+
+/// Canon's maker note: the lens's name, else its id.
+fn canon_note_lens(note: &IFD) -> Option<String> {
+    ascii(note, CANON_LENS_MODEL).or_else(|| match &note.get_entry(CANON_CAMERA_SETTINGS)?.value {
+        TiffValue::Short(settings) => canon_lens_by_id(settings),
+        _ => None,
+    })
+}
+
+fn ascii(ifd: &IFD, tag: u16) -> Option<String> {
+    match &ifd.get_entry(tag)?.value {
+        TiffValue::Ascii(a) => a.strings().first().and_then(|s| non_empty(s)),
+        _ => None,
+    }
+}
+
+/// Canon's lens id (camera settings 22) in rawler's lens table. Lenses share
+/// ids (174 is the EF 135mm f/2L and eight Sigma zooms), so the lens's focal
+/// range (23-25) must leave exactly one.
+fn canon_lens_by_id(s: &[u16]) -> Option<String> {
+    let (id, long, short) = (*s.get(22)? as u32, *s.get(23)? as f32, *s.get(24)? as f32);
+    if id == 0 || id == 0xFFFF {
+        return None;
+    }
+    let units = s.get(25).copied().filter(|&u| u > 0).unwrap_or(1) as f32;
+    let (short, long) = (short / units, long / units);
+    let mm = |r: &rawler::formats::tiff::Rational| if r.d == 0 { -1.0 } else { r.n as f32 / r.d as f32 };
+    let fits = |l: &rawler::lens::LensDescription| {
+        long <= 0.0 || ((mm(&l.focal_range[0]) - short).abs() < 0.6 && (mm(&l.focal_range[1]) - long).abs() < 0.6)
+    };
+    let names: std::collections::BTreeSet<String> = rawler::lens::get_lenses()
+        .iter()
+        .filter(|l| matches!(l.mount.as_str(), "ef-mount" | "rf-mount" | "cn-mount"))
+        .filter(|l| l.identifiers.id.is_some_and(|(i, _)| i == id))
+        .filter(|l| fits(l))
+        .map(|l| format!("{} {}", l.lens_make, l.lens_model))
+        .collect();
+    if names.len() == 1 { names.into_iter().next() } else { None }
+}
+
+/// A CRW's lens: it records no name, only the lens id, in the camera settings
+/// somewhere in its heap of directories.
+fn ciff_lens(buf: &[u8]) -> Option<String> {
+    let start = le32(buf, 2)? as usize;
+    let data = ciff_find(buf, start, buf.len(), CIFF_CAMERA_SETTINGS, 0)?;
+    let settings: Vec<u16> = data.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+    canon_lens_by_id(&settings)
+}
+
+/// A CIFF heap runs from `start` to `end`; its last 4 bytes give where its
+/// directory is: a count, then 10-byte entries (tag, size, offset). Tags with
+/// type 0x2800 or 0x3000 are heaps themselves.
+fn ciff_find(buf: &[u8], start: usize, end: usize, want: u16, depth: u8) -> Option<&[u8]> {
+    if depth > 4 || end > buf.len() || end < start + 4 {
+        return None;
+    }
+    let dir = start.checked_add(le32(buf, end - 4)? as usize)?;
+    let count = le16(buf, dir)? as usize;
+    for i in 0..count.min(1024) {
+        let e = dir + 2 + i * 10;
+        let tag = le16(buf, e)?;
+        // Values kept in the entry itself (0x4000) are never a heap or the settings.
+        if tag & 0xC000 != 0 {
+            continue;
+        }
+        let (size, off) = (le32(buf, e + 2)? as usize, start.checked_add(le32(buf, e + 6)? as usize)?);
+        let Some(data) = off.checked_add(size).and_then(|to| buf.get(off..to)) else { continue };
+        if tag & 0x3FFF == want {
+            return Some(data);
+        }
+        if matches!(tag & 0x3800, 0x2800 | 0x3000)
+            && let Some(found) = ciff_find(buf, off, off + size, want, depth + 1)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn le16(b: &[u8], i: usize) -> Option<u16> {
+    b.get(i..i + 2).map(|x| u16::from_le_bytes([x[0], x[1]]))
+}
+
+fn le32(b: &[u8], i: usize) -> Option<u32> {
+    b.get(i..i + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
 }
 
 fn load_raw(path: &Path, long_edge: u32) -> Loaded {
@@ -161,15 +357,12 @@ fn rawler_meta(path: &Path) -> Result<Meta> {
     let params = RawDecodeParams::default();
 
     let mut meta = Meta::default();
+    let mut table_lens = None;
     if let Ok(md) = decoder.raw_metadata(&src, &params) {
         let ex = &md.exif;
         meta.make = non_empty(&md.make);
         meta.model = non_empty(&md.model);
-        meta.lens = md
-            .lens
-            .as_ref()
-            .and_then(|l| non_empty(&format!("{} {}", l.lens_make, l.lens_model)))
-            .or_else(|| ex.lens_model.as_deref().and_then(non_empty));
+        table_lens = md.lens.as_ref().and_then(|l| non_empty(&format!("{} {}", l.lens_make, l.lens_model)));
         meta.taken = ex.date_time_original.as_deref().or(ex.create_date.as_deref()).and_then(parse_exif_date);
         meta.subsec = ex.sub_sec_time_original.as_deref().and_then(non_empty);
         meta.serial = ex.serial_number.as_deref().and_then(non_empty);
@@ -181,6 +374,7 @@ fn rawler_meta(path: &Path) -> Result<Meta> {
         meta.focal = ex.focal_length.as_ref().and_then(|r| ratio(r.n, r.d));
         meta.orientation = ex.orientation.unwrap_or(0);
     }
+    meta.lens = raw_lens(&src, table_lens);
     Ok(meta)
 }
 
@@ -253,7 +447,7 @@ fn exif_meta(path: &Path) -> Option<Meta> {
         subsec: ascii(Tag::SubSecTimeOriginal),
         make: ascii(Tag::Make),
         model: ascii(Tag::Model),
-        lens: ascii(Tag::LensModel),
+        lens: ascii(Tag::LensModel).or_else(|| exif_lens(&ex)),
         serial: ascii(Tag::BodySerialNumber),
         image_number: None,
         iso: uint(Tag::PhotographicSensitivity).filter(|&v| v > 0),
@@ -377,4 +571,51 @@ fn encode(img: &DynamicImage, quality: u8) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(rgb.len() / 8);
     JpegEncoder::new_with_quality(&mut out, quality).encode_image(rgb)?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canon_lens_ids_need_the_focal_range() {
+        let mut s = [0u16; 26];
+        (s[22], s[23], s[24], s[25]) = (174, 135, 135, 1);
+        assert_eq!(canon_lens_by_id(&s).as_deref(), Some("Canon EF 135mm f/2L USM"));
+        // Without its range, id 174 is ten lenses: none is guessed.
+        (s[23], s[24]) = (0, 0);
+        assert_eq!(canon_lens_by_id(&s), None);
+        s[22] = 0xFFFF;
+        assert_eq!(canon_lens_by_id(&s), None);
+    }
+
+    #[test]
+    fn a_crw_lens_is_found_in_its_heap() {
+        // Header ("II", header length, "HEAPCCDR"), then a heap holding a
+        // heap (0x300A) holding the camera settings.
+        let mut settings = [0u16; 26];
+        (settings[22], settings[23], settings[24], settings[25]) = (174, 135, 135, 1);
+        let settings: Vec<u8> = settings.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let dir = |tag: u16, size: usize| {
+            let mut d = 1u16.to_le_bytes().to_vec();
+            d.extend(tag.to_le_bytes());
+            d.extend((size as u32).to_le_bytes());
+            d.extend(0u32.to_le_bytes());
+            d
+        };
+        let mut inner = settings.clone();
+        inner.extend(dir(0x102D, settings.len()));
+        inner.extend((settings.len() as u32).to_le_bytes());
+        let mut root = inner.clone();
+        root.extend(dir(0x300A, inner.len()));
+        root.extend((inner.len() as u32).to_le_bytes());
+        let mut file = b"II".to_vec();
+        file.extend(26u32.to_le_bytes());
+        file.extend(b"HEAPCCDR");
+        file.resize(26, 0);
+        file.extend(root);
+        assert_eq!(ciff_lens(&file).as_deref(), Some("Canon EF 135mm f/2L USM"));
+        // A truncated file finds nothing, and doesn't panic.
+        assert_eq!(ciff_lens(&file[..60]), None);
+    }
 }

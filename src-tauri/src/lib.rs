@@ -4,6 +4,7 @@ pub mod db;
 pub mod embedded;
 pub mod faces;
 pub mod formats;
+pub mod gear;
 pub mod imaging;
 pub mod models;
 pub mod organize;
@@ -146,6 +147,45 @@ impl AiQueue {
             k = self.wake.wait(k).unwrap();
         }
         *k = false;
+    }
+}
+
+/// Wakes a background worker that may have something new to do.
+#[derive(Default)]
+pub struct Kick {
+    kicked: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl Kick {
+    pub fn kick(&self) {
+        *self.kicked.lock().unwrap() = true;
+        self.wake.notify_one();
+    }
+
+    fn wait(&self) {
+        let mut k = self.kicked.lock().unwrap();
+        while !*k {
+            k = self.wake.wait(k).unwrap();
+        }
+        *k = false;
+    }
+}
+
+/// Reads the lenses an older Shoebox couldn't, from the originals plugged in
+/// (metadata only), and lets a shot's other file lend its lens. Kicked at
+/// start, after each scan, and when a disk is plugged in.
+fn lens_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<Kick>) {
+    let cancel = AtomicBool::new(false);
+    loop {
+        q.wait();
+        match gear::find_lenses(&cat, &cancel) {
+            Ok(r) if r.found + r.from_twins > 0 => {
+                let _ = app.emit("catalog-changed", ());
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("finding lenses failed: {e:#}"),
+        }
     }
 }
 
@@ -315,7 +355,7 @@ pub fn setup_logging(data: &DataDir) {
         .apply();
 }
 
-fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQueue>) {
+fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQueue>, lenses: Arc<Kick>) {
     loop {
         let task = q.next();
         q.cancel.store(false, Ordering::Relaxed);
@@ -353,14 +393,15 @@ fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQ
         }
         let _ = app.emit("catalog-changed", ());
         ai.kick();
+        lenses.kick();
     }
 }
 
 /// Notices disks being plugged in or out. Polls the drive-letter mask every
 /// 2 s (free) and re-reads volume details on change or every 15 s. A disk
 /// holding files that couldn't be read gets them read again when it shows up
-/// (and at start, for the disks already there).
-fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>) {
+/// (and at start, for the disks already there); lenses not read yet too.
+fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lenses: Arc<Kick>) {
     let mut mask = volumes::drive_mask();
     let mut last_full = Instant::now();
     let mut online: HashSet<i64> = HashSet::new();
@@ -383,6 +424,7 @@ fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>) {
             Ok(true) => {
                 let _ = cat.refresh_roots();
                 let _ = app.emit("volumes-changed", ());
+                lenses.kick();
             }
             Ok(false) => {}
             Err(e) => log::warn!("volume refresh failed: {e:#}"),
@@ -478,6 +520,7 @@ pub fn run() {
     let face_index = Arc::new(faces::FaceIndex::open(&cat).expect("open face index"));
     let ai = Arc::new(AiQueue::default());
     let model_queue = Arc::new(ModelQueue::default());
+    let lens_kick = Arc::new(Kick::default());
     let update_status = Arc::new(Mutex::new(None));
     let protocol_data = data.clone();
     let protocol_cat = cat.clone();
@@ -517,17 +560,21 @@ pub fn run() {
         })
         .setup(move |app| {
             let handle = app.handle().clone();
-            let (c, q, a) = (cat.clone(), scans.clone(), ai.clone());
-            std::thread::Builder::new().name("scan".into()).spawn(move || scan_worker(handle, c, q, a))?;
+            let (c, q, a, l) = (cat.clone(), scans.clone(), ai.clone(), lens_kick.clone());
+            std::thread::Builder::new().name("scan".into()).spawn(move || scan_worker(handle, c, q, a, l))?;
             let handle = app.handle().clone();
             let (c, i, f, a) = (cat.clone(), index.clone(), face_index.clone(), ai.clone());
             std::thread::Builder::new().name("ai".into()).spawn(move || ai_worker(handle, c, i, f, a))?;
             // Describe whatever isn't yet, from the start.
             ai.kick();
             let handle = app.handle().clone();
-            let c = cat.clone();
-            let q = scans.clone();
-            std::thread::Builder::new().name("volumes".into()).spawn(move || volume_watcher(handle, c, q))?;
+            let (c, q, l) = (cat.clone(), scans.clone(), lens_kick.clone());
+            std::thread::Builder::new().name("volumes".into()).spawn(move || volume_watcher(handle, c, q, l))?;
+            let handle = app.handle().clone();
+            let (c, l) = (cat.clone(), lens_kick.clone());
+            std::thread::Builder::new().name("lenses".into()).spawn(move || lens_worker(handle, c, l))?;
+            // Lenses an older Shoebox couldn't read, from the start.
+            lens_kick.kick();
             let handle = app.handle().clone();
             let (m, a) = (model_queue.clone(), ai.clone());
             std::thread::Builder::new().name("models".into()).spawn(move || model_worker(handle, m, a))?;
@@ -584,6 +631,8 @@ pub fn run() {
             commands::tags_remove,
             commands::tag_rename,
             commands::tag_delete,
+            commands::gear_rename,
+            commands::gear_split,
             commands::mark_photos,
             commands::unmark_all,
             commands::delete_plan,
