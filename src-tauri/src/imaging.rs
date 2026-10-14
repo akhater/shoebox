@@ -18,7 +18,8 @@ use std::path::Path;
 
 /// Version of how lenses are read. Photos an older version read without
 /// finding their lens are read again ([`crate::gear::find_lenses`]).
-pub const LENS_READER: i64 = 1;
+/// 2: a lens without a known id is named by its focal range and aperture.
+pub const LENS_READER: i64 = 2;
 
 #[derive(Default, Debug, Clone)]
 pub struct Meta {
@@ -171,7 +172,7 @@ fn tiff_lens<R: Read + Seek>(tiff: &GenericTiffReader, r: &mut R) -> Option<Stri
 /// Canon's maker note: the lens's name, else its id.
 fn canon_note_lens(note: &IFD) -> Option<String> {
     ascii(note, CANON_LENS_MODEL).or_else(|| match &note.get_entry(CANON_CAMERA_SETTINGS)?.value {
-        TiffValue::Short(settings) => canon_lens_by_id(settings),
+        TiffValue::Short(settings) => canon_settings_lens(settings),
         _ => None,
     })
 }
@@ -183,16 +184,39 @@ fn ascii(ifd: &IFD, tag: u16) -> Option<String> {
     }
 }
 
-/// Canon's lens id (camera settings 22) in rawler's lens table. Lenses share
-/// ids (174 is the EF 135mm f/2L and eight Sigma zooms), so the lens's focal
-/// range (23-25) must leave exactly one.
-fn canon_lens_by_id(s: &[u16]) -> Option<String> {
+/// The lens in Canon's camera settings: its name from rawler's lens table
+/// when its id (22) leaves exactly one there - lenses share ids (174 is the
+/// EF 135mm f/2L and eight Sigma zooms), so the focal range (23-25) must agree.
+/// Else - older bodies like the 10D record no id (65535) - what the lens is:
+/// its focal range and widest aperture (26), "24-70mm f/2.8", which Gear
+/// matches with a lens of the catalog.
+fn canon_settings_lens(s: &[u16]) -> Option<String> {
     let (id, long, short) = (*s.get(22)? as u32, *s.get(23)? as f32, *s.get(24)? as f32);
+    let units = s.get(25).copied().filter(|&u| u > 0).unwrap_or(1) as f32;
+    let (short, long) = (short / units, long / units);
+    let aperture = s.get(26).and_then(|&code| canon_aperture(code as i16));
+    canon_lens_by_id(id, short, long).or_else(|| crate::gear::spec_name(short, long, aperture))
+}
+
+/// Canon's aperture code: an EV in 1/32 steps, thirds written 0x0C / 0x14.
+fn canon_aperture(code: i16) -> Option<f32> {
+    if code <= 0 {
+        return None;
+    }
+    let frac = code & 0x1F;
+    let thirds = match frac {
+        0x0C => 32.0 / 3.0,
+        0x14 => 64.0 / 3.0,
+        f => f as f32,
+    };
+    let ev = ((code - frac) as f32 + thirds) / 32.0;
+    Some(2f32.powf(ev / 2.0))
+}
+
+fn canon_lens_by_id(id: u32, short: f32, long: f32) -> Option<String> {
     if id == 0 || id == 0xFFFF {
         return None;
     }
-    let units = s.get(25).copied().filter(|&u| u > 0).unwrap_or(1) as f32;
-    let (short, long) = (short / units, long / units);
     let mm = |r: &rawler::formats::tiff::Rational| if r.d == 0 { -1.0 } else { r.n as f32 / r.d as f32 };
     let fits = |l: &rawler::lens::LensDescription| {
         long <= 0.0 || ((mm(&l.focal_range[0]) - short).abs() < 0.6 && (mm(&l.focal_range[1]) - long).abs() < 0.6)
@@ -207,13 +231,13 @@ fn canon_lens_by_id(s: &[u16]) -> Option<String> {
     if names.len() == 1 { names.into_iter().next() } else { None }
 }
 
-/// A CRW's lens: it records no name, only the lens id, in the camera settings
-/// somewhere in its heap of directories.
+/// A CRW's lens: it records no name, only the camera settings (lens id,
+/// focal range, aperture) somewhere in its heap of directories.
 fn ciff_lens(buf: &[u8]) -> Option<String> {
     let start = le32(buf, 2)? as usize;
     let data = ciff_find(buf, start, buf.len(), CIFF_CAMERA_SETTINGS, 0)?;
     let settings: Vec<u16> = data.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
-    canon_lens_by_id(&settings)
+    canon_settings_lens(&settings)
 }
 
 /// A CIFF heap runs from `start` to `end`; its last 4 bytes give where its
@@ -578,15 +602,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canon_lens_ids_need_the_focal_range() {
-        let mut s = [0u16; 26];
+    fn canon_settings_name_the_lens() {
+        let mut s = [0u16; 27];
         (s[22], s[23], s[24], s[25]) = (174, 135, 135, 1);
-        assert_eq!(canon_lens_by_id(&s).as_deref(), Some("Canon EF 135mm f/2L USM"));
-        // Without its range, id 174 is ten lenses: none is guessed.
+        assert_eq!(canon_settings_lens(&s).as_deref(), Some("Canon EF 135mm f/2L USM"));
+        // Without its range, id 174 is ten lenses: none is guessed, and nothing says what it is.
         (s[23], s[24]) = (0, 0);
-        assert_eq!(canon_lens_by_id(&s), None);
-        s[22] = 0xFFFF;
-        assert_eq!(canon_lens_by_id(&s), None);
+        assert_eq!(canon_settings_lens(&s), None);
+        // A 10D records no id (65535): the lens goes by what it is.
+        for (long, short, aperture, name) in
+            [(70, 24, 96, "24-70mm f/2.8"), (24, 12, 128, "12-24mm f/4"), (50, 50, 52, "50mm f/1.8")]
+        {
+            (s[22], s[23], s[24], s[26]) = (0xFFFF, long, short, aperture);
+            assert_eq!(canon_settings_lens(&s).as_deref(), Some(name));
+        }
+        s[26] = 0;
+        assert_eq!(canon_settings_lens(&s).as_deref(), Some("50mm"));
     }
 
     #[test]
