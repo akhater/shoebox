@@ -534,9 +534,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data.root);
     }
 
-    /// Promise 1 in CLAUDE.md, enforced: file-writing code may only appear in
-    /// this file, and photo-file changes only in `organize.rs` (deleting what
-    /// the user marked and confirmed; moves later), which has its own rules.
+    /// "Shoebox never writes to a photo file" (README), enforced: file-writing
+    /// code may only appear in this file, and photo-file changes only in
+    /// `organize.rs` (deleting what the user marked and confirmed; moves later),
+    /// which has its own rules.
     #[test]
     fn no_other_file_writes_anywhere() {
         const FORBIDDEN: &[&str] = &[
