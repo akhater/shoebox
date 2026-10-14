@@ -184,8 +184,11 @@ impl DataDir {
         walkdir::WalkDir::new(&self.root)
             .into_iter()
             // Shoebox's own, not the catalog's: installed, `~/.shoebox` is both
-            // the Shoebox folder and the first catalog.
-            .filter_entry(|e| e.depth() != 1 || !matches!(e.file_name().to_str(), Some("models" | POINTER_FILE)))
+            // the Shoebox folder and the first catalog. A move's own notes stay too.
+            .filter_entry(|e| {
+                e.depth() != 1
+                    || !matches!(e.file_name().to_str(), Some("models" | POINTER_FILE | MOVE_JOURNAL | MOVE_LOCK))
+            })
             .flatten()
             .filter(|e| e.file_type().is_file())
             .map(|e| e.into_path())
@@ -196,29 +199,56 @@ impl DataDir {
             .collect()
     }
 
-    /// Moves this catalog's files into `target` (another, empty data folder).
-    /// The big folders (previews, thumbnails, faces) move whole, the way the
-    /// OS moves a folder: on the same disk an instant rename, nothing copied.
-    /// What is left (settings, logs - and everything, on another disk) is
-    /// copied. If the copying fails, the moved folders are put back. Returns
-    /// what was moved, for [`DataDir::unmove`] if a later step fails.
-    pub fn move_files_to(
-        &self,
-        target: &DataDir,
-        progress: &dyn Fn(usize, usize),
-    ) -> io::Result<Vec<(PathBuf, PathBuf)>> {
+    /// Starts moving this catalog into `target`, an empty or new folder. The
+    /// move is written down here ([`MOVE_JOURNAL`]) until it is done, so a
+    /// failure or a Shoebox stopped halfway can be undone
+    /// ([`DataDir::undo_move`]), and held ([`MoveLock`]) so another Shoebox
+    /// starting meanwhile leaves it alone. A move cut short earlier, not
+    /// undone yet, is undone first.
+    pub fn begin_move(&self, target: &DataDir) -> io::Result<MoveLock> {
+        let lock = MoveLock::take(self)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "The catalog is already being moved."))?;
+        self.undo_move_held()?;
+        let made_target = !target.root.exists();
+        if !made_target && std::fs::read_dir(&target.root)?.next().is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} already exists and isn't empty.", target.root.display()),
+            ));
+        }
         std::fs::create_dir_all(&target.root)?;
-        let mut moved = Vec::new();
+        self.write_journal(&MoveJournal { to: target.root.clone(), made_target, renamed: Vec::new() })?;
+        Ok(lock)
+    }
+
+    fn journal(&self) -> Option<MoveJournal> {
+        serde_json::from_str(&std::fs::read_to_string(self.root.join(MOVE_JOURNAL)).ok()?).ok()
+    }
+
+    fn write_journal(&self, journal: &MoveJournal) -> io::Result<()> {
+        self.write(&self.root.join(MOVE_JOURNAL), serde_json::to_string_pretty(journal)?.as_bytes())
+    }
+
+    /// Moves this catalog's files into `target` (after [`DataDir::begin_move`]).
+    /// The big folders (previews, thumbnails, faces) move whole, the way the
+    /// OS moves a folder: on the same disk an instant rename, nothing copied;
+    /// each is written down just before. What is left (settings, logs - and
+    /// everything, on another disk) is copied.
+    pub fn move_files_to(&self, target: &DataDir, progress: &dyn Fn(usize, usize)) -> io::Result<()> {
+        let mut journal = self.journal().ok_or_else(|| io::Error::other("the catalog move wasn't begun"))?;
         for sub in ["previews", "thumbs", "faces"] {
             let (from, to) = (self.root.join(sub), target.root.join(sub));
             if !from.is_dir() || to.exists() || !inside(&to, &target.root) {
                 continue;
             }
+            journal.renamed.push(sub.to_string());
+            self.write_journal(&journal)?;
             // A preview being read this very moment can hold the folder briefly.
+            let mut renamed = false;
             for attempt in 0..5 {
                 match std::fs::rename(&from, &to) {
                     Ok(()) => {
-                        moved.push((from.clone(), to.clone()));
+                        renamed = true;
                         break;
                     }
                     Err(e) if e.kind() == io::ErrorKind::CrossesDevices => break, // another disk: copied below
@@ -226,60 +256,271 @@ impl DataDir {
                     Err(_) => break,
                 }
             }
+            if !renamed {
+                journal.renamed.pop();
+                self.write_journal(&journal)?;
+            }
         }
         let files = self.files();
-        let copy = || -> io::Result<()> {
-            for (i, src) in files.iter().enumerate() {
-                let rel = src.strip_prefix(&self.root).map_err(io::Error::other)?;
-                let dst = target.root.join(rel);
-                let same = dst.metadata().ok().map(|m| m.len()) == src.metadata().ok().map(|m| m.len());
-                if !same {
-                    target.write(&dst, &std::fs::read(src)?)?;
-                }
-                if i % 50 == 0 || i + 1 == files.len() {
-                    progress(i + 1, files.len());
+        for (i, src) in files.iter().enumerate() {
+            let rel = src.strip_prefix(&self.root).map_err(io::Error::other)?;
+            let dst = target.root.join(rel);
+            let same = dst.metadata().ok().map(|m| m.len()) == src.metadata().ok().map(|m| m.len());
+            if !same {
+                target.write(&dst, &std::fs::read(src)?)?;
+            }
+            if i % 50 == 0 || i + 1 == files.len() {
+                progress(i + 1, files.len());
+            }
+        }
+        Ok(())
+    }
+
+    /// Puts the databases staged in this folder (a move's target, see
+    /// [`snapshot_db`]) in their place, the catalog's last: only then does the
+    /// folder hold a catalog.
+    pub fn place_databases(&self) -> io::Result<()> {
+        for name in ["faces.db", "search.db", "catalog.db"] {
+            let staged = staged(&self.root, name);
+            if staged.is_file() {
+                std::fs::rename(&staged, self.root.join(name))?;
+            }
+        }
+        if !self.has_catalog() {
+            return Err(io::Error::other(format!("no catalog was copied into {}", self.root.display())));
+        }
+        Ok(())
+    }
+
+    /// Undoes a catalog move of this catalog that didn't finish: Shoebox was
+    /// stopped halfway (run at start, before the catalog opens). The folders
+    /// moved whole come back - joining whatever was saved in their place
+    /// since - and what the move put in the target goes. Left alone: a move
+    /// still under way in another Shoebox, and one already done (shoebox.json
+    /// points at its target). Returns the target of a move undone.
+    pub fn undo_move(&self) -> io::Result<Option<PathBuf>> {
+        if !self.root.join(MOVE_JOURNAL).is_file() {
+            return Ok(None);
+        }
+        match MoveLock::take(self)? {
+            Some(_held) => self.undo_move_held(),
+            None => Ok(None),
+        }
+    }
+
+    /// [`DataDir::undo_move`], the move's [`MoveLock`] held.
+    fn undo_move_held(&self) -> io::Result<Option<PathBuf>> {
+        if !self.root.join(MOVE_JOURNAL).is_file() {
+            return Ok(None);
+        }
+        // Kept, not guessed at: it says which folders to bring back.
+        let journal = self
+            .journal()
+            .ok_or_else(|| io::Error::other(format!("{} can't be read", self.root.join(MOVE_JOURNAL).display())))?;
+        let target = journal.to.clone();
+        let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+        let (t, c) = (lower(&target), lower(&self.root));
+        let done = read_pointer().and_then(|p| p.data_dir).is_some_and(|d| lower(&d) == t);
+        let undone = !done && !t.starts_with(&c) && !c.starts_with(&t);
+        if undone {
+            for sub in &journal.renamed {
+                bring_back(&target.join(sub), &self.root.join(sub))?;
+            }
+            // Everything else in the target came from the move (it was empty):
+            // the staged databases, copies of the catalog's files.
+            if let Ok(entries) = std::fs::read_dir(&target) {
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+                    let copied = is_catalog_entry(&name, is_dir) || self.root.join(&name).exists();
+                    if !copied || journal.renamed.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
+                        continue;
+                    }
+                    let gone = if is_dir { std::fs::remove_dir_all(e.path()) } else { std::fs::remove_file(e.path()) };
+                    if let Err(err) = gone {
+                        log::warn!("catalog move undone: couldn't remove {}: {err}", e.path().display());
+                    }
                 }
             }
-            Ok(())
-        };
-        if let Err(e) = copy() {
-            Self::unmove(&moved);
-            return Err(e);
+            if journal.made_target {
+                let _ = std::fs::remove_dir(&target);
+            }
         }
-        Ok(moved)
+        self.remove(&self.root.join(MOVE_JOURNAL))?;
+        Ok(undone.then_some(target))
     }
 
-    /// Puts back folders [`DataDir::move_files_to`] moved (a later step failed).
-    pub fn unmove(moved: &[(PathBuf, PathBuf)]) {
-        for (from, to) in moved.iter().rev() {
-            let _ = std::fs::rename(to, from);
-        }
+    /// Removes the temporary files a Shoebox stopped mid-write left behind
+    /// ([`atomic_write`]), in the catalog folder and beside `shoebox.json`.
+    /// Only those older than [`STRAY_AFTER`]: a newer one may be another
+    /// Shoebox's (the CLI's) write under way. Returns how many.
+    pub fn remove_stray_temp_files(&self) -> usize {
+        let in_catalog = walkdir::WalkDir::new(&self.root)
+            .into_iter()
+            .filter_entry(|e| e.depth() != 1 || e.file_name() != "models")
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path());
+        let pointer = std::fs::read_dir(app_home())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("shoebox.")));
+        let old = |p: &Path| {
+            p.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|a| a >= STRAY_AFTER)
+        };
+        in_catalog
+            .chain(pointer)
+            .filter(|p| p.file_name().is_some_and(|n| is_write_temp(&n.to_string_lossy())))
+            .filter(|p| old(p) && std::fs::remove_file(p).is_ok())
+            .count()
     }
 }
 
-/// A consistent copy of the open catalog database into `target`, safe while
-/// Shoebox is running (SQLite's `VACUUM INTO`).
-pub fn snapshot_db(conn: &rusqlite::Connection, target: &DataDir) -> anyhow::Result<()> {
-    let dst = target.db_path();
-    if dst.exists() {
-        anyhow::bail!("{} already has a catalog", target.root.display());
+/// A catalog move under way, written down in the folder it leaves until it is
+/// done: where to, and which folders moved whole.
+const MOVE_JOURNAL: &str = "moving.json";
+/// Held by the Shoebox moving the catalog, for as long as it does.
+const MOVE_LOCK: &str = "moving.lock";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveJournal {
+    to: PathBuf,
+    /// The move made the target folder: undone, it goes too.
+    made_target: bool,
+    /// Folders moved whole by a rename, written down just before: undone,
+    /// they come back (never deleted).
+    renamed: Vec<String>,
+}
+
+/// The lock of a catalog move ([`DataDir::begin_move`]): the folder it leaves
+/// holds `moving.lock`, locked by the Shoebox moving it. The system lets go
+/// of it when that Shoebox ends, however it ends, so a journal whose lock can
+/// be taken belongs to a move cut short.
+pub struct MoveLock {
+    file: std::fs::File,
+    data: DataDir,
+}
+
+impl MoveLock {
+    /// None: another Shoebox (or this one) is moving the catalog right now.
+    fn take(data: &DataDir) -> io::Result<Option<Self>> {
+        let file =
+            std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(data.root.join(MOVE_LOCK))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { file, data: data.clone() })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
     }
-    std::fs::create_dir_all(&target.root)?;
-    conn.execute("VACUUM INTO ?1", [dst.to_string_lossy()])?;
+
+    /// The move failed: everything goes back (see [`DataDir::undo_move`]).
+    pub fn undo(self) -> io::Result<()> {
+        self.data.undo_move_held().map(|_| ())
+    }
+
+    /// The move is done and the new catalog remembered: the journal goes.
+    pub fn finish(self) {
+        let _ = self.data.remove(&self.data.root.join(MOVE_JOURNAL));
+    }
+}
+
+impl Drop for MoveLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+        let _ = std::fs::remove_file(self.data.root.join(MOVE_LOCK));
+    }
+}
+
+/// Puts a folder a catalog move renamed back in its place. Whatever was saved
+/// there since (an empty folder made at start, a face picture saved as the
+/// move began) stays, and the rest joins it file by file.
+fn bring_back(from: &Path, to: &Path) -> io::Result<()> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    let files = |dir: &Path| -> Vec<PathBuf> {
+        walkdir::WalkDir::new(dir)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
+            .collect()
+    };
+    if to.is_dir() && files(to).is_empty() {
+        std::fs::remove_dir_all(to)?;
+    }
+    if !to.exists() {
+        return std::fs::rename(from, to);
+    }
+    for src in files(from) {
+        let dst = to.join(src.strip_prefix(from).map_err(io::Error::other)?);
+        if !dst.exists() {
+            if let Some(dir) = dst.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::rename(&src, &dst)?;
+        }
+    }
+    if files(from).is_empty() {
+        std::fs::remove_dir_all(from)?;
+    }
     Ok(())
 }
 
-/// A consistent copy of one of the catalog's other databases (faces, search)
-/// into `target` under the same name, safe while Shoebox has it open.
-pub fn snapshot_sqlite(src: &Path, target: &DataDir) -> anyhow::Result<()> {
-    let name = src.file_name().ok_or_else(|| anyhow::anyhow!("no file name in {}", src.display()))?;
-    let dst = target.root.join(name);
-    if !inside(&dst, &target.root) || dst.exists() {
+/// A temporary file of [`atomic_write`]: `<name>.<pid>-<n>.tmp`.
+fn is_write_temp(name: &str) -> bool {
+    let tag = name.strip_suffix(".tmp").and_then(|s| s.rsplit_once('.')).map(|(_, tag)| tag);
+    let Some((pid, n)) = tag.and_then(|t| t.split_once('-')) else { return false };
+    [pid, n].iter().all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A write takes a moment: a temporary file this old belongs to no write
+/// under way.
+const STRAY_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Where a catalog move's target keeps a database until
+/// [`DataDir::place_databases`]: `<name>.tmp`, which no Shoebox takes for a
+/// catalog.
+fn staged(root: &Path, name: &str) -> PathBuf {
+    root.join(format!("{name}.tmp"))
+}
+
+/// A consistent copy of `conn`'s database, staged in `target` as `name`
+/// ([`staged`]), safe while Shoebox has it open (SQLite's `VACUUM INTO`).
+fn stage(conn: &rusqlite::Connection, target: &DataDir, name: &str) -> anyhow::Result<()> {
+    let dst = staged(&target.root, name);
+    if !inside(&dst, &target.root) || target.root.join(name).exists() {
         anyhow::bail!("refused {}", dst.display());
     }
-    let conn = rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    std::fs::create_dir_all(&target.root)?;
+    let _ = std::fs::remove_file(&dst);
     conn.execute("VACUUM INTO ?1", [dst.to_string_lossy()])?;
     Ok(())
+}
+
+/// A consistent copy of the open catalog database for a catalog move into
+/// `target`, safe while Shoebox is running (SQLite's `VACUUM INTO`). Staged:
+/// it becomes `catalog.db` only through [`DataDir::place_databases`].
+pub fn snapshot_db(conn: &rusqlite::Connection, target: &DataDir) -> anyhow::Result<()> {
+    if target.has_catalog() {
+        anyhow::bail!("{} already has a catalog", target.root.display());
+    }
+    stage(conn, target, "catalog.db")
+}
+
+/// The same for one of the catalog's other databases (faces, search), under
+/// its own name, safe while Shoebox has it open.
+pub fn snapshot_sqlite(src: &Path, target: &DataDir) -> anyhow::Result<()> {
+    let name = src.file_name().ok_or_else(|| anyhow::anyhow!("no file name in {}", src.display()))?;
+    let conn = rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    stage(&conn, target, &name.to_string_lossy())
 }
 
 /// Remembers `root` as the catalog folder for the next start.
@@ -289,7 +530,8 @@ pub fn remember_data_dir(root: &Path, left_behind: Option<&Path>) -> io::Result<
 }
 
 /// What a catalog folder holds of its own: the databases (and their SQLite
-/// side files), settings, logs, backups, previews, thumbnails, faces.
+/// side files), settings, logs, backups, previews, thumbnails, faces, and a
+/// move's notes.
 fn is_catalog_entry(name: &str, is_dir: bool) -> bool {
     let n = name.to_lowercase();
     if is_dir {
@@ -298,7 +540,7 @@ fn is_catalog_entry(name: &str, is_dir: bool) -> bool {
     let db_file = ["catalog.db", "faces.db", "search.db"]
         .iter()
         .any(|db| n.strip_prefix(db).is_some_and(|rest| ["", "-wal", "-shm", "-journal", ".tmp"].contains(&rest)));
-    db_file || ["settings.json", "moved.txt", ".kopiaignore"].contains(&n.as_str())
+    db_file || ["settings.json", "moved.txt", ".kopiaignore", MOVE_JOURNAL, MOVE_LOCK].contains(&n.as_str())
 }
 
 /// The old catalog's own entries in `dir`, and whether anything else is there
@@ -322,18 +564,22 @@ fn old_catalog_entries(dir: &Path) -> io::Result<(Vec<PathBuf>, bool)> {
 /// the new catalog, they go to the Recycle Bin: only the catalog's own files
 /// and folders, never `models` or `shoebox.json` - the whole folder when
 /// nothing else is in it. Not found (its disk unplugged), it waits for a later
-/// start. Returns the folder cleared.
+/// start; gone from a disk that is there, it is done (a Shoebox stopped right
+/// after sending it to the Recycle Bin, before noting so). Returns the folder
+/// cleared.
 pub fn remove_old_catalog(current: &DataDir) -> anyhow::Result<Option<PathBuf>> {
     let Some(mut p) = read_pointer() else { return Ok(None) };
     let Some(old) = p.old_data_dir.clone() else { return Ok(None) };
     let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
     let (o, c) = (lower(&old), lower(&current.root));
     let in_use = o.starts_with(&c) || c.starts_with(&o) || lower(&models_dir()).starts_with(&o);
-    if in_use || !current.has_catalog() || !old.is_dir() {
-        if in_use {
-            p.old_data_dir = None; // never the catalog (or models) in use
-            write_pointer(&p)?;
-        }
+    // Never the catalog (or models) in use; and nothing left to remove.
+    if in_use || is_gone(&old) {
+        p.old_data_dir = None;
+        write_pointer(&p)?;
+        return Ok(None);
+    }
+    if !current.has_catalog() || !old.is_dir() {
         return Ok(None);
     }
     let (own, other) = old_catalog_entries(&old)?;
@@ -345,6 +591,11 @@ pub fn remove_old_catalog(current: &DataDir) -> anyhow::Result<Option<PathBuf>> 
     p.old_data_dir = None;
     write_pointer(&p)?;
     Ok(Some(old))
+}
+
+/// Not there while the folder holding it is: deleted, not on an unplugged disk.
+fn is_gone(dir: &Path) -> bool {
+    !dir.exists() && dir.parent().is_some_and(Path::is_dir)
 }
 
 /// An AI model file being downloaded, written as `<name>.part` beside where it
@@ -516,6 +767,50 @@ mod tests {
         assert!(other);
         let _ = std::fs::remove_dir_all(&data.root);
         assert!(!is_catalog_entry("faces.db.bak", false) && !is_catalog_entry("faces", false));
+    }
+
+    /// A Shoebox stopped mid-write leaves `<name>.<pid>-<n>.tmp` behind: those
+    /// go at the next start, once old enough not to be another Shoebox's write
+    /// under way. Nothing else does.
+    #[test]
+    fn stray_temp_files_are_removed() {
+        let data = DataDir { root: std::env::temp_dir().join("shoebox-stray-temp") };
+        let _ = std::fs::remove_dir_all(&data.root);
+        let old = std::time::SystemTime::now() - 2 * STRAY_AFTER;
+        let file = |rel: &str, aged: bool| {
+            let p = data.root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"x").unwrap();
+            if aged {
+                std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+            }
+            p
+        };
+        let stray = [file("previews/01/1.4242-7.tmp", true), file("settings.4242-8.tmp", true)];
+        let kept = [
+            file("previews/01/2.4242-9.tmp", false), // being written right now
+            file("previews/01/1.jpg", true),
+            file("backup/catalog.db.tmp", true),
+            file("models/clip/model.4242-1.tmp", true),
+        ];
+        assert_eq!(data.remove_stray_temp_files(), 2);
+        assert!(stray.iter().all(|p| !p.exists()));
+        assert!(kept.iter().all(|p| p.exists()));
+        assert!(is_write_temp(".kopiaignore.12-0.tmp") && !is_write_temp("catalog.db.tmp"));
+        assert!(!is_write_temp("x.12-.tmp") && !is_write_temp("x.a1-2.tmp") && !is_write_temp("12-3.tmp"));
+        let _ = std::fs::remove_dir_all(&data.root);
+    }
+
+    /// The folder a catalog move left is done with once it's gone from a disk
+    /// that is there; on an unplugged disk it waits.
+    #[test]
+    fn a_folder_is_gone_only_from_a_disk_that_is_there() {
+        let base = std::env::temp_dir().join("shoebox-gone");
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(is_gone(&base.join("old catalog")));
+        assert!(!is_gone(&base));
+        assert!(!is_gone(&base.join("unplugged").join("old catalog")));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Installed, `~/.shoebox` holds the models and `shoebox.json` beside the

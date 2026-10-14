@@ -571,12 +571,14 @@ impl Catalog {
         Ok((filter, p1, p2))
     }
 
-    /// Photos whose preview is ready (what the AI reads).
-    pub fn preview_ready_ids(&self) -> Result<Vec<i64>> {
+    /// Photos whose preview is ready (what the AI reads), with their fingerprints.
+    pub fn preview_ready(&self) -> Result<Vec<(i64, String)>> {
         let db = self.db();
         let ids = db
-            .prepare(&format!("SELECT id FROM photos WHERE preview_state = {PREVIEW_OK} ORDER BY taken_ts DESC"))?
-            .query_map([], |r| r.get(0))?
+            .prepare(&format!(
+                "SELECT id, fingerprint FROM photos WHERE preview_state = {PREVIEW_OK} ORDER BY taken_ts DESC"
+            ))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(ids)
     }
@@ -795,19 +797,23 @@ impl Catalog {
     }
 
     /// Moves the catalog to `target` and makes it the catalog for the next
-    /// start. Previews, thumbnails and faces move as folders (instant on the
-    /// same disk, copied to another one); the databases are snapshotted. The
-    /// old folder keeps its old databases and a note saying where the catalog
-    /// went until Shoebox has started on the new one, which then sends them
-    /// to the Recycle Bin ([`paths::remove_old_catalog`]). Any failure puts
-    /// everything back. Scans must be stopped.
+    /// start. The databases are snapshotted first, then previews, thumbnails
+    /// and faces move as folders (instant on the same disk, copied to another
+    /// one). The target holds a catalog only once all of it is there, and the
+    /// next start opens it only once `shoebox.json` says so, the last step.
+    /// Until then the move is written down in the old folder: any failure puts
+    /// everything back, and so does the next start of a Shoebox stopped
+    /// halfway ([`DataDir::undo_move`]). The old folder keeps its old databases
+    /// and a note saying where the catalog went until Shoebox has started on
+    /// the new one, which then sends them to the Recycle Bin
+    /// ([`paths::remove_old_catalog`]). Scans must be stopped.
     pub fn move_catalog(&self, target: &Path, progress: &dyn Fn(usize, usize)) -> Result<()> {
         let to = DataDir { root: target.to_path_buf() };
         if to.has_catalog() {
             bail!("{} already has a catalog", target.display());
         }
-        let moved = self.data.move_files_to(&to, progress)?;
-        let finish = || -> Result<()> {
+        let lock = self.data.begin_move(&to)?;
+        let steps = || -> Result<()> {
             for db in ["faces.db", "search.db"] {
                 let src = self.data.root.join(db);
                 if src.is_file() {
@@ -815,14 +821,19 @@ impl Catalog {
                 }
             }
             paths::snapshot_db(&self.db(), &to)?;
+            self.data.move_files_to(&to, progress)?;
+            to.place_databases()?;
             paths::remember_data_dir(&to.root, Some(&self.data.root))?;
             Ok(())
         };
-        if let Err(e) = finish() {
-            DataDir::unmove(&moved);
+        if let Err(e) = steps() {
+            if let Err(undo) = lock.undo() {
+                log::warn!("catalog move to {} failed and couldn't be undone yet: {undo}", to.root.display());
+            }
             return Err(e);
         }
-        log::info!("catalog moved to {} ({} folders moved whole)", to.root.display(), moved.len());
+        lock.finish();
+        log::info!("catalog moved to {}", to.root.display());
         let note = format!(
             "Shoebox's catalog moved to {} on {}.\r\nThis folder only holds the old one: Shoebox sends it to the Recycle Bin the next time it starts. If it's still here, it can be deleted.\r\n",
             to.root.display(),

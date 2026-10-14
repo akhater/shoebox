@@ -199,25 +199,29 @@ pub fn scan_root(
 }
 
 /// Files on this disk whose photo couldn't be read (or that couldn't even be
-/// opened) last time.
+/// opened) last time, or whose reading was cut short: a photo is saved as
+/// pending before its preview is written, so one still pending between scans
+/// was left half-read by a Shoebox stopped in the middle.
 const FAILED_FILES: &str = "SELECT f.id, f.photo_id, fo.rel_path, f.name, f.size, f.mtime
      FROM files f JOIN folders fo ON fo.id = f.folder_id LEFT JOIN photos p ON p.id = f.photo_id
     WHERE fo.volume_id = ?1 AND f.state = ?2
-      AND (p.preview_state = ?3 OR (f.photo_id IS NULL AND f.error IS NOT NULL))";
+      AND (p.preview_state IN (?3, ?4) OR (f.photo_id IS NULL AND f.error IS NOT NULL))";
 
 /// How many files on this disk are waiting to be read again.
 pub fn failed_count(cat: &Catalog, volume_id: i64) -> Result<u64> {
     let n: i64 = cat.db().query_row(
         &format!("SELECT COUNT(*) FROM ({FAILED_FILES})"),
-        params![volume_id, FILE_PRESENT, PREVIEW_FAILED],
+        params![volume_id, FILE_PRESENT, PREVIEW_FAILED, PREVIEW_PENDING],
         |r| r.get(0),
     )?;
     Ok(n as u64)
 }
 
 /// Reads again, on a plugged-in disk, only the files that couldn't be read
-/// last time (the disk pulled out mid-read, a flaky cable...). Nothing is
-/// listed and nothing is marked missing: this is not a scan of the folder.
+/// last time (the disk pulled out mid-read, a flaky cable...) or were left
+/// half-read (Shoebox stopped mid-scan). Nothing is listed and nothing is
+/// marked missing: this is not a scan of the folder. Runs between scans
+/// (one at a time), when no photo is pending for any other reason.
 pub fn retry_failed(
     cat: &Catalog,
     volume_id: i64,
@@ -231,7 +235,7 @@ pub fn retry_failed(
     let failed: Vec<(i64, Option<i64>, String, String, i64, i64)> = cat
         .db()
         .prepare(FAILED_FILES)?
-        .query_map(params![volume_id, FILE_PRESENT, PREVIEW_FAILED], |r| {
+        .query_map(params![volume_id, FILE_PRESENT, PREVIEW_FAILED, PREVIEW_PENDING], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -612,9 +616,18 @@ fn set_file_error(cat: &Catalog, file_id: i64, err: &str) {
 
 /// Points a file at its photo. Locations of that photo already confirmed
 /// missing are dropped: the photo has been found again, so that was a move.
+/// Runs inside the caller's transaction.
 fn link(db: &Connection, file_id: i64, photo_id: i64) -> Result<()> {
     db.execute("UPDATE files SET photo_id = ?1, error = NULL WHERE id = ?2", params![photo_id, file_id])?;
     db.execute("DELETE FROM files WHERE photo_id = ?1 AND state = ?2", params![photo_id, FILE_MISSING])?;
+    Ok(())
+}
+
+/// [`link`] in a transaction of its own: both changes land, or neither.
+fn link_now(db: &Connection, file_id: i64, photo_id: i64) -> Result<()> {
+    let tx = db.unchecked_transaction()?;
+    link(&tx, file_id, photo_id)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -634,7 +647,7 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
         Claim::Done => {
             let db = cat.db();
             if let Some((pid, _)) = photo_of(&db)? {
-                link(&db, job.file_id, pid)?;
+                link_now(&db, job.file_id, pid)?;
                 return Ok(Outcome::Duplicate);
             }
             None
@@ -650,7 +663,7 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
             && state == PREVIEW_OK
             && !job.force
         {
-            link(&db, job.file_id, pid)?;
+            link_now(&db, job.file_id, pid)?;
             return Ok(Outcome::Linked);
         }
     }
