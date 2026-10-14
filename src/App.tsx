@@ -49,6 +49,8 @@ import {
   type Scope,
   SORTS,
   type Sort,
+  type UpdateStatus,
+  updatesApi,
 } from "./api";
 import { CalendarView } from "./components/CalendarView";
 import { DeleteDialog } from "./components/DeleteDialog";
@@ -187,6 +189,9 @@ export default function App() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [browse, setBrowse] = useState<Browse | null>(null);
   const [version, setVersion] = useState("");
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  // Each new version is announced once in the status bar; the sidebar keeps it.
+  const announced = useRef<string | null>(null);
   const [scope, setScope] = useState<Scope>({ kind: "all" });
   const [list, setList] = useState<PhotoList>(EMPTY);
   const [viewerId, setViewerId] = useState<number | null>(null);
@@ -622,6 +627,24 @@ export default function App() {
     getVersion().then(setVersion).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    const show = (s: UpdateStatus | null) => {
+      setUpdate(s);
+      if (s?.newer && s.latest && announced.current !== s.latest) {
+        announced.current = s.latest;
+        setMessage({
+          text: `Shoebox ${s.latest} is out (this is ${s.current}).`,
+          action: { label: "Get it", run: () => run(updatesApi.openPage()) },
+        });
+      }
+    };
+    updatesApi.status().then(show).catch(() => {});
+    const un = listen<UpdateStatus>("update-status", (e) => show(e.payload));
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
   // Never the browser's own menu (Back, Refresh, Print…); text boxes keep theirs.
   useEffect(() => {
     const block = (e: MouseEvent) => {
@@ -726,6 +749,8 @@ export default function App() {
         overview={overview}
         browse={browse && sort === "newest" ? newestFirst(browse) : browse}
         version={version}
+        update={update?.newer ? update.latest : null}
+        onUpdate={() => run(updatesApi.openPage())}
         scope={scope}
         scanningRoot={progress?.rootId ?? null}
         onRegenerate={(id) => regenerate(id)}
@@ -1140,6 +1165,7 @@ export default function App() {
           initialTab={settingsTab}
           dataDir={overview?.dataDir ?? ""}
           version={version}
+          update={update}
           onRegenerateAll={() => regenerate(null)}
           onClose={() => setSettingsTab(null)}
         />
