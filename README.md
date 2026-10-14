@@ -72,9 +72,6 @@ Download the latest version from the
 The portable version keeps its catalog and models in its own folder, so it can
 run from anywhere, including an external drive.
 
-> No release has been published yet. Until then, Shoebox can be
-> [built from source](#building-from-source).
-
 The builds are not code-signed yet, so Windows SmartScreen or macOS Gatekeeper
 may show a warning on first launch.
 
