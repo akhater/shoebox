@@ -3,9 +3,9 @@
 //!
 //!   shoebox-cli add <folder>     add a folder and scan it
 //!   shoebox-cli scan [root-id]   rescan one folder, or every plugged-in one
-//!   shoebox-cli retry [disk-id]  read again only the files that couldn't be read, on one
-//!                                plugged-in disk or all of them (the window does it when a disk
-//!                                is plugged in)
+//!   shoebox-cli retry [disk-id]  read again only the files that couldn't be read (or were left
+//!                                half-read by a stopped scan), on one plugged-in disk or all of
+//!                                them (the window does it at start and when a disk is plugged in)
 //!   shoebox-cli stats            catalog overview
 //!   shoebox-cli version          this version and the latest published release (JSON; asks
 //!                                GitHub - a commit on a branch never counts)
@@ -79,6 +79,7 @@ fn main() -> anyhow::Result<()> {
     let data = DataDir::locate();
     data.ensure()?;
     shoebox_lib::setup_logging(&data);
+    shoebox_lib::undo_unfinished_move(&data);
     let cat = Catalog::open(data)?;
     shoebox_lib::tidy_old_catalog(&cat.data);
     scan::heal_saved_previews(&cat)?;
@@ -213,7 +214,14 @@ fn main() -> anyhow::Result<()> {
             if std::env::var_os("SHOEBOX_DATA").is_none() {
                 anyhow::bail!("faces-reset only runs on a test catalog (set SHOEBOX_DATA)");
             }
-            cat.db().execute_batch("DELETE FROM faces; DELETE FROM people; DELETE FROM face_scan;")?;
+            // Faces, people and "looked at" marks go together or not at all. The
+            // fingerprints go after: left behind by a stop, they are only unused.
+            {
+                let db = cat.db();
+                let tx = db.unchecked_transaction()?;
+                tx.execute_batch("DELETE FROM faces; DELETE FROM people; DELETE FROM face_scan;")?;
+                tx.commit()?;
+            }
             rusqlite::Connection::open(cat.data.root.join("faces.db"))?.execute_batch("DELETE FROM emb;")?;
             println!("faces reset");
         }
