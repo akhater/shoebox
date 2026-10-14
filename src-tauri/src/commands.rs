@@ -676,3 +676,32 @@ pub fn show_models_folder() -> Res<()> {
     }
     shell_open(&dir.to_string_lossy(), false)
 }
+
+/// What the last look for a newer Shoebox found; none before the first one.
+#[tauri::command]
+pub fn update_status(state: State<'_, AppState>) -> Option<crate::updates::UpdateStatus> {
+    state.updates.lock().unwrap().clone()
+}
+
+/// Settings > "Check now": asks GitHub at once, even with the regular check off.
+#[tauri::command]
+pub async fn check_updates(app: AppHandle, state: State<'_, AppState>) -> Res<crate::updates::UpdateStatus> {
+    let found = state.updates.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let previous = found.lock().unwrap().clone();
+        let status = crate::updates::check(previous.as_ref());
+        *found.lock().unwrap() = Some(status.clone());
+        status
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let _ = app.emit("update-status", status.clone());
+    Ok(status)
+}
+
+/// Opens the latest release's page in the browser.
+#[tauri::command]
+pub fn open_releases(state: State<'_, AppState>) -> Res<()> {
+    let url = state.updates.lock().unwrap().as_ref().map(|s| s.url.clone());
+    shell_open(url.as_deref().unwrap_or(crate::updates::RELEASES_PAGE), false)
+}

@@ -13,6 +13,7 @@ pub mod scan;
 pub mod search;
 pub mod settings;
 pub mod tags;
+pub mod updates;
 pub mod volumes;
 #[cfg(windows)]
 pub mod wic;
@@ -121,6 +122,8 @@ pub struct AppState {
     /// A folder being moved to another disk (one at a time), and its Stop.
     pub moving: Arc<AtomicBool>,
     pub move_cancel: Arc<AtomicBool>,
+    /// What the last look for a newer Shoebox found.
+    pub updates: Arc<Mutex<Option<updates::UpdateStatus>>>,
 }
 
 /// Wakes the AI worker when there may be new photos to describe.
@@ -429,6 +432,24 @@ fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lens
     }
 }
 
+/// Looks for a newer Shoebox: a published release on GitHub, never a commit on
+/// a branch. First 15 s after start, then every 6 hours (half an hour after a
+/// failure: offline is normal here), while Settings allow it. Wall-clock time,
+/// so a PC woken from sleep catches up within a minute.
+fn update_checker(app: AppHandle, cat: Arc<Catalog>, found: Arc<Mutex<Option<updates::UpdateStatus>>>) {
+    std::thread::sleep(Duration::from_secs(15));
+    loop {
+        let previous = found.lock().unwrap().clone();
+        let due = previous.as_ref().is_none_or(|s| s.due_in(chrono::Utc::now().timestamp()) <= 0);
+        if due && cat.settings().check_updates {
+            let status = updates::check(previous.as_ref());
+            *found.lock().unwrap() = Some(status.clone());
+            let _ = app.emit("update-status", status);
+        }
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
 /// Serves `http://shoebox.localhost/thumb/<id>` and `/preview/<id>` from the data folder.
 /// Serves `http://shoebox.localhost/full/<id>?long=<px>`: the photo read from
 /// its original (disk plugged in) at that long edge, 0 = full size. Nothing
@@ -500,6 +521,7 @@ pub fn run() {
     let ai = Arc::new(AiQueue::default());
     let model_queue = Arc::new(ModelQueue::default());
     let lens_kick = Arc::new(Kick::default());
+    let update_status = Arc::new(Mutex::new(None));
     let protocol_data = data.clone();
     let protocol_cat = cat.clone();
 
@@ -534,6 +556,7 @@ pub fn run() {
             ai: ai.clone(),
             moving: Arc::default(),
             move_cancel: Arc::default(),
+            updates: update_status.clone(),
         })
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -555,6 +578,9 @@ pub fn run() {
             let handle = app.handle().clone();
             let (m, a) = (model_queue.clone(), ai.clone());
             std::thread::Builder::new().name("models".into()).spawn(move || model_worker(handle, m, a))?;
+            let handle = app.handle().clone();
+            let (c, u) = (cat.clone(), update_status.clone());
+            std::thread::Builder::new().name("updates".into()).spawn(move || update_checker(handle, c, u))?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -618,6 +644,9 @@ pub fn run() {
             commands::model_progress,
             commands::model_delete,
             commands::show_models_folder,
+            commands::update_status,
+            commands::check_updates,
+            commands::open_releases,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Shoebox");
