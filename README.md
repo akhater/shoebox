@@ -47,6 +47,8 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   photos you marked), and they go through a dedicated module with its own
   checks: a move to another drive is copied, verified byte for byte, and only
   then is the original removed.
+- **Nothing is left half-done.** A move, rename or delete interrupted by a
+  crash is finished, or rolled back, the next time Shoebox starts.
 - **An unplugged drive never changes the catalog.**
 - **Nothing is removed because it wasn't found.** A file is marked *missing*
   only after a complete scan of its connected drive. It stays in the catalog

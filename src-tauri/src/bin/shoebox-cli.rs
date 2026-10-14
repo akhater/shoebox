@@ -64,6 +64,8 @@
 //!   shoebox-cli new-folder <volume-id> <parent folder> [name]
 //!   shoebox-cli move-folder <volume-id> <folder> <to-volume-id> <into folder>
 //!       same disk: moved at once; another disk: copied, checked byte for byte, original removed
+//!   A move, rename or delete cut short (a kill, a crash) is finished or undone by the next
+//!   start of shoebox-cli or the window, as far as the disks plugged in allow (told on stderr).
 //!
 //! AI models (JSON out; as Settings > AI models):
 //!   shoebox-cli models                    which models Shoebox can use, and which are here
@@ -96,6 +98,12 @@ fn main() -> anyhow::Result<()> {
     let cat = Catalog::open(data)?;
     shoebox_lib::tidy_old_catalog(&cat.data);
     scan::heal_saved_previews(&cat)?;
+    // A folder move, rename or delete cut short (a kill, a crash): finished or
+    // undone first, as the window does at start. Told on stderr.
+    let resumed = organize::resume(&cat)?;
+    if !resumed.is_empty() {
+        eprintln!("changes cut short earlier: {}", serde_json::to_string(&resumed)?);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cancel = AtomicBool::new(false);
     let show = |p: &Progress| {
