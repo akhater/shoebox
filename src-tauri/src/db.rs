@@ -203,6 +203,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         let reader = if has_reader { "" } else { "ALTER TABLE roots ADD COLUMN reader INTEGER;" };
         conn.execute_batch(&format!("BEGIN; {reader} PRAGMA user_version = 11; COMMIT;"))?;
     }
+    if version < 12 {
+        // Photoshop files read before (imaging::PICTURE_READER 2) may show the
+        // white placeholder of one saved without "Maximize compatibility": read again.
+        conn.execute_batch(&format!(
+            "BEGIN;
+             UPDATE photos SET preview_state = {PREVIEW_PENDING} WHERE preview_state = {PREVIEW_OK} AND id IN
+                 (SELECT photo_id FROM files WHERE lower(name) LIKE '%.psd' OR lower(name) LIKE '%.psb');
+             PRAGMA user_version = 12;
+             COMMIT;"
+        ))?;
+    }
     Ok(())
 }
 

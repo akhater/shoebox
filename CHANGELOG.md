@@ -9,8 +9,11 @@ Newest first. Same format and versioning as Argentum.
 - **Photoshop files.** `.psd` and `.psb` files join the catalog: Shoebox
   shows the flattened picture Photoshop saves inside the file (with
   "Maximize compatibility", Photoshop's default) and the original photo's
-  date, camera and lens. A file is recognised by its content, not only its
-  name: a Photoshop document saved as `.raw` is read as one. Each folder is
+  date, camera and lens. Saved without "Maximize compatibility", a document
+  holds only a white placeholder instead of that picture: Shoebox says so
+  ("re-save it with that option on to see it here") rather than show it
+  white. A file is recognised by its content, not only its name: a
+  Photoshop document saved as `.raw` is read as one. Each folder is
   listed once more when its disk is plugged in, so the Photoshop files
   already there join, and photos an older version couldn't read are tried
   again.

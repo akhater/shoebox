@@ -30,7 +30,9 @@ pub const LENS_READER: i64 = 2;
 /// folders listed by an older one are listed again once, for the files it
 /// left out.
 /// 2: Photoshop files (.psd, .psb, or any name).
-pub const PICTURE_READER: i64 = 2;
+/// 3: a Photoshop file saved without "Maximize compatibility" says so, rather
+/// than show the white placeholder in place of its picture.
+pub const PICTURE_READER: i64 = 3;
 
 #[derive(Default, Debug, Clone)]
 pub struct Meta {
