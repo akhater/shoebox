@@ -1145,8 +1145,10 @@ button {
   word-break: break-all;
   color: #c6c8ce;
 }
+/* Wraps: the three buttons are wider than a narrow side panel. */
 .loc-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
 }
