@@ -7,6 +7,11 @@
 //! are stored one after the other, so each is read front to back (an external
 //! disk never seeks back and forth); a huge document is read every few rows
 //! and columns, as the preview needs no more. Only ever opened for reading.
+//!
+//! Saved without "Maximize compatibility", a document holds a white
+//! placeholder instead of its flattened picture: Shoebox says so rather than
+//! show it white (the small picture Photoshop also keeps can't be trusted
+//! there - seen scrambled).
 
 use crate::imaging::{Loaded, Meta};
 use anyhow::{Result, bail};
@@ -41,13 +46,28 @@ pub fn load(path: &Path, long_edge: u32) -> Loaded {
     meta.orientation = 0;
     let long = doc.width.max(doc.height);
     let step = if long_edge == u32::MAX { 1 } else { (long / long_edge.saturating_mul(2).max(1)).max(1) };
-    let image = match catch_unwind(AssertUnwindSafe(|| composite(&mut r, &doc, step))) {
-        Ok(Ok(img)) => Ok(DynamicImage::ImageRgb8(img)),
+    let picture = || -> Result<DynamicImage> {
+        if doc.merged == Some(false) {
+            bail!(NO_PICTURE);
+        }
+        let img = composite(&mut r, &doc, step)?;
+        // No word on it from Photoshop (that note is left out along with the
+        // picture): a layered document all white is the placeholder.
+        if doc.merged.is_none() && doc.layers && img.pixels().all(|p| p.0 == [255; 3]) {
+            bail!(NO_PICTURE);
+        }
+        Ok(DynamicImage::ImageRgb8(img))
+    };
+    let image = match catch_unwind(AssertUnwindSafe(picture)) {
+        Ok(Ok(img)) => Ok(img),
         Ok(Err(e)) => Err(format!("photoshop: {e:#}")),
         Err(_) => Err("photoshop: crashed".into()),
     };
     Loaded { meta, image }
 }
+
+const NO_PICTURE: &str =
+    "saved without \"Maximize compatibility\": re-save it in Photoshop with that option on to see it here";
 
 /// What the file says about the photo (from its EXIF), without its picture.
 pub fn meta(path: &Path) -> Option<Meta> {
@@ -67,8 +87,11 @@ struct Doc {
     /// Indexed colour: 256 reds, then greens, then blues.
     palette: Vec<u8>,
     exif: Option<Vec<u8>>,
-    /// False when saved without "Maximize compatibility": what is there is not the picture.
-    real_composite: bool,
+    /// Photoshop's note on the flattened picture: there (true) or a
+    /// placeholder (false, saved without "Maximize compatibility"). None: no note.
+    merged: Option<bool>,
+    /// It has layers (only ever counted, never composed).
+    layers: bool,
     picture_at: u64,
 }
 
@@ -112,7 +135,8 @@ fn read_doc(r: &mut BufReader<File>) -> Result<Doc> {
         mode: be16(&h[24..26]),
         palette: Vec::new(),
         exif: None,
-        real_composite: true,
+        merged: None,
+        layers: false,
         picture_at: 0,
     };
     if doc.width == 0 || doc.height == 0 {
@@ -148,18 +172,47 @@ fn read_doc(r: &mut BufReader<File>) -> Result<Doc> {
             RES_VERSION if size >= 5 => {
                 let mut d = [0u8; 5];
                 r.read_exact(&mut d)?;
-                doc.real_composite = d[4] != 0;
+                doc.merged = Some(d[4] != 0);
             }
             _ => {}
         }
         r.seek(SeekFrom::Start(at + size + (size & 1)))?;
     }
     r.seek(SeekFrom::Start(end))?;
-    // Layers and masks: never composed.
+    // Layers and masks: never composed, only counted.
     let len = if big { u64_of(r)? } else { u32_of(r)? as u64 };
-    r.seek_relative(len as i64)?;
+    let end = r.stream_position()? + len;
+    doc.layers = len > 0 && layer_count(r, big, end).is_ok_and(|n| n != 0);
+    r.seek(SeekFrom::Start(end))?;
     doc.picture_at = r.stream_position()?;
     Ok(doc)
+}
+
+/// How many layers the layers-and-masks section (ending at `end`) lists. A
+/// 16- or 32-bit document lists them in a tagged block of its own, after an
+/// empty list and the global mask.
+fn layer_count(r: &mut BufReader<File>, big: bool, end: u64) -> Result<u16> {
+    let len = if big { u64_of(r)? } else { u32_of(r)? as u64 };
+    if len >= 2 {
+        // Negative when the first alpha channel is the merged transparency.
+        return Ok((u16_of(r)? as i16).unsigned_abs());
+    }
+    r.seek_relative(len as i64)?;
+    let mask = u32_of(r)?;
+    r.seek_relative(mask as i64)?;
+    while r.stream_position()? + 12 <= end {
+        let mut tag = [0u8; 8];
+        r.read_exact(&mut tag)?;
+        let key = &tag[4..8];
+        // In a large document these blocks give their length on 8 bytes.
+        let wide = big && matches!(key, b"Lr16" | b"Lr32" | b"Layr" | b"Mt16" | b"Mt32" | b"Mtrn" | b"Alph" | b"FMsk");
+        let size = if wide { u64_of(r)? } else { u32_of(r)? as u64 };
+        if matches!(key, b"Lr16" | b"Lr32" | b"Layr") {
+            return Ok(if size >= 2 { (u16_of(r)? as i16).unsigned_abs() } else { 0 });
+        }
+        r.seek_relative(size as i64)?;
+    }
+    Ok(0)
 }
 
 /// The flattened picture, every `step`th row and column.
@@ -180,9 +233,6 @@ fn composite(r: &mut BufReader<File>, d: &Doc, step: u32) -> Result<RgbImage> {
     }
     if d.mode == MODE_INDEXED && d.palette.len() < 768 {
         bail!("indexed colour without its palette");
-    }
-    if !d.real_composite {
-        bail!("saved without \"Maximize compatibility\": no flattened picture inside");
     }
     r.seek(SeekFrom::Start(d.picture_at))?;
     let compression = u16_of(r)?;
