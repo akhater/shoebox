@@ -196,14 +196,27 @@ export function PeopleView({ people, found, query, newOnly, onNewOnly, onOpen, o
   const group = (g: Group, title: string, list: Person[], empty: string) => {
     if (narrowed && !list.length) return null;
     const open = !!rank || !folded.includes(g);
+    const news = list.filter(isFresh);
     return (
       <section className="people-group">
-        <button className="people-group-head" onClick={() => fold(g)} disabled={!!rank} aria-expanded={open}>
-          <ChevronRight size={14} className={`chev ${open ? "open" : ""}`} />
-          <span>{title}</span>
-          <span className="count">{fmtNum(list.length)}</span>
-          {fresh(list) > 0 && <span className="new-count">· {fmtNum(fresh(list))} new</span>}
-        </button>
+        <div className="people-group-head">
+          <button className="people-group-fold" onClick={() => fold(g)} disabled={!!rank} aria-expanded={open}>
+            <ChevronRight size={14} className={`chev ${open ? "open" : ""}`} />
+            <span>{title}</span>
+            <span className="count">{fmtNum(list.length)}</span>
+            {news.length > 0 && <span className="new-count">· {fmtNum(news.length)} new</span>}
+          </button>
+          {news.length > 0 && (
+            // The people shown here only: the rest of People stays new.
+            <button
+              className="btn small ghost"
+              title={`Clear the New and +N of the ${fmtNum(news.length)} new people shown here, without opening each`}
+              onClick={() => act(() => peopleApi.read(news.map((p) => p.id)).then(() => {}))}
+            >
+              <CheckCheck size={14} /> Mark as read
+            </button>
+          )}
+        </div>
         {open &&
           (list.length ? <div className="people-grid">{list.map(card)}</div> : <p className="muted small people-empty">{empty}</p>)}
       </section>

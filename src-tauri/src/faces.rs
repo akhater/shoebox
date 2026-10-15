@@ -346,6 +346,42 @@ impl Person {
     pub fn has_news(&self) -> bool {
         self.is_new || self.new_photos > 0
     }
+
+    /// The group People shows them in.
+    pub fn group(&self) -> PeopleGroup {
+        if self.ignored {
+            PeopleGroup::Ignored
+        } else if self.name.is_some() {
+            PeopleGroup::Named
+        } else if self.photos < 2 {
+            PeopleGroup::Once
+        } else {
+            PeopleGroup::ToName
+        }
+    }
+}
+
+/// People's groups: named, still to name, seen in one photo only (hidden
+/// unless asked, then shown with the people to name), ignored strangers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeopleGroup {
+    Named,
+    ToName,
+    Once,
+    Ignored,
+}
+
+impl PeopleGroup {
+    /// As the CLI spells it: named, to-name, once, ignored.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "named" => Self::Named,
+            "to-name" => Self::ToName,
+            "once" => Self::Once,
+            "ignored" => Self::Ignored,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -761,6 +797,14 @@ impl FaceIndex {
         }
         tx.commit()?;
         Ok(n)
+    }
+
+    /// "Mark as read" on one of People's groups: its people are no longer new.
+    /// Returns how many faces that was.
+    pub fn mark_group_read(&self, cat: &Catalog, group: PeopleGroup) -> Result<usize> {
+        let ids: Vec<i64> =
+            self.people(cat)?.into_iter().filter(|p| p.group() == group && p.has_news()).map(|p| p.id).collect();
+        self.mark_read(cat, &ids)
     }
 
     /// "Mark all as read" in People: every face found so far has been seen.
