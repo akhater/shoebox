@@ -9,6 +9,7 @@ pub mod imaging;
 pub mod models;
 pub mod organize;
 pub mod paths;
+pub mod psd;
 pub mod repair;
 pub mod scan;
 pub mod search;
@@ -431,6 +432,10 @@ fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lens
         for &v in now.difference(&online) {
             if scan::failed_count(&cat, v).is_ok_and(|n| n > 0) {
                 scans.retry(v);
+            }
+            // Listed by a Shoebox that read fewer formats: once more.
+            for root in scan::roots_to_list_again(&cat, v).unwrap_or_default() {
+                scans.push(root, false);
             }
         }
         online = now;

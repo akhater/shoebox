@@ -203,7 +203,10 @@ pub fn scan_root(
     read_all(cat, &jobs, cancel, &mut progress, on_progress, &mut report)?;
 
     if !report.cancelled {
-        cat.db().execute("UPDATE roots SET last_scan = ?1 WHERE id = ?2", params![db::now(), root_id])?;
+        cat.db().execute(
+            "UPDATE roots SET last_scan = ?1, reader = ?2 WHERE id = ?3",
+            params![db::now(), imaging::PICTURE_READER, root_id],
+        )?;
     }
     report.seconds = started.elapsed().as_secs_f64();
     progress.phase = "done".into();
@@ -224,6 +227,19 @@ const FAILED_FILES: &str = "SELECT f.id, f.photo_id, fo.rel_path, f.name, f.size
     WHERE fo.volume_id = ?1 AND f.state = ?2
       AND (p.preview_state = ?4 OR (p.preview_state = ?3 AND COALESCE(p.given_up, 0) < ?5)
            OR (f.photo_id IS NULL AND f.error IS NOT NULL))";
+
+/// Folders on this plugged-in disk last listed by a Shoebox that read fewer
+/// formats ([`imaging::PICTURE_READER`]): scanned once more, so the files it
+/// left out (Photoshop files...) join. Only those still there.
+pub fn roots_to_list_again(cat: &Catalog, volume_id: i64) -> Result<Vec<i64>> {
+    let Some(mount) = cat.mount_of(volume_id) else { return Ok(Vec::new()) };
+    let roots: Vec<(i64, String)> = cat
+        .db()
+        .prepare("SELECT id, rel_path FROM roots WHERE volume_id = ?1 AND COALESCE(reader, 0) < ?2")?
+        .query_map(params![volume_id, imaging::PICTURE_READER], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(roots.into_iter().filter(|(_, rel)| Path::new(&volumes::join(&mount, rel)).is_dir()).map(|(id, _)| id).collect())
+}
 
 /// How many files on this disk are waiting to be read again.
 pub fn failed_count(cat: &Catalog, volume_id: i64) -> Result<u64> {

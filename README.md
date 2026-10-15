@@ -18,7 +18,9 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   two copies, not duplicates. Adding the backup drive builds no new previews,
   and each photo opens from whichever of its drives is connected.
 - **Reads what your cameras write.** RAW files from most cameras (CR2, CR3,
-  NEF, ARW, RAF, ORF, DNG and more), plus JPEG, HEIC, TIFF, PNG, WebP and AVIF.
+  NEF, ARW, RAF, ORF, DNG and more), plus JPEG, HEIC, TIFF, PNG, WebP, AVIF
+  and Photoshop documents (PSD, PSB). A Photoshop file is recognised by its
+  content, even saved under another name.
 - **Search by description.** Type "kids on a beach" and find the matching
   photos. It runs on your own GPU, from the previews, so it works on unplugged
   drives too.
