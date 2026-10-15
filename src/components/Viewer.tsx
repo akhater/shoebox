@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, ExternalLink, FolderInput, FolderOpen, ImageOff, Trash2, Undo2, UserX, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import {
   api,
   faceUrl,
@@ -62,11 +62,14 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
   const [faces, setFaces] = useState<PhotoFace[]>([]);
   // The face being said who it is ("Who is this?").
   const [who, setWho] = useState<PhotoFace | null>(null);
+  // The face whose name is pointed at in People: boxed on the photo.
+  const [spot, setSpot] = useState<number | null>(null);
   // Plugged in: a sharp picture from the original, sized to the screen, swaps in
   // over the preview; a click zooms to 100% from the full-size original.
   const reachable = list.state[index] === 2;
   const stage = useRef<HTMLDivElement>(null);
   const [previewLong, setPreviewLong] = useState(0);
+  const [previewSize, setPreviewSize] = useState<{ w: number; h: number } | null>(null);
   const [sharp, setSharp] = useState<string | null>(null);
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const [full, setFull] = useState<string | null>(null);
@@ -77,6 +80,8 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
     setZoom(null);
     setFull(null);
     setPreviewLong(0);
+    setPreviewSize(null);
+    setSpot(null);
   }, [id]);
 
   // Once the preview shows, fetch the sharp one if the screen deserves more.
@@ -189,6 +194,7 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
   });
 
   const act = (p: Promise<void>) => p.catch((e) => setError(String(e)));
+  const spotted = faces.find((f) => f.id === spot) ?? null;
   const d = detail?.id === id ? detail : null;
   const exposure = d
     ? [
@@ -209,6 +215,7 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
             fullLong={d ? Math.max(d.width ?? 0, d.height ?? 0) : 0}
             zoom={zoom}
             sharp={!!full}
+            spot={spotted}
             onExit={() => setZoom(null)}
           />
         ) : list.preview[index] === 1 ? (
@@ -219,13 +226,16 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
               src={previewUrl(id, rev)}
               alt=""
               onLoad={(e) => {
+                const { naturalWidth: w, naturalHeight: h } = e.currentTarget;
                 setLoaded(true);
-                setPreviewLong(Math.max(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight));
+                setPreviewLong(Math.max(w, h));
+                setPreviewSize({ w, h });
               }}
               onClick={onPhotoClick}
               title={reachable ? "Click to zoom to 100% (Z)" : undefined}
             />
             {sharp && <img className="viewer-img sharp" src={sharp} alt="" onClick={onPhotoClick} title="Click to zoom to 100% (Z)" />}
+            {spotted && previewSize && <FittedSpot stage={stage} size={previewSize} face={spotted} />}
           </>
         ) : (
           <div className="viewer-empty">
@@ -331,7 +341,14 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
                 <h3>People</h3>
                 <div className="faces-row">
                   {faces.map((f) => (
-                    <span key={f.id} className="face-chip">
+                    <span
+                      key={f.id}
+                      className={`face-chip ${spot === f.id ? "spotted" : ""}`}
+                      onMouseEnter={() => setSpot(f.id)}
+                      onMouseLeave={() => setSpot(null)}
+                      onFocus={() => setSpot(f.id)}
+                      onBlur={() => setSpot(null)}
+                    >
                       <img src={faceUrl(f.id)} alt="" />
                       {f.personId != null ? (
                         <button
@@ -430,6 +447,7 @@ function ZoomedPhoto({
   fullLong,
   zoom,
   sharp,
+  spot,
   onExit,
 }: {
   src: string;
@@ -438,9 +456,12 @@ function ZoomedPhoto({
   zoom: Zoom;
   /** The full-size original has arrived (until then a smaller picture is stretched). */
   sharp: boolean;
+  /** The face to box (its name is pointed at). */
+  spot: PhotoFace | null;
   onExit: () => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
+  const spotEl = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
   const drag = useRef<{ x: number; y: number; left: number; top: number; moved: boolean } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -462,6 +483,11 @@ function ZoomedPhoto({
     el.scrollLeft = zoom.fx * size.w - el.clientWidth / 2;
     el.scrollTop = zoom.fy * size.h - el.clientHeight / 2;
   }, [size, zoom]);
+
+  // A face out of sight at 100% is scrolled to.
+  useEffect(() => {
+    spotEl.current?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+  }, [spot?.id, size]);
 
   useEffect(() => {
     if (!dragging) return;
@@ -500,18 +526,59 @@ function ZoomedPhoto({
       }}
     >
       <div className="viewer-zoom-canvas">
-        <img
-          src={src}
-          alt=""
-          draggable={false}
-          className={sharp ? "" : "soft"}
-          ref={(el) => {
-            if (el?.complete && el.naturalWidth) onLoad(el);
-          }}
-          onLoad={(e) => onLoad(e.currentTarget)}
-          style={size ? { width: size.w, height: size.h } : { visibility: "hidden" }}
-        />
+        <div className="viewer-zoom-photo">
+          <img
+            src={src}
+            alt=""
+            draggable={false}
+            className={sharp ? "" : "soft"}
+            ref={(el) => {
+              if (el?.complete && el.naturalWidth) onLoad(el);
+            }}
+            onLoad={(e) => onLoad(e.currentTarget)}
+            style={size ? { width: size.w, height: size.h } : { visibility: "hidden" }}
+          />
+          {spot && size && <FaceSpot face={spot} ref={spotEl} />}
+        </div>
       </div>
+    </div>
+  );
+}
+
+/** Where the fitted photo is drawn in the stage (as .viewer-img: contained in the
+ *  stage less 24 px each side), so a face's box lands on the face. */
+function FittedSpot({ stage, size, face }: { stage: RefObject<HTMLDivElement | null>; size: { w: number; h: number }; face: PhotoFace }) {
+  const [room, setRoom] = useState<{ w: number; h: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = stage.current;
+    if (!el) return;
+    const measure = () => setRoom({ w: el.clientWidth, h: el.clientHeight });
+    measure();
+    const watch = new ResizeObserver(measure);
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, [stage]);
+  if (!room) return null;
+  const s = Math.min((room.w - 48) / size.w, (room.h - 48) / size.h);
+  const [w, h] = [size.w * s, size.h * s];
+  return (
+    <div className="face-spot-frame" style={{ left: (room.w - w) / 2, top: (room.h - h) / 2, width: w, height: h }}>
+      <FaceSpot face={face} />
+    </div>
+  );
+}
+
+/** A box around one face, the rest of the photo dimmed, with the name under it.
+ *  Placed in a box the size of the photo. */
+function FaceSpot({ face, ref }: { face: PhotoFace; ref?: RefObject<HTMLDivElement | null> }) {
+  const [x1, y1, x2, y2] = face.bbox;
+  return (
+    <div
+      className="face-spot"
+      ref={ref}
+      style={{ left: `${x1 * 100}%`, top: `${y1 * 100}%`, width: `${(x2 - x1) * 100}%`, height: `${(y2 - y1) * 100}%` }}
+    >
+      {face.name && <span>{face.name}</span>}
     </div>
   );
 }
