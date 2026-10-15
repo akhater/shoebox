@@ -7,7 +7,7 @@
 #![cfg(windows)]
 
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
-use shoebox_lib::faces::FaceIndex;
+use shoebox_lib::faces::{FaceIndex, PeopleGroup};
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::scan_root;
 use std::sync::atomic::AtomicBool;
@@ -77,6 +77,27 @@ fn people_are_new_until_their_page_is_seen() {
     assert_eq!(badge(&faces, &cat, 2), (true, 1));
     assert_eq!(faces.mark_all_read(&cat).unwrap(), 1);
     assert_eq!(badge(&faces, &cat, 2), (false, 0));
+
+    // "Mark as read" on one group leaves the others new: Cleo (named), someone
+    // to name (two photos), someone seen once.
+    cat.db()
+        .execute("INSERT INTO people (id, name, created_at) VALUES (3, 'Cleo', 0), (4, NULL, 0), (5, NULL, 0)", [])
+        .unwrap();
+    for (photo, person) in [(a, 3), (a, 4), (b, 4), (b, 5)] {
+        face(&cat, photo, person);
+    }
+    let group = |person| faces.people(&cat).unwrap().into_iter().find(|p| p.id == person).unwrap().group();
+    assert_eq!([group(3), group(4), group(5)], [PeopleGroup::Named, PeopleGroup::ToName, PeopleGroup::Once]);
+    assert_eq!(faces.mark_group_read(&cat, PeopleGroup::ToName).unwrap(), 2);
+    assert_eq!(badge(&faces, &cat, 4), (false, 0));
+    assert_eq!(badge(&faces, &cat, 3), (true, 1));
+    assert_eq!(badge(&faces, &cat, 5), (true, 1));
+    assert_eq!(faces.mark_group_read(&cat, PeopleGroup::Named).unwrap(), 1);
+    assert_eq!(badge(&faces, &cat, 3), (false, 0));
+    assert_eq!(badge(&faces, &cat, 5), (true, 1));
+    assert_eq!(faces.mark_all_read(&cat).unwrap(), 1);
+    // Back to Ana and Bob for the upgrade below.
+    cat.db().execute_batch("DELETE FROM faces WHERE person_id > 2; DELETE FROM people WHERE id > 2;").unwrap();
 
     // A catalog from before this: badges came from "faces after the last visit".
     // Faces after that point stay new, the rest are seen.

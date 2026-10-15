@@ -47,7 +47,8 @@
 //!
 //! People found since the user last looked at them show "(new)" / "(+N new photos)" in
 //! `shoebox-cli faces`; the window marks a person read when the user leaves their page:
-//!   shoebox-cli people-read <person-id>... | --all
+//!   shoebox-cli people-read <person-id>... | --all | --group named|to-name|once|ignored
+//!       (--group: the people of one People group, "once" = seen in one photo only)
 //!
 //! Tags (catalog only, never written into photos):
 //!   shoebox-cli tags [photo-id...]              every tag, or those on some photos
@@ -227,10 +228,16 @@ fn main() -> anyhow::Result<()> {
             let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
             let n = if args.get(1).is_some_and(|a| a == "--all") {
                 faces.mark_all_read(&cat)?
+            } else if args.get(1).is_some_and(|a| a == "--group") {
+                let group = args
+                    .get(2)
+                    .and_then(|g| shoebox_lib::faces::PeopleGroup::parse(g))
+                    .ok_or_else(|| anyhow::anyhow!("people-read --group named|to-name|once|ignored"))?;
+                faces.mark_group_read(&cat, group)?
             } else {
                 let ids = args[1..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
                 if ids.is_empty() {
-                    anyhow::bail!("people-read <person-id>... | --all");
+                    anyhow::bail!("people-read <person-id>... | --all | --group named|to-name|once|ignored");
                 }
                 faces.mark_read(&cat, &ids)?
             };
