@@ -940,6 +940,43 @@ button {
 .viewer-zoom img.soft {
   filter: blur(1.5px);
 }
+.viewer-zoom-photo {
+  position: relative;
+}
+/* The face whose name is pointed at in People: boxed, the rest of the photo
+   dimmed. The frame is where the fitted photo is drawn. */
+.face-spot-frame {
+  position: absolute;
+  pointer-events: none;
+}
+.face-spot {
+  position: absolute;
+  box-sizing: content-box;
+  margin: -6px;
+  padding: 4px;
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  animation: face-spot-in 0.15s ease-out;
+}
+.face-spot span {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 9px;
+  border-radius: 10px;
+  background: rgba(10, 10, 12, 0.82);
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+@keyframes face-spot-in {
+  from {
+    opacity: 0;
+  }
+}
 .viewer-badge,
 .viewer-hint {
   position: absolute;
@@ -1417,6 +1454,9 @@ button {
   border-radius: 20px;
   background: var(--raised);
   font-size: 12px;
+}
+.face-chip.spotted {
+  border-color: var(--accent);
 }
 .face-chip img {
   width: 26px;

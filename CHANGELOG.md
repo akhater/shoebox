@@ -6,6 +6,10 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **Point at a name to see the face.** In the viewer's People list, pointing
+  at someone draws a box around their face on the photo and dims the rest.
+  At 100% zoom the photo scrolls to the face if it is out of sight.
+  `shoebox-cli photo-faces` already gives each face's `bbox`.
 - **Go to folder.** Each copy of a photo in the viewer's Location has a
   "Go to folder" button: it shows that folder in the grid with the photo
   selected, and opens the sidebar tree down to it. It works with the disk
