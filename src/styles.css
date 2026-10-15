@@ -1145,8 +1145,11 @@ button {
   word-break: break-all;
   color: #c6c8ce;
 }
+/* Short labels keep the three buttons on one row of the 320 px panel; wraps
+   rather than running off it if a font makes them wider. */
 .loc-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
 }

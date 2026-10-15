@@ -23,7 +23,7 @@ Newest first. Same format and versioning as Argentum.
   At 100% zoom the photo scrolls to the face if it is out of sight.
   `shoebox-cli photo-faces` already gives each face's `bbox`.
 - **Go to folder.** Each copy of a photo in the viewer's Location has a
-  "Go to folder" button: it shows that folder in the grid with the photo
+  "Folder" button: it shows that folder in the grid with the photo
   selected, and opens the sidebar tree down to it. It works with the disk
   unplugged, and Back (Esc) returns to the photo. `shoebox-cli photo` gives
   each copy's `folder`, to list it with `shoebox-cli list`.
