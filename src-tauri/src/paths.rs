@@ -8,7 +8,7 @@
 //! all.
 
 use serde::{Deserialize, Serialize};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -729,15 +729,21 @@ pub fn inside(path: &Path, root: &Path) -> bool {
 }
 
 /// Each write gets its own temporary file: two writers of the same file must
-/// never share one (one rename would take the other's file away).
+/// never share one (one rename would take the other's file away). The file is
+/// on the disk before it takes its place: otherwise a PC that stops right
+/// after (a crash, a power cut) can leave it at its full size but all zeros,
+/// while the catalog already counts on it.
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension(format!("{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(bytes)?;
+        f.sync_all()
+    });
+    written.and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }

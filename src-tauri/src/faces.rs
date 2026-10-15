@@ -1244,6 +1244,46 @@ fn people_in(tx: &rusqlite::Transaction, photo: i64, except_face: i64) -> Result
         .collect::<rusqlite::Result<_>>()?)
 }
 
+/// Cuts these faces' pictures again from their photo's preview, framed as when
+/// they were found (a picture lost, or left damaged by a PC that stopped while
+/// saving it). Returns the faces cut; one whose preview can't be read is left.
+pub fn cut_pictures_again(cat: &Catalog, face_ids: &[i64]) -> Result<Vec<i64>> {
+    let mut by_photo: HashMap<i64, Vec<(i64, [f64; 4])>> = HashMap::new();
+    for &fid in face_ids {
+        let face = cat
+            .db()
+            .query_row("SELECT photo_id, x1, y1, x2, y2 FROM faces WHERE id = ?1", [fid], |r| {
+                Ok((r.get::<_, i64>(0)?, [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?]))
+            })
+            .optional()?;
+        if let Some((photo, b)) = face {
+            by_photo.entry(photo).or_default().push((fid, b));
+        }
+    }
+    let mut cut = Vec::new();
+    for (photo, faces) in by_photo {
+        let img = match image::open(cat.data.preview_path(photo)) {
+            Ok(img) => img,
+            Err(e) => {
+                log::warn!("faces: photo {photo}: preview unreadable, face pictures not cut: {e}");
+                continue;
+            }
+        };
+        let (w, h) = (img.width() as f64, img.height() as f64);
+        for (fid, b) in faces {
+            let bbox = [(b[0] * w) as f32, (b[1] * h) as f32, (b[2] * w) as f32, (b[3] * h) as f32];
+            match face_thumb(&img, &bbox) {
+                Ok(bytes) => {
+                    cat.data.write(&cat.data.face_path(fid), &bytes)?;
+                    cut.push(fid);
+                }
+                Err(e) => log::warn!("faces: face {fid}: picture can't be cut: {e:#}"),
+            }
+        }
+    }
+    Ok(cut)
+}
+
 /// A square 160 px picture of the face, with some margin.
 fn face_thumb(img: &DynamicImage, bbox: &[f32; 4]) -> Result<Vec<u8>> {
     let (w, h) = img.dimensions();
