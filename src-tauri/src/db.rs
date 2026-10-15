@@ -196,6 +196,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         let given_up = if has_given_up { "" } else { "ALTER TABLE photos ADD COLUMN given_up INTEGER;" };
         conn.execute_batch(&format!("BEGIN; {given_up} PRAGMA user_version = 10; COMMIT;"))?;
     }
+    if version < 11 {
+        // Which version of what Shoebox can read (imaging::PICTURE_READER)
+        // last listed each folder: an older one left out formats it didn't know.
+        let has_reader = conn.prepare("SELECT 1 FROM pragma_table_info('roots') WHERE name = 'reader'")?.exists([])?;
+        let reader = if has_reader { "" } else { "ALTER TABLE roots ADD COLUMN reader INTEGER;" };
+        conn.execute_batch(&format!("BEGIN; {reader} PRAGMA user_version = 11; COMMIT;"))?;
+    }
     Ok(())
 }
 

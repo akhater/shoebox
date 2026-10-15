@@ -22,9 +22,11 @@ const RAW_EXT: &[&str] = &[
     "qtk", "raf", "raw", "rwl", "rw2", "rwz", "sr2", "srf", "srw", "sti", "x3f",
 ];
 
-/// `hif` is Canon's HEIF extension.
-const IMAGE_EXT: &[&str] =
-    &["jpg", "jpeg", "jpe", "jfif", "png", "tif", "tiff", "heic", "heif", "hif", "avif", "webp", "bmp", "gif", "jxl"];
+/// `hif` is Canon's HEIF extension; `psb` is Photoshop's large document.
+const IMAGE_EXT: &[&str] = &[
+    "jpg", "jpeg", "jpe", "jfif", "png", "tif", "tiff", "heic", "heif", "hif", "avif", "webp", "bmp", "gif", "jxl",
+    "psd", "psb",
+];
 
 pub fn kind_of(name: &str) -> Option<Kind> {
     let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();

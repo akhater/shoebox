@@ -78,18 +78,18 @@ fn failed_photos_fix_themselves() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A file no reader knows (a Photoshop file named .raw) is retried at one
-/// plug-in, then left alone: every plug-in after changes nothing. A scan of
-/// its folder tries it again.
+/// A file no reader knows (not a picture at all, named .raw) is retried at
+/// one plug-in, then left alone: every plug-in after changes nothing. A scan
+/// of its folder tries it again.
 #[test]
 fn a_file_no_reader_knows_is_given_up() {
     let base = std::env::temp_dir().join("shoebox-given-up");
     let _ = std::fs::remove_dir_all(&base);
     let photos = base.join("photos");
     std::fs::create_dir_all(&photos).unwrap();
-    let mut psd = b"8BPS\x00\x01\x00\x00\x00\x00\x00\x00\x00\x03".to_vec();
-    psd.resize(8192, 0);
-    std::fs::write(photos.join("IMG_9.raw"), psd).unwrap();
+    let mut junk = b"NOT A PICTURE".to_vec();
+    junk.resize(8192, 7);
+    std::fs::write(photos.join("IMG_9.raw"), junk).unwrap();
     let data = DataDir { root: base.join("catalog") };
     data.ensure().unwrap();
     let cat = Catalog::open(data).unwrap();

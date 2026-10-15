@@ -3,6 +3,7 @@
 //! RAW: rawler's embedded full-size JPEG first (fast, reads a few MB), then the
 //! Windows codecs, then a full RAW develop as the last resort.
 //! Everything else: Windows codecs first, the `image` crate as fallback.
+//! A Photoshop file, whatever its name, is read by [`crate::psd`].
 //! Shoebox only ever opens photos for reading.
 
 use crate::formats::Kind;
@@ -25,8 +26,11 @@ pub const LENS_READER: i64 = 2;
 
 /// Version of what Shoebox can read (formats, readers). A photo it gave up on,
 /// still unreadable when retried at a plug-in, is retried by itself again
-/// only by a newer version: raise it when Shoebox learns to read more.
-pub const PICTURE_READER: i64 = 1;
+/// only by a newer version: raise it when Shoebox learns to read more. The
+/// folders listed by an older one are listed again once, for the files it
+/// left out.
+/// 2: Photoshop files (.psd, .psb, or any name).
+pub const PICTURE_READER: i64 = 2;
 
 #[derive(Default, Debug, Clone)]
 pub struct Meta {
@@ -66,9 +70,14 @@ pub struct Loaded {
 }
 
 pub fn load(path: &Path, kind: Kind, long_edge: u32) -> Loaded {
-    let mut loaded = match kind {
-        Kind::Raw => load_raw(path, long_edge),
-        Kind::Image => load_image(path, long_edge),
+    // A Photoshop file is told by its content, whatever its name says.
+    let mut loaded = if crate::psd::is_psd(path) {
+        crate::psd::load(path, long_edge)
+    } else {
+        match kind {
+            Kind::Raw => load_raw(path, long_edge),
+            Kind::Image => load_image(path, long_edge),
+        }
     };
     loaded.meta.lens = loaded.meta.lens.as_deref().and_then(crate::gear::file_name);
     loaded
@@ -78,6 +87,9 @@ pub fn load(path: &Path, kind: Kind, long_edge: u32) -> Loaded {
 /// picture: a few KB of the file, through a memory map. rawler's lens table
 /// (which sets up a whole decoder) only when the file names no lens.
 pub fn read_lens(path: &Path, kind: Kind) -> Option<String> {
+    if crate::psd::is_psd(path) {
+        return crate::psd::meta(path)?.lens.as_deref().and_then(crate::gear::file_name);
+    }
     let lens = match kind {
         Kind::Raw => catch_unwind(AssertUnwindSafe(|| {
             let src = RawSource::new(path).ok()?;
@@ -605,9 +617,14 @@ fn load_image(path: &Path, long_edge: u32) -> Loaded {
 
 /// EXIF via kamadak-exif: JPEG, TIFF-based RAW, HEIF, PNG, WebP.
 fn exif_meta(path: &Path) -> Option<Meta> {
-    use exif::{In, Tag, Value};
     let mut reader = BufReader::new(File::open(path).ok()?);
     let ex = exif::Reader::new().read_from_container(&mut reader).ok()?;
+    Some(meta_of(&ex))
+}
+
+/// What EXIF says about the photo (also the EXIF a Photoshop file carries).
+pub(crate) fn meta_of(ex: &exif::Exif) -> Meta {
+    use exif::{In, Tag, Value};
     let field = |t: Tag| ex.get_field(t, In::PRIMARY);
     let ascii = |t: Tag| -> Option<String> {
         match &field(t)?.value {
@@ -623,7 +640,7 @@ fn exif_meta(path: &Path) -> Option<Meta> {
     };
     let uint = |t: Tag| field(t).and_then(|f| f.value.get_uint(0));
 
-    Some(Meta {
+    Meta {
         taken: ascii(Tag::DateTimeOriginal)
             .or_else(|| ascii(Tag::DateTimeDigitized))
             .or_else(|| ascii(Tag::DateTime))
@@ -632,7 +649,7 @@ fn exif_meta(path: &Path) -> Option<Meta> {
         subsec: ascii(Tag::SubSecTimeOriginal),
         make: ascii(Tag::Make),
         model: ascii(Tag::Model),
-        lens: ascii(Tag::LensModel).or_else(|| exif_lens(&ex)),
+        lens: ascii(Tag::LensModel).or_else(|| exif_lens(ex)),
         serial: ascii(Tag::BodySerialNumber),
         image_number: None,
         iso: uint(Tag::PhotographicSensitivity).filter(|&v| v > 0),
@@ -642,7 +659,7 @@ fn exif_meta(path: &Path) -> Option<Meta> {
         orientation: uint(Tag::Orientation).unwrap_or(0) as u16,
         width: uint(Tag::PixelXDimension),
         height: uint(Tag::PixelYDimension),
-    })
+    }
 }
 
 fn parse_exif_date(s: &str) -> Option<NaiveDateTime> {

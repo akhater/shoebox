@@ -6,6 +6,15 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **Photoshop files.** `.psd` and `.psb` files join the catalog: Shoebox
+  shows the flattened picture Photoshop saves inside the file (with
+  "Maximize compatibility", Photoshop's default) and the original photo's
+  date, camera and lens. A file is recognised by its content, not only its
+  name: a Photoshop document saved as `.raw` is read as one. Each folder is
+  listed once more when its disk is plugged in, so the Photoshop files
+  already there join, and photos an older version couldn't read are tried
+  again.
+
 - **Point at a name to see the face.** In the viewer's People list, pointing
   at someone draws a box around their face on the photo and dims the rest.
   At 100% zoom the photo scrolls to the face if it is out of sight.
