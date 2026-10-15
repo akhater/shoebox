@@ -420,7 +420,7 @@ impl Catalog {
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
               ORDER BY {order}",
             state_cte(&self.online_sql()),
-            filters_sql()
+            filters_sql(filters)
         );
         let db = self.db();
         let mut out = PhotoList::default();
@@ -454,7 +454,7 @@ impl Catalog {
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
               GROUP BY d ORDER BY d",
             state_cte(&self.online_sql()),
-            filters_sql()
+            filters_sql(filters)
         );
         let db = self.db();
         let mut stmt = db.prepare(&sql)?;
@@ -472,7 +472,8 @@ impl Catalog {
 
     /// What each filter can offer in a scope, with counts. Each filter is
     /// counted with every *other* filter applied, so ticking a second camera
-    /// stays possible after ticking the first.
+    /// stays possible after ticking the first. People or tags asking for all
+    /// of them count with their own ticks too: only who is with them is left.
     pub fn facets(&self, scope: &Scope, filters: &Filters) -> Result<Facets> {
         let (filter, p1, p2) = self.scope_sql(scope)?;
         let cte = state_cte(&self.online_sql());
@@ -481,7 +482,7 @@ impl Catalog {
             let sql = format!(
                 "WITH st AS ({cte}) SELECT {value} AS v, COUNT(DISTINCT p.id) FROM {from} LEFT JOIN st ON st.pid = p.id
                   WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {} GROUP BY v ORDER BY {order}",
-                filters_sql()
+                filters_sql(filters)
             );
             let [d, c, l, t, s, pe, tg] = filters.params(Some(own));
             let rows = db
@@ -500,7 +501,7 @@ impl Catalog {
                   WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {} AND pe.ignored = 0
                     AND (pe.name IS NOT NULL OR (SELECT COUNT(DISTINCT f3.photo_id) FROM faces f3 WHERE f3.person_id = pe.id) >= 2)
                   GROUP BY pe.id ORDER BY pe.name IS NULL, COUNT(DISTINCT p.id) DESC, pe.name",
-                filters_sql()
+                filters_sql(filters)
             );
             let [d, c, l, t, s, pe, tg] = filters.params(Some(Facet::People));
             db.prepare(&sql)?
@@ -509,7 +510,7 @@ impl Catalog {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        // Tags narrow ("all of them"), so their counts include the tags already ticked.
+        // With "all of them", counts include the tags already ticked; with "any", they don't.
         let tags = {
             let sql = format!(
                 "WITH st AS ({cte}) SELECT tg.id, tg.name, COUNT(DISTINCT p.id)
@@ -517,9 +518,9 @@ impl Catalog {
                    LEFT JOIN st ON st.pid = p.id
                   WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
                   GROUP BY tg.id ORDER BY COUNT(DISTINCT p.id) DESC, tg.name COLLATE NOCASE",
-                filters_sql()
+                filters_sql(filters)
             );
-            let [d, c, l, t, s, pe, tg] = filters.params(None);
+            let [d, c, l, t, s, pe, tg] = filters.params(Some(Facet::Tags));
             db.prepare(&sql)?
                 .query_map(params![p1, p2, d, c, l, t, s, pe, tg], |r| {
                     Ok(crate::tags::Tag { id: r.get(0)?, name: r.get(1)?, count: r.get(2)? })
@@ -1114,9 +1115,10 @@ pub enum Scope {
     Marked,
 }
 
-/// Narrows any view. Within a filter any ticked value matches; across
-/// filters all must. Empty = no filter.
-#[derive(Serialize, serde::Deserialize, Debug, Clone, Default)]
+/// Narrows any view. Within a filter any ticked value matches, except where a
+/// photo can hold several values (people, tags): those can ask for all of
+/// them. Across filters all must. Empty = no filter.
+#[derive(Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Filters {
     /// "2026", "2026-09", "2026-09-26" or "unknown"
@@ -1128,10 +1130,41 @@ pub struct Filters {
     pub types: Vec<String>,
     /// "online" (plugged in), "offline" (unplugged / folder not found), "missing"
     pub status: Vec<String>,
-    /// Person ids: photos with any of them in.
+    /// Person ids.
     pub people: Vec<i64>,
-    /// Tag ids: photos with **all** of them (tags narrow down).
+    /// Photos with any of `people` in (default), or all of them together.
+    pub people_match: Match,
+    /// Tag ids.
     pub tags: Vec<i64>,
+    /// Photos with all of `tags` (default: tags narrow down), or any of them.
+    pub tags_match: Match,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Self {
+            dates: Vec::new(),
+            cameras: Vec::new(),
+            lenses: Vec::new(),
+            types: Vec::new(),
+            status: Vec::new(),
+            people: Vec::new(),
+            people_match: Match::Any,
+            tags: Vec::new(),
+            tags_match: Match::All,
+        }
+    }
+}
+
+/// How the values ticked in one filter combine.
+#[derive(Serialize, serde::Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Match {
+    /// A photo with any of them.
+    #[default]
+    Any,
+    /// Only photos with every one of them.
+    All,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1142,22 +1175,27 @@ pub enum Facet {
     Types,
     Status,
     People,
+    Tags,
 }
 
 impl Filters {
     /// Parameters ?3..?9 of [`filters_sql`], as JSON arrays; `except` is left
-    /// out. Tags are never left out: with "all of them", counts must narrow too.
+    /// out, unless it asks for all of its values: then counts must narrow too.
     fn params(&self, except: Option<Facet>) -> [String; 7] {
         let json = |v: String, f: Facet| if except == Some(f) { "[]".to_string() } else { v };
         let list = |v: &Vec<String>| serde_json::to_string(v).unwrap_or_else(|_| "[]".into());
+        let ids = |v: &Vec<i64>, m: Match, f: Facet| {
+            let v = serde_json::to_string(v).unwrap_or_else(|_| "[]".into());
+            if m == Match::All { v } else { json(v, f) }
+        };
         [
             json(list(&self.dates), Facet::Dates),
             json(list(&self.cameras), Facet::Cameras),
             json(list(&self.lenses), Facet::Lenses),
             json(list(&self.types), Facet::Types),
             json(list(&self.status), Facet::Status),
-            json(serde_json::to_string(&self.people).unwrap_or_else(|_| "[]".into()), Facet::People),
-            serde_json::to_string(&self.tags).unwrap_or_else(|_| "[]".into()),
+            ids(&self.people, self.people_match, Facet::People),
+            ids(&self.tags, self.tags_match, Facet::Tags),
         ]
     }
 
@@ -1179,7 +1217,9 @@ const STATUS_SQL: &str = "CASE COALESCE(st.s, 0) WHEN 2 THEN 'online' WHEN 1 THE
 /// The filters as one SQL condition on photo `p` and state `st`, with
 /// parameters ?3 dates, ?4 cameras, ?5 lenses, ?6 types, ?7 status, ?8 people,
 /// ?9 tags (JSON arrays).
-fn filters_sql() -> String {
+fn filters_sql(f: &Filters) -> String {
+    let people = has_sql(f.people_match, 8, "FROM faces fa WHERE fa.photo_id = p.id", "fa.person_id");
+    let tags = has_sql(f.tags_match, 9, "FROM photo_tags pt WHERE pt.photo_id = p.id", "pt.tag_id");
     format!(
         "(json_array_length(?3) = 0 OR EXISTS (SELECT 1 FROM json_each(?3) j WHERE
              (j.value = 'unknown' AND COALESCE(p.taken_ts, 0) <= 0)
@@ -1191,11 +1231,21 @@ fn filters_sql() -> String {
      AND (json_array_length(?6) = 0 OR EXISTS (SELECT 1 FROM files f WHERE f.photo_id = p.id
              AND {EXT_SQL} IN (SELECT value FROM json_each(?6))))
      AND (json_array_length(?7) = 0 OR {STATUS_SQL} IN (SELECT value FROM json_each(?7)))
-     AND (json_array_length(?8) = 0 OR EXISTS (SELECT 1 FROM faces fa WHERE fa.photo_id = p.id
-             AND fa.person_id IN (SELECT value FROM json_each(?8))))
-     AND (json_array_length(?9) = 0 OR json_array_length(?9) = (SELECT COUNT(*) FROM photo_tags pt
-             WHERE pt.photo_id = p.id AND pt.tag_id IN (SELECT value FROM json_each(?9))))"
+     AND (json_array_length(?8) = 0 OR {people})
+     AND (json_array_length(?9) = 0 OR {tags})"
     )
+}
+
+/// A photo has any, or all, of the ids in JSON parameter `?n`. `rows` picks
+/// the photo's rows (`FROM .. WHERE .. = p.id`), `col` their id.
+fn has_sql(m: Match, n: u8, rows: &str, col: &str) -> String {
+    let picked = format!("{col} IN (SELECT value FROM json_each(?{n}))");
+    match m {
+        Match::Any => format!("EXISTS (SELECT 1 {rows} AND {picked})"),
+        Match::All => format!(
+            "(SELECT COUNT(DISTINCT {col}) {rows} AND {picked}) = (SELECT COUNT(DISTINCT value) FROM json_each(?{n}))"
+        ),
+    }
 }
 
 /// Someone the People filter offers.

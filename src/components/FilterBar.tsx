@@ -11,8 +11,12 @@ import {
   type FacetValue,
   type Facets,
   type Filters,
+  type Match,
   type Person,
 } from "../api";
+
+/** The filters that tick values (not the any / all switches). */
+type ListKey = Exclude<keyof Filters, "peopleMatch" | "tagsMatch">;
 
 interface Props {
   facets: Facets | null;
@@ -34,7 +38,7 @@ const toggled = (list: string[], v: string) => (list.includes(v) ? list.filter((
 
 /** One bar above the grid: People, Date, Camera, Lens, File type, Status. Each opens a list to tick. */
 export function FilterBar({ facets, filters, onChange, people }: Props) {
-  const [open, setOpen] = useState<keyof Filters | null>(null);
+  const [open, setOpen] = useState<ListKey | null>(null);
   const bar = useRef<HTMLDivElement>(null);
   const set = <K extends keyof Filters>(k: K, v: Filters[K]) => onChange({ ...filters, [k]: v });
 
@@ -70,9 +74,17 @@ export function FilterBar({ facets, filters, onChange, people }: Props) {
   for (const t of facets?.tags ?? []) tagNames.current.set(t.id, t.name);
   const tagName = (id: number) => tagNames.current.get(id) ?? "Tag";
 
+  // Two names read as "Ana + Bob" (together) or "Ana or Bob"; more as a count.
+  const several = (names: string[], m: Match, what: string) =>
+    names.length <= 2
+      ? names.join(m === "all" ? " + " : " or ")
+      : m === "all"
+        ? `All of ${names.length} ${what}`
+        : `Any of ${names.length} ${what}`;
   const summary = {
-    people: (v: number[]) => (v.length === 1 ? personName(v[0]) : `${v.length} people`),
-    tags: (v: number[]) => (v.length === 1 ? tagName(v[0]) : v.map(tagName).join(" + ")),
+    people: (v: number[]) =>
+      v.length === 1 ? personName(v[0]) : several(v.map(personName), filters.peopleMatch, "people"),
+    tags: (v: number[]) => (v.length === 1 ? tagName(v[0]) : several(v.map(tagName), filters.tagsMatch, "tags")),
     dates: (v: string[]) => (v.length === 1 ? fmtDateKey(v[0]) : `${v.length} dates`),
     cameras: (v: string[]) => (v.length === 1 ? v[0] : `${v.length} cameras`),
     lenses: (v: string[]) => (v.length === 1 ? v[0] : `${v.length} lenses`),
@@ -87,7 +99,7 @@ export function FilterBar({ facets, filters, onChange, people }: Props) {
     status: (v: string[]) => v.map((x) => STATUS_LABEL[x] ?? x).join(", "),
   };
 
-  const chip = (id: keyof Filters, label: string, icon: ReactNode, panel: ReactNode) => {
+  const chip = (id: ListKey, label: string, icon: ReactNode, panel: ReactNode) => {
     const picked = filters[id];
     const on = picked.length > 0;
     const text =
@@ -128,6 +140,8 @@ export function FilterBar({ facets, filters, onChange, people }: Props) {
           picked={filters.people}
           name={personName}
           onPick={(v) => set("people", v)}
+          match={filters.peopleMatch}
+          onMatch={(m) => set("peopleMatch", m)}
         />,
       )}
       {chip(
@@ -139,6 +153,8 @@ export function FilterBar({ facets, filters, onChange, people }: Props) {
           picked={filters.tags}
           name={tagName}
           onPick={(v) => set("tags", v)}
+          match={filters.tagsMatch}
+          onMatch={(m) => set("tagsMatch", m)}
         />,
       )}
       {chip("dates", "Date", <Calendar size={14} />, <DatePanel values={facets?.dates ?? []} picked={filters.dates} onPick={(v) => set("dates", v)} />)}
@@ -249,25 +265,45 @@ function Checklist({
   );
 }
 
-/** Tags. Only photos with every ticked tag show; counts already follow the ticks. */
+/**
+ * Any or all of the ticked values. With "all", counts follow the ticks: only what is in a
+ * photo with them is left to tick.
+ */
+function MatchSwitch({ value, onChange, all }: { value: Match; onChange: (m: Match) => void; all: string }) {
+  return (
+    <div className="match-switch" role="radiogroup" aria-label="Photos with">
+      {(["any", "all"] as const).map((m) => (
+        <button key={m} role="radio" aria-checked={value === m} className={value === m ? "on" : ""} onClick={() => onChange(m)}>
+          {m === "any" ? "Any of them" : all}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Tags. Photos with every ticked tag show (or any, on the switch). */
 function TagsPanel({
   values,
   picked,
   name,
   onPick,
+  match,
+  onMatch,
 }: {
   values: Facets["tags"];
   picked: number[];
   name: (id: number) => string;
   onPick: (v: number[]) => void;
+  match: Match;
+  onMatch: (m: Match) => void;
 }) {
   const [q, setQ] = useState("");
   const all = [...values, ...picked.filter((id) => !values.some((v) => v.id === id)).map((id) => ({ id, name: name(id), count: 0 }))];
   const shown = q ? all.filter((t) => t.name.toLowerCase().includes(q.toLowerCase())) : all;
   return (
     <div className="filter-list">
+      {(all.length > 1 || picked.length > 0) && <MatchSwitch value={match} onChange={onMatch} all="All of them" />}
       {all.length > 8 && <input className="filter-search" autoFocus placeholder="Find a tag…" value={q} onChange={(e) => setQ(e.target.value)} />}
-      {picked.length > 1 && <p className="muted small filter-note">Photos with all of these tags</p>}
       {shown.map((t) => (
         <label key={t.id} className="filter-row">
           <input
@@ -284,17 +320,21 @@ function TagsPanel({
   );
 }
 
-/** People, with their face. Any ticked person's photos show. */
+/** People, with their face. Any ticked person's photos show (or only those with all of them together). */
 function PeoplePanel({
   values,
   picked,
   name,
   onPick,
+  match,
+  onMatch,
 }: {
   values: Facets["people"];
   picked: number[];
   name: (id: number) => string;
   onPick: (v: number[]) => void;
+  match: Match;
+  onMatch: (m: Match) => void;
 }) {
   const [q, setQ] = useState("");
   // Ticked people stay listed even when this view has none of them.
@@ -303,7 +343,8 @@ function PeoplePanel({
   const flip = (id: number) => onPick(picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id]);
   return (
     <div className="filter-list people-list">
-      {all.length > 8 && <input className="filter-search" autoFocus placeholder="Find a name…" value={q} onChange={(e) => setQ(e.target.value)} />}
+      {(all.length > 1 || picked.length > 0) && <MatchSwitch value={match} onChange={onMatch} all="All together" />}
+      {all.length > 8 &&<input className="filter-search" autoFocus placeholder="Find a name…" value={q} onChange={(e) => setQ(e.target.value)} />}
       {shown.map((p) => (
         <label key={p.id} className="filter-row">
           <input type="checkbox" checked={picked.includes(p.id)} onChange={() => flip(p.id)} />

@@ -21,7 +21,9 @@
 //!   shoebox-cli days [filters]    photos taken each day, as the calendar shows them (JSON)
 //!       filters = JSON, any of {"dates":["2026-09-26"],"cameras":[..],"lenses":[..],
 //!                               "types":["cr3"],"status":["online","offline","missing"],
-//!                               "people":[42],"tags":[3,7] (photos with all of these tags)}
+//!                               "people":[42,43],"peopleMatch":"any"|"all" (default any;
+//!                               all = only photos with them together),
+//!                               "tags":[3,7],"tagsMatch":"all"|"any" (default all)}
 //!
 //! People (JSON out):
 //!   shoebox-cli people [name] [--new]   everyone, or whoever's name matches, best first, as
