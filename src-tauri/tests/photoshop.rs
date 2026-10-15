@@ -27,10 +27,14 @@ struct Doc<'a> {
     big: bool,
     exif: Option<&'a [u8]>,
     palette: &'a [u8],
-    real: bool,
+    /// Photoshop's note on the flattened picture: real or a placeholder; None: no note.
+    merged: Option<bool>,
+    /// How many layers it lists (their records left out: only counted), and
+    /// whether in a tagged block of their own, as a 16-bit document does.
+    layers: (u16, bool),
 }
 
-/// A Photoshop file as Photoshop writes one (without layers).
+/// A Photoshop file as Photoshop writes one.
 fn write(d: &Doc) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend(b"8BPS");
@@ -54,17 +58,23 @@ fn write(d: &Doc) -> Vec<u8> {
             res.push(0);
         }
     };
-    resource(1057, &[0, 0, 0, 1, d.real as u8]);
+    if let Some(merged) = d.merged {
+        resource(1057, &[0, 0, 0, 1, merged as u8]);
+    }
     if let Some(e) = d.exif {
         resource(1058, e);
     }
     b.extend((res.len() as u32).to_be_bytes());
     b.extend(&res);
-    if d.big {
-        b.extend(0u64.to_be_bytes());
-    } else {
-        b.extend(0u32.to_be_bytes());
-    }
+    let len = |n: usize| if d.big { (n as u64).to_be_bytes().to_vec() } else { (n as u32).to_be_bytes().to_vec() };
+    let section: Vec<u8> = match d.layers {
+        (0, _) => Vec::new(),
+        // An empty list, no global mask, then the block listing them.
+        (n, true) => [len(0), vec![0; 4], b"8BIMLr16".to_vec(), len(2), n.to_be_bytes().to_vec()].concat(),
+        (n, false) => [len(2), n.to_be_bytes().to_vec(), vec![0; 4]].concat(),
+    };
+    b.extend(len(section.len()));
+    b.extend(section);
     b.extend(d.compression.to_be_bytes());
     let rows: Vec<Vec<u8>> = d
         .planes
@@ -119,7 +129,19 @@ fn write(d: &Doc) -> Vec<u8> {
 }
 
 fn doc(w: u32, h: u32, mode: u16, depth: u16, planes: Vec<Vec<u16>>, compression: u16) -> Doc<'static> {
-    Doc { w, h, mode, depth, planes, compression, big: false, exif: None, palette: &[], real: true }
+    Doc {
+        w,
+        h,
+        mode,
+        depth,
+        planes,
+        compression,
+        big: false,
+        exif: None,
+        palette: &[],
+        merged: Some(true),
+        layers: (0, false),
+    }
 }
 
 fn exif_bytes() -> Vec<u8> {
@@ -199,10 +221,25 @@ fn photoshop_files_are_read_whatever_their_name() {
     assert_eq!((w, h), (10, 5));
     assert_eq!(px[1], [4; 3], "column 4 of the document");
 
-    // Saved without "Maximize compatibility": said, not shown wrong.
-    let p = put("layers.psd", &Doc { real: false, ..doc(1, 1, 3, 8, vec![vec![1], vec![2], vec![3]], 0) });
-    let e = load(&p, Kind::Image, 2048).image.unwrap_err();
-    assert!(e.contains("Maximize compatibility"), "{e}");
+    // Saved without "Maximize compatibility": a white placeholder stands in
+    // for the picture. Said, not shown white - whether Photoshop says so, or
+    // leaves its note out of a layered document (layers listed either way,
+    // in a large document too).
+    let white = || doc(4, 3, 3, 8, vec![vec![255; 12]; 3], 1);
+    for (merged, layers, big) in
+        [(Some(false), (0, false), false), (None, (4, true), false), (None, (2, false), false), (None, (3, true), true)]
+    {
+        let p = put("layers.psd", &Doc { merged, layers, big, ..white() });
+        let loaded = load(&p, Kind::Image, 2048);
+        let e = loaded.image.unwrap_err();
+        assert!(e.contains("Maximize compatibility") && e.contains("re-save"), "{merged:?} {layers:?}: {e}");
+        assert_eq!(loaded.meta.width, Some(4), "its size is still known");
+    }
+    // White Photoshop vouches for, or a document without layers, is white.
+    for (merged, layers) in [(Some(true), (4, true)), (None, (0, false))] {
+        let p = put("white.psd", &Doc { merged, layers, ..white() });
+        assert_eq!(pixels(&p, Kind::Image, 2048).2, [[255; 3]; 12], "{merged:?} {layers:?}");
+    }
 
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -228,6 +265,15 @@ fn photoshop_files_join_the_catalog() {
         cat.db().query_row("SELECT COUNT(*) FROM photos WHERE preview_state = 1", [], |r| r.get(0)).unwrap();
     assert_eq!(ready, 2);
     let volume: i64 = cat.db().query_row("SELECT volume_id FROM roots WHERE id = ?1", [root], |r| r.get(0)).unwrap();
+
+    // Read by an older Shoebox, which could show the white placeholder: a .psd
+    // is read again once, at the next plug-in.
+    cat.db().execute_batch("PRAGMA user_version = 11;").unwrap();
+    drop(cat);
+    let cat = Catalog::open(DataDir { root: base.join("catalog") }).unwrap();
+    assert_eq!(failed_count(&cat, volume).unwrap(), 1);
+    let r = retry_failed(&cat, volume, &no, &|_| {}).unwrap();
+    assert_eq!((r.reread, r.errors), (1, 0), "{r:?}");
 
     // Given up on by an older Shoebox, which couldn't read it: read at the next plug-in.
     let pid: i64 =
