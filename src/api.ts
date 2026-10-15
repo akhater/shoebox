@@ -18,7 +18,13 @@ export type Scope =
 
 export const sameScope = (a: Scope, b: Scope) => JSON.stringify(a) === JSON.stringify(b);
 
-/** Narrows any view. Within a filter any ticked value matches; across filters all must. */
+/** How the values ticked in one filter combine: a photo with any of them, or only with all of them. */
+export type Match = "any" | "all";
+
+/**
+ * Narrows any view. Within a filter any ticked value matches, except where a photo can hold
+ * several values (people, tags): those can ask for all of them. Across filters all must.
+ */
 export interface Filters {
   /** "2026", "2026-09", "2026-09-26" or "unknown" */
   dates: string[];
@@ -27,12 +33,26 @@ export interface Filters {
   /** Extensions, lower case: "cr3", "jpg" */
   types: string[];
   status: ("online" | "offline" | "missing")[];
-  /** Person ids: photos with any of them in. */
+  /** Person ids. */
   people: number[];
-  /** Tag ids: photos with all of them. */
+  /** Photos with any of `people` in, or all of them together. */
+  peopleMatch: Match;
+  /** Tag ids. */
   tags: number[];
+  /** Photos with all of `tags` (tags narrow down), or any of them. */
+  tagsMatch: Match;
 }
-export const NO_FILTERS: Filters = { dates: [], cameras: [], lenses: [], types: [], status: [], people: [], tags: [] };
+export const NO_FILTERS: Filters = {
+  dates: [],
+  cameras: [],
+  lenses: [],
+  types: [],
+  status: [],
+  people: [],
+  peopleMatch: "any",
+  tags: [],
+  tagsMatch: "all",
+};
 export const filtersOn = (f: Filters) =>
   f.dates.length + f.cameras.length + f.lenses.length + f.types.length + f.status.length + f.people.length + f.tags.length >
   0;

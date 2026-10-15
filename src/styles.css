@@ -1948,6 +1948,34 @@ button {
   color: var(--text);
   font: inherit;
 }
+/* People and tags: photos with any of the ticked ones, or all of them. */
+.match-switch {
+  display: flex;
+  gap: 2px;
+  margin: 2px 2px 6px;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--bg);
+}
+.match-switch button {
+  flex: 1;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.match-switch button:hover {
+  color: var(--text);
+}
+.match-switch button.on {
+  background: var(--hover);
+  color: var(--text);
+  font-weight: 600;
+}
 .twisty-btn {
   display: inline-flex;
   padding: 0;
@@ -2149,9 +2177,6 @@ button {
 }
 
 /* Tags */
-.filter-note {
-  margin: 2px 8px 6px;
-}
 .tag-editor {
   display: flex;
   flex-direction: column;
