@@ -1145,7 +1145,8 @@ button {
   word-break: break-all;
   color: #c6c8ce;
 }
-/* Wraps: the three buttons are wider than a narrow side panel. */
+/* Short labels keep the three buttons on one row of the 320 px panel; wraps
+   rather than running off it if a font makes them wider. */
 .loc-actions {
   display: flex;
   flex-wrap: wrap;

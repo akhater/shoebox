@@ -400,14 +400,22 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
                       onClick={() => onFolder(f)}
                       title={`Show “${f.folder.split("\\").pop() || f.volumeLabel}” here in Shoebox, with this photo selected`}
                     >
-                      <FolderInput size={14} /> Go to folder
+                      <FolderInput size={14} /> Folder
                     </button>
                     {f.state === "online" && (
                       <>
-                        <button className="btn small" onClick={() => act(api.revealFile(f.id))}>
-                          <FolderOpen size={14} /> Show in Explorer
+                        <button
+                          className="btn small"
+                          onClick={() => act(api.revealFile(f.id))}
+                          title="Show in Explorer"
+                        >
+                          <FolderOpen size={14} /> Explorer
                         </button>
-                        <button className="btn small" onClick={() => act(api.openFile(f.id))}>
+                        <button
+                          className="btn small"
+                          onClick={() => act(api.openFile(f.id))}
+                          title="Open in its default app"
+                        >
                           <ExternalLink size={14} /> Open
                         </button>
                       </>
