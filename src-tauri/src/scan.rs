@@ -79,6 +79,8 @@ struct Job {
     prev_photo: Option<i64>,
     /// Re-read even though the content is known (regenerate previews).
     force: bool,
+    /// Read again at a plug-in, after it couldn't be read before.
+    retry: bool,
 }
 
 struct Seen {
@@ -214,17 +216,20 @@ pub fn scan_root(
 /// Files on this disk whose photo couldn't be read (or that couldn't even be
 /// opened) last time, or whose reading was cut short: a photo is saved as
 /// pending before its preview is written, so one still pending between scans
-/// was left half-read by a Shoebox stopped in the middle.
+/// was left half-read by a Shoebox stopped in the middle. Not a photo given
+/// up on: one still unreadable when retried, which no retry will change
+/// (until Shoebox reads more formats; a folder scan tries it again).
 const FAILED_FILES: &str = "SELECT f.id, f.photo_id, fo.rel_path, f.name, f.size, f.mtime
      FROM files f JOIN folders fo ON fo.id = f.folder_id LEFT JOIN photos p ON p.id = f.photo_id
     WHERE fo.volume_id = ?1 AND f.state = ?2
-      AND (p.preview_state IN (?3, ?4) OR (f.photo_id IS NULL AND f.error IS NOT NULL))";
+      AND (p.preview_state = ?4 OR (p.preview_state = ?3 AND COALESCE(p.given_up, 0) < ?5)
+           OR (f.photo_id IS NULL AND f.error IS NOT NULL))";
 
 /// How many files on this disk are waiting to be read again.
 pub fn failed_count(cat: &Catalog, volume_id: i64) -> Result<u64> {
     let n: i64 = cat.db().query_row(
         &format!("SELECT COUNT(*) FROM ({FAILED_FILES})"),
-        params![volume_id, FILE_PRESENT, PREVIEW_FAILED, PREVIEW_PENDING],
+        params![volume_id, FILE_PRESENT, PREVIEW_FAILED, PREVIEW_PENDING, imaging::PICTURE_READER],
         |r| r.get(0),
     )?;
     Ok(n as u64)
@@ -248,7 +253,7 @@ pub fn retry_failed(
     let failed: Vec<(i64, Option<i64>, String, String, i64, i64)> = cat
         .db()
         .prepare(FAILED_FILES)?
-        .query_map(params![volume_id, FILE_PRESENT, PREVIEW_FAILED, PREVIEW_PENDING], |r| {
+        .query_map(params![volume_id, FILE_PRESENT, PREVIEW_FAILED, PREVIEW_PENDING, imaging::PICTURE_READER], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -277,6 +282,7 @@ pub fn retry_failed(
             ext: formats::extension(&name),
             prev_photo: photo_id,
             force: false,
+            retry: true,
         });
     }
     // root_id 0: not a folder scan (the window words it as a retry).
@@ -467,6 +473,7 @@ fn record(
             ext: formats::extension(&s.name),
             prev_photo,
             force,
+            retry: false,
         };
         match existing {
             None => {
@@ -784,16 +791,20 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
     match saved {
         Ok((tw, th)) => {
             db.execute(
-                "UPDATE photos SET preview_state = ?1, preview_rev = preview_rev + 1, thumb_w = ?2, thumb_h = ?3, error = NULL WHERE id = ?4",
+                "UPDATE photos SET preview_state = ?1, preview_rev = preview_rev + 1, thumb_w = ?2, thumb_h = ?3,
+                        error = NULL, given_up = NULL WHERE id = ?4",
                 params![PREVIEW_OK, tw, th, pid],
             )?;
             Ok(outcome)
         }
         Err(e) => {
             log::warn!("no preview for {}: {e}", job.path.display());
+            // Unreadable again when retried, its file still there (not a disk
+            // pulled out meanwhile): retrying it at each plug-in changes nothing.
+            let given_up = (job.retry && job.path.is_file()).then_some(imaging::PICTURE_READER);
             db.execute(
-                "UPDATE photos SET preview_state = ?1, error = ?2 WHERE id = ?3",
-                params![PREVIEW_FAILED, e, pid],
+                "UPDATE photos SET preview_state = ?1, error = ?2, given_up = ?3 WHERE id = ?4",
+                params![PREVIEW_FAILED, e, given_up, pid],
             )?;
             Ok(Outcome::Unreadable)
         }

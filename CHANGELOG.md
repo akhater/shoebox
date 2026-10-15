@@ -17,6 +17,21 @@ Newest first. Same format and versioning as Argentum.
 
 ### Fixed
 
+- **Previews left blank by a PC that stopped are made again.** A crash or
+  power cut right after Shoebox saved a preview, thumbnail or face picture
+  could leave that file at its full size but empty (all zeros): a blank
+  tile, and word search and faces skipped the photo at every start. Saved
+  files now reach the disk before they replace anything. At start, after
+  the PC has restarted, Shoebox looks into the files saved since its last
+  check: a thumbnail or face picture is made again from the preview, and a
+  photo whose preview is damaged or missing is read again from its
+  original - right away if its disk is plugged in, otherwise when it is.
+  `shoebox-cli check-files [--all]` does the same check headless.
+- **A file no reader understands isn't retried at every plug-in.** A photo
+  still unreadable when retried after its disk is plugged in (and still
+  there) is left alone: a retry is for a disk pulled out mid-read, not a
+  file Shoebox can't decode. "Scan again" on its folder tries it again, and
+  so will a Shoebox that reads more formats.
 - **Someone found twice becomes one person.** A face joins a person only
   when it looks enough like them at that moment, so the same person seen
   from another angle or in other light could end up as two people - and the

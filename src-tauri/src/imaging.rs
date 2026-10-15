@@ -23,6 +23,11 @@ use std::path::Path;
 /// from the standard tags or its maker's note, for every maker.
 pub const LENS_READER: i64 = 2;
 
+/// Version of what Shoebox can read (formats, readers). A photo it gave up on,
+/// still unreadable when retried at a plug-in, is retried by itself again
+/// only by a newer version: raise it when Shoebox learns to read more.
+pub const PICTURE_READER: i64 = 1;
+
 #[derive(Default, Debug, Clone)]
 pub struct Meta {
     pub taken: Option<NaiveDateTime>,

@@ -77,3 +77,38 @@ fn failed_photos_fix_themselves() {
     drop(cat);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// A file no reader knows (a Photoshop file named .raw) is retried at one
+/// plug-in, then left alone: every plug-in after changes nothing. A scan of
+/// its folder tries it again.
+#[test]
+fn a_file_no_reader_knows_is_given_up() {
+    let base = std::env::temp_dir().join("shoebox-given-up");
+    let _ = std::fs::remove_dir_all(&base);
+    let photos = base.join("photos");
+    std::fs::create_dir_all(&photos).unwrap();
+    let mut psd = b"8BPS\x00\x01\x00\x00\x00\x00\x00\x00\x00\x03".to_vec();
+    psd.resize(8192, 0);
+    std::fs::write(photos.join("IMG_9.raw"), psd).unwrap();
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data).unwrap();
+    let root = cat.add_root(&photos).unwrap();
+    let no = AtomicBool::new(false);
+    let r = scan_root(&cat, root, &no, false, &|_| {}).unwrap();
+    assert_eq!(r.errors, 1);
+    let volume: i64 = cat.db().query_row("SELECT volume_id FROM roots WHERE id = ?1", [root], |r| r.get(0)).unwrap();
+
+    assert_eq!(failed_count(&cat, volume).unwrap(), 1);
+    let r = retry_failed(&cat, volume, &no, &|_| {}).unwrap();
+    assert_eq!((r.found, r.errors), (1, 1), "{r:?}");
+    assert_eq!(failed_count(&cat, volume).unwrap(), 0, "given up");
+    assert_eq!(retry_failed(&cat, volume, &no, &|_| {}).unwrap().found, 0);
+
+    let r = scan_root(&cat, root, &no, false, &|_| {}).unwrap();
+    assert_eq!(r.errors, 1, "a folder scan tries it again");
+    assert_eq!(failed_count(&cat, volume).unwrap(), 1);
+
+    drop(cat);
+    let _ = std::fs::remove_dir_all(&base);
+}

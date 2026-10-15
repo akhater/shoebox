@@ -186,6 +186,16 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version < 9 {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V9} PRAGMA user_version = 9; COMMIT;"))?;
     }
+    if version < 10 {
+        // A photo still unreadable when retried at a plug-in: the version of
+        // the picture readers that gave up on it (imaging::PICTURE_READER).
+        // Plug-ins leave it alone until a newer one; a folder scan tries again.
+        // Safe to run again on a catalog that already has it.
+        let has_given_up =
+            conn.prepare("SELECT 1 FROM pragma_table_info('photos') WHERE name = 'given_up'")?.exists([])?;
+        let given_up = if has_given_up { "" } else { "ALTER TABLE photos ADD COLUMN given_up INTEGER;" };
+        conn.execute_batch(&format!("BEGIN; {given_up} PRAGMA user_version = 10; COMMIT;"))?;
+    }
     Ok(())
 }
 

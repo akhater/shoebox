@@ -9,6 +9,7 @@ pub mod imaging;
 pub mod models;
 pub mod organize;
 pub mod paths;
+pub mod repair;
 pub mod scan;
 pub mod search;
 pub mod settings;
@@ -453,6 +454,24 @@ fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lens
     }
 }
 
+/// Previews, thumbnails and face pictures a PC that stopped mid-write left
+/// damaged (see [`repair`]): face pictures are cut again, and photos on a
+/// plugged-in disk read again now; the others are when their disk is plugged in.
+fn check_saved_files(cat: &Catalog, scans: &ScanQueue) {
+    match repair::at_start(cat) {
+        Ok(Some(c)) => {
+            let online: HashSet<i64> = cat.online_ids().into_iter().collect();
+            for &v in c.disks.iter().filter(|v| online.contains(v)) {
+                if scan::failed_count(cat, v).is_ok_and(|n| n > 0) {
+                    scans.retry(v);
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(e) => log::warn!("checking saved previews: {e:#}"),
+    }
+}
+
 /// Settles the folder moves, renames and deletes cut short by a stop (see
 /// [`organize::resume`]), in the background: checking a copy again can take a
 /// while. Those still waiting for a disk get another go when one is plugged in.
@@ -554,6 +573,8 @@ pub fn run() {
         remove_stray_temp_files(&opened);
     });
     let scans = Arc::new(ScanQueue::default());
+    let (c, q) = (cat.clone(), scans.clone());
+    std::thread::spawn(move || check_saved_files(&c, &q));
     let index = Arc::new(search::SearchIndex::open(&cat).expect("open search index"));
     let face_index = Arc::new(faces::FaceIndex::open(&cat).expect("open face index"));
     let ai = Arc::new(AiQueue::default());

@@ -5,7 +5,15 @@
 //!   shoebox-cli scan [root-id]   rescan one folder, or every plugged-in one
 //!   shoebox-cli retry [disk-id]  read again only the files that couldn't be read (or were left
 //!                                half-read by a stopped scan), on one plugged-in disk or all of
-//!                                them (the window does it at start and when a disk is plugged in)
+//!                                them (the window does it at start and when a disk is plugged in).
+//!                                A photo still unreadable when retried is left alone after:
+//!                                `scan <root-id>` tries it again
+//!   shoebox-cli check-files [--all]   previews, thumbnails and face pictures written since the
+//!                                last check (--all: every one) that a PC stopping mid-write left
+//!                                damaged or missing: thumbnails and face pictures are made again
+//!                                from the preview, photos whose preview is damaged marked to be
+//!                                read again - `retry` reads them (JSON; the window checks at
+//!                                start after the PC has restarted)
 //!   shoebox-cli stats            catalog overview
 //!   shoebox-cli version          this version and the latest published release (JSON; asks
 //!                                GitHub - a commit on a branch never counts)
@@ -146,6 +154,10 @@ fn main() -> anyhow::Result<()> {
                     println!("{}", serde_json::to_string_pretty(&scan::retry_failed(&cat, id, &cancel, &show)?)?);
                 }
             }
+        }
+        Some("check-files") => {
+            let all = args.get(1).is_some_and(|a| a == "--all");
+            println!("{}", serde_json::to_string_pretty(&shoebox_lib::repair::check_files(&cat, all)?)?);
         }
         Some("stats") => {
             println!("{}", serde_json::to_string_pretty(&cat.overview()?)?);
