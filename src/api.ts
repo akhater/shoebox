@@ -151,6 +151,8 @@ export interface Stats {
   previewBytes: number;
   thumbBytes: number;
   totalBytes: number;
+  /** What reading the catalog may use now, in MB (automatic values resolved). */
+  memory: { cacheMb: number; mapMb: number };
 }
 
 export interface RootInfo {
@@ -283,6 +285,10 @@ export interface Settings {
   workers: number;
   /** Ask GitHub at start and every few hours whether a newer release is out. */
   checkUpdates: boolean;
+  /** Pages each catalog connection keeps, in MB; 0 = automatic. */
+  catalogCacheMb: number;
+  /** The catalog file mapped into memory, in MB; 0 = automatic (follows the catalog's size). */
+  catalogMapMb: number;
 }
 
 export interface FolderCheck {

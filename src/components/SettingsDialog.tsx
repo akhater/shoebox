@@ -164,6 +164,22 @@ export function SettingsDialog({ initialTab, dataDir, version, update, onRegener
               </select>
               <small>For a slow USB hard disk, 2 is often as fast as more.</small>
             </label>
+            <label>
+              <span>Catalog memory</span>
+              <select value={s.catalogMapMb} onChange={(e) => setS({ ...s, catalogMapMb: +e.target.value })}>
+                <option value={0}>Automatic{stats ? ` (${fmtMb(stats.memory.mapMb)} now)` : ""}</option>
+                {[256, 512, 1024, 2048, 4096].map((n) => (
+                  <option key={n} value={n}>
+                    {fmtMb(n)}
+                  </option>
+                ))}
+              </select>
+              <small>
+                How much of the catalog is read straight from memory. Automatic follows the catalog's size; Windows
+                gives the memory back when other programs need it. To compare on this computer:{" "}
+                <code>shoebox-cli bench</code>.
+              </small>
+            </label>
             <div className="field">
               <span className="field-label">Catalog</span>
               {stats ? (
@@ -398,3 +414,5 @@ function UpdateLine({ version, status }: { version: string; status: UpdateStatus
     </div>
   );
 }
+
+const fmtMb = (mb: number) => (mb >= 1024 ? `${+(mb / 1024).toFixed(1)} GB` : `${mb} MB`);

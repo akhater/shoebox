@@ -15,6 +15,13 @@
 //!                                read again - `retry` reads them (JSON; the window checks at
 //!                                start after the PC has restarted)
 //!   shoebox-cli stats            catalog overview
+//!   shoebox-cli settings [key=value ...]   the settings, as Settings in the window, changed when
+//!                                given (JSON out), e.g. catalogMapMb=1024; 0 = automatic for the
+//!                                catalog memory, whose values in use come out as "memory"
+//!   shoebox-cli bench [--cache-mb N] [--map-mb N|off]   times what the window does most on this
+//!                                catalog and computer (best of 3, ms; JSON out): start-up, the
+//!                                sidebar, People, all photos, a camera, a year, a person. Reads only.
+//!                                The flags try other catalog memory for this run only
 //!   shoebox-cli version          this version and the latest published release (JSON; asks
 //!                                GitHub - a commit on a branch never counts)
 //!   shoebox-cli photo <id>       one photo's details; each copy's volumeId and folder make the
@@ -165,6 +172,30 @@ fn main() -> anyhow::Result<()> {
             let failed = list.preview.iter().filter(|&&s| s == 2).count();
             println!("photos listed: {}, without preview: {failed}", list.ids.len());
         }
+        Some("settings") => {
+            let mut changed = serde_json::to_value(cat.settings())?;
+            let known = changed.as_object().unwrap().keys().cloned().collect::<Vec<_>>().join(", ");
+            for kv in &args[1..] {
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("settings [key=value ...], e.g. catalogMapMb=1024"))?;
+                let o = changed.as_object_mut().unwrap();
+                if !o.contains_key(k) {
+                    anyhow::bail!("no setting {k:?} (settings: {known})");
+                }
+                o.insert(k.into(), serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.into())));
+            }
+            if args.len() > 1 {
+                cat.save_settings(serde_json::from_value(changed)?)?;
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({ "settings": cat.settings(), "memory": cat.memory() })
+                )?
+            );
+        }
+        Some("bench") => bench(&cat, &args[1..])?,
         Some("version") => {
             println!("{}", serde_json::to_string_pretty(&shoebox_lib::updates::check(None))?);
         }
@@ -597,5 +628,80 @@ fn main() -> anyhow::Result<()> {
             "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...]"
         ),
     }
+    Ok(())
+}
+
+/// `shoebox-cli bench`: what the window does most, timed on this catalog and computer.
+fn bench(cat: &Catalog, args: &[String]) -> anyhow::Result<()> {
+    use std::time::Instant;
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
+    let mut memory = cat.memory();
+    if let Some(mb) = flag("--cache-mb") {
+        memory.cache_mb = mb.parse()?;
+    }
+    if let Some(mb) = flag("--map-mb") {
+        memory.map_mb = if mb == "off" { 0 } else { mb.parse()? };
+    }
+    cat.set_memory(memory)?;
+    let ms = |t: Instant| (t.elapsed().as_secs_f64() * 10_000.0).round() / 10.0;
+    let best = |f: &dyn Fn() -> anyhow::Result<()>| -> anyhow::Result<f64> {
+        let mut b = f64::MAX;
+        for _ in 0..3 {
+            let t = Instant::now();
+            f()?;
+            b = b.min(ms(t));
+        }
+        Ok(b)
+    };
+    // Start-up: what is read before word search and faces work.
+    let t = Instant::now();
+    let search = shoebox_lib::search::SearchIndex::open(cat)?;
+    let search_ms = ms(t);
+    let t = Instant::now();
+    let faces = shoebox_lib::faces::FaceIndex::open(cat)?;
+    let faces_ms = ms(t);
+
+    let none = Filters::default();
+    let browse = cat.browse()?;
+    let people = faces.people(cat)?;
+    let view = |scope: Scope| {
+        best(&|| {
+            cat.list_photos(&scope, Sort::default(), &none)?;
+            cat.facets(&scope, &none)?;
+            Ok(())
+        })
+    };
+    let mut views = vec![
+        ("overview".to_string(), best(&|| cat.overview().map(|_| ()))?),
+        ("sidebar".to_string(), best(&|| cat.browse().map(|_| ()))?),
+        ("people".to_string(), best(&|| faces.people(cat).map(|_| ()))?),
+        ("all photos".to_string(), view(Scope::All)?),
+        ("all photos by file name".to_string(), best(&|| cat.list_photos(&Scope::All, Sort::Name, &none).map(|_| ()))?),
+    ];
+    if let Some(c) = browse.gear.cameras.iter().filter(|c| !c.unknown).max_by_key(|c| c.count) {
+        views.push((format!("a camera ({} photos)", c.count), view(Scope::Camera { name: c.name.clone() })?));
+    }
+    if let Some(y) = browse.years.iter().max_by_key(|y| y.count) {
+        views.push((format!("a year ({} photos)", y.count), view(Scope::Date { key: y.year.clone() })?));
+    }
+    if let Some(p) = people.iter().filter(|p| !p.ignored).max_by_key(|p| p.photos) {
+        views.push((format!("a person ({} photos)", p.photos), view(Scope::Person { id: p.id, new_only: false })?));
+    }
+    let (photos, catalog_bytes): (i64, u64) = (
+        cat.db().query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?,
+        cat.data.db_path().metadata().map(|m| m.len()).unwrap_or(0),
+    );
+    let views: Vec<_> = views.into_iter().map(|(v, ms)| serde_json::json!({ "view": v, "ms": ms })).collect();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "photos": photos,
+            "catalogMb": catalog_bytes >> 20,
+            "memory": cat.memory(),
+            "startup": { "wordSearchMs": search_ms, "descriptions": search.indexed(), "facesMs": faces_ms },
+            "views": views,
+            "note": "ms, best of 3; a view is its photos and its filter counts",
+        }))?
+    );
     Ok(())
 }
