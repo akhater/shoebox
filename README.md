@@ -172,10 +172,13 @@ cd src-tauri
 cargo run --bin shoebox-cli -- stats
 ```
 
+Tests: `npm test` for the window (Vitest and jsdom, against a fake backend
+in `src/test`), `cargo test` in `src-tauri` for the rest.
+
 ## Contributing
 
 Issues and pull requests are welcome. Every change goes through a pull request
 and is merged only when CI passes: formatting, lint, tests (including the
-guards that keep photo files read-only), type check and build. Release builds
-are produced only when a release is published. See
+guards that keep photo files read-only and the window responsive), type check
+and build. Release builds are produced only when a release is published. See
 [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
