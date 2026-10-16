@@ -27,7 +27,8 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
 - **People.** Faces are detected and grouped automatically. Name a person once
   and find every photo they appear in. **Check** finds likely mix-ups among
   the people you named (someone twice in a photo, a sibling filed under the
-  wrong child, one person under two names) to fix in a click, with Undo.
+  wrong child, one person under two names) to fix in a click, with Undo, or
+  to leave as is: it stays out of the next checks until something changes.
 - **Filters** by person, tag, date, camera, lens, file type and status
   (online, offline, missing).
 - **Tags** that stay with the photo, even when the file is moved or copied.

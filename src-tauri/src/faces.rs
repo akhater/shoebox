@@ -328,6 +328,28 @@ fn near_in_time(sorted: &[i64], ts: i64) -> bool {
     sorted.get(i).is_some_and(|&t| t <= ts + NEAR_DAYS * 86_400)
 }
 
+/// People check: sets `left` on the findings left as is (as `seen`, nothing
+/// new in them since) and keeps those only when `all`. Returns how many.
+fn left_out<T>(
+    found: &mut Vec<T>,
+    seen: &HashMap<(&'static str, i64, i64), LeftAsIs>,
+    all: bool,
+    left: fn(&mut T) -> &mut bool,
+) -> usize
+where
+    for<'a> &'a T: Into<LeftAsIs>,
+{
+    let mut n = 0;
+    found.retain_mut(|f| {
+        let now: LeftAsIs = (&*f).into();
+        let is_left = seen.get(&now.key()).is_some_and(|s| s.covers(&now));
+        *left(f) = is_left;
+        n += is_left as usize;
+        all || !is_left
+    });
+    n
+}
+
 /// The calendar year of a photo's `taken_ts` (camera time, read as UTC).
 fn year_of(ts: i64) -> Option<i32> {
     chrono::DateTime::from_timestamp(ts, 0).map(|d| chrono::Datelike::year(&d))
@@ -396,15 +418,19 @@ pub struct CandidateDay {
 
 /// "Check" in People: likely mix-ups among named people, found from their
 /// faces and the dates of their photos. Nothing changes until the user acts
-/// on a finding (`reassign`, `merge`). A face is in one finding at most: twice
-/// in a photo, else much more like someone near in time, else an age jump,
-/// else much more like someone far off in time.
+/// on a finding (`reassign`, `merge`), or leaves it as is ([`leave_as_is`]).
+/// A face is in one finding at most: twice in a photo, else much more like
+/// someone near in time, else an age jump, else much more like someone far
+/// off in time - findings left as is included.
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeopleCheck {
     /// Named people checked (ignored ones aren't), and their faces.
     pub people: usize,
     pub faces: usize,
+    /// Findings the user left as is: left out, unless all were asked for
+    /// (then listed, `left` set).
+    pub left: usize,
     /// Someone twice in one photo: all but one of the faces are someone else.
     pub twice: Vec<Twice>,
     /// Faces unlike the person that year but like them years apart: a
@@ -439,6 +465,8 @@ pub struct Twice {
     /// Suggested: these leave them for whoever they resemble
     /// (`FaceTarget::Elsewhere`) - all but the most alike.
     pub elsewhere: Vec<i64>,
+    /// Left as is by the user.
+    pub left: bool,
 }
 
 /// A face unlike the person in its own year, like them years apart.
@@ -454,6 +482,8 @@ pub struct AgeJump {
     /// The year of theirs it looks most like, and how much.
     pub like_year: i32,
     pub like: f32,
+    /// Left as is by the user.
+    pub left: bool,
 }
 
 /// A face much more like another named person than like its own.
@@ -469,6 +499,8 @@ pub struct LikeOther {
     /// Its photo is within [`NEAR_DAYS`] of one of theirs: suggested. When
     /// not, unsure - to the model newborns all look alike.
     pub near: bool,
+    /// Left as is by the user.
+    pub left: bool,
 }
 
 /// Two named people who may be one: alike and never in the same photo (one
@@ -487,6 +519,96 @@ pub struct SamePerson {
     /// Photos they are both in. Only with none is merging suggested: a
     /// person is once per photo.
     pub together: usize,
+    /// Left as is by the user.
+    pub left: bool,
+}
+
+/// A [`PeopleCheck`] finding the user looked at and kept ("Leave as is"):
+/// someone really twice in a photo (a reflection, a collage), look-alikes who
+/// are two people. Stored as it was seen ([`leave_as_is`]); the check leaves
+/// it out until what it is about changes - another face of theirs in that
+/// photo, the face now in someone else or more like someone else.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum LeftAsIs {
+    /// Someone twice in a photo, with these faces.
+    Twice { person_id: i64, photo_id: i64, faces: Vec<i64> },
+    /// A face of a person from another age.
+    AgeJump { person_id: i64, face_id: i64 },
+    /// A face of a person, much more like another.
+    LikeOther { person_id: i64, face_id: i64, other_id: i64 },
+    /// Two people who may be one, in either order.
+    SamePerson { person_id: i64, other_id: i64 },
+}
+
+impl LeftAsIs {
+    /// What it is about: its row in `check_left`.
+    fn key(&self) -> (&'static str, i64, i64) {
+        match *self {
+            Self::Twice { person_id, photo_id, .. } => ("twice", photo_id, person_id),
+            Self::AgeJump { face_id, .. } => ("ageJump", face_id, 0),
+            Self::LikeOther { face_id, .. } => ("likeOther", face_id, 0),
+            Self::SamePerson { person_id, other_id } => {
+                ("samePerson", person_id.min(other_id), person_id.max(other_id))
+            }
+        }
+    }
+
+    /// Left as is when seen as `self`, and so still as `now` (about the same
+    /// thing): nothing new in it. Faces gone from the photo since don't count.
+    fn covers(&self, now: &Self) -> bool {
+        match (self, now) {
+            (Self::Twice { faces, .. }, Self::Twice { faces: now, .. }) => now.iter().all(|f| faces.contains(f)),
+            (Self::SamePerson { .. }, Self::SamePerson { .. }) => true,
+            (seen, now) => seen == now,
+        }
+    }
+}
+
+impl From<&Twice> for LeftAsIs {
+    fn from(t: &Twice) -> Self {
+        let faces = t.faces.iter().map(|f| f.face_id).collect();
+        Self::Twice { person_id: t.person_id, photo_id: t.photo_id, faces }
+    }
+}
+
+impl From<&AgeJump> for LeftAsIs {
+    fn from(a: &AgeJump) -> Self {
+        Self::AgeJump { person_id: a.person_id, face_id: a.face.face_id }
+    }
+}
+
+impl From<&LikeOther> for LeftAsIs {
+    fn from(l: &LikeOther) -> Self {
+        Self::LikeOther { person_id: l.person_id, face_id: l.face.face_id, other_id: l.other_id }
+    }
+}
+
+impl From<&SamePerson> for LeftAsIs {
+    fn from(s: &SamePerson) -> Self {
+        Self::SamePerson { person_id: s.person_id, other_id: s.other_id }
+    }
+}
+
+/// "Leave as is": the check leaves these findings out from now on, until
+/// they change; not `left`, they are back in it. Returns how many changed.
+pub fn leave_as_is(cat: &Catalog, findings: &[LeftAsIs], left: bool) -> Result<usize> {
+    let mut db = cat.db();
+    let tx = db.transaction()?;
+    let mut n = 0;
+    for f in findings {
+        let (kind, id, id2) = f.key();
+        n += if left {
+            tx.execute(
+                "INSERT OR REPLACE INTO check_left (kind, id, id2, seen, left_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![kind, id, id2, serde_json::to_string(f)?, crate::db::now()],
+            )?
+        } else {
+            tx.execute("DELETE FROM check_left WHERE kind = ?1 AND id = ?2 AND id2 = ?3", params![kind, id, id2])?
+        };
+    }
+    tx.commit()?;
+    Ok(n)
 }
 
 /// What "Same person" changed: `unmerge` puts it back (Undo).
@@ -1677,13 +1799,23 @@ impl FaceIndex {
         Ok(days)
     }
 
-    /// "Check" in People: likely mix-ups among named people ([`PeopleCheck`]).
-    /// Every named face's fingerprint is read once, in face order, on a
-    /// connection of its own: faces found or moved meanwhile don't wait.
-    pub fn check_people(&self, cat: &Catalog) -> Result<PeopleCheck> {
+    /// "Check" in People: likely mix-ups among named people ([`PeopleCheck`]),
+    /// but those left as is ([`leave_as_is`]) unless `all`. Every named face's
+    /// fingerprint is read once, in face order, on a connection of its own:
+    /// faces found or moved meanwhile don't wait.
+    pub fn check_people(&self, cat: &Catalog, all: bool) -> Result<PeopleCheck> {
         self.ready.wait()?;
-        let (names, faces) = {
+        let (names, faces, seen) = {
             let db = cat.read()?;
+            // Findings left as is, as they were seen.
+            let seen: HashMap<(&'static str, i64, i64), LeftAsIs> = db
+                .prepare("SELECT seen FROM check_left")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .iter()
+                .filter_map(|s| serde_json::from_str::<LeftAsIs>(s).ok())
+                .map(|l| (l.key(), l))
+                .collect();
             let names: HashMap<i64, String> = db
                 .prepare("SELECT id, name FROM people WHERE name IS NOT NULL AND ignored = 0")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -1700,7 +1832,7 @@ impl FaceIndex {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, taken.filter(|t| *t > 0)))
                 })?
                 .collect::<rusqlite::Result<_>>()?;
-            (names, faces)
+            (names, faces, seen)
         };
 
         // The named people with faces, by index, and their average faces side
@@ -1805,6 +1937,7 @@ impl FaceIndex {
                         other_id: people[o],
                         other,
                         near: false,
+                        left: false,
                     });
                     when.extend(f.taken.map(|t| (fid, t)));
                 }
@@ -1869,7 +2002,7 @@ impl FaceIndex {
                 continue;
             };
             if like >= CHECK_YEAR_LIKE && own <= like - CHECK_YEAR_GAP {
-                age_jumps.push(AgeJump { person_id: people[pi], face, year: y, own, like_year, like });
+                age_jumps.push(AgeJump { person_id: people[pi], face, year: y, own, like_year, like, left: false });
             }
         }
 
@@ -1892,6 +2025,7 @@ impl FaceIndex {
                         photo_id: fs[0].photo_id,
                         elsewhere: fs[1..].iter().map(|f| f.face_id).collect(),
                         faces: fs,
+                        left: false,
                     }
                 })
                 .collect();
@@ -1937,6 +2071,7 @@ impl FaceIndex {
                     similarity,
                     same_name,
                     together,
+                    left: false,
                 });
             }
         }
@@ -1944,7 +2079,13 @@ impl FaceIndex {
             b.similarity.total_cmp(&a.similarity).then((a.person_id, a.other_id).cmp(&(b.person_id, b.other_id)))
         });
 
-        Ok(PeopleCheck { people: k, faces: checked, twice, age_jumps, like_others, same_people })
+        // Left as is: still holding their faces above, left out here.
+        let mut twice = twice;
+        let left = left_out(&mut twice, &seen, all, |t| &mut t.left)
+            + left_out(&mut age_jumps, &seen, all, |a| &mut a.left)
+            + left_out(&mut like_others, &seen, all, |l| &mut l.left)
+            + left_out(&mut same_people, &seen, all, |s| &mut s.left);
+        Ok(PeopleCheck { people: k, faces: checked, left, twice, age_jumps, like_others, same_people })
     }
 
     /// The faces found in one photo, for the viewer.

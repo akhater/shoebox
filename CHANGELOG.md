@@ -20,6 +20,15 @@ Newest first. Same format and versioning as Argentum.
   `shoebox-cli people-check` gives the same list as JSON; `people-merge`
   now prints what it changed, and `people-unmerge` undoes it.
 
+- **Leave as is, in Check.** Each card of Check has "Leave as is" for what
+  you looked at and kept: someone really twice in a photo (a reflection, a
+  collage), look-alikes who are two people. Kept in the catalog, Check
+  leaves it out from then on, until it changes: another face of theirs in
+  that photo, the face now in someone else or more like someone else.
+  "Show N left as is" lists them again, with "Bring back".
+  `shoebox-cli people-leave` does the same headless; `people-check --all`
+  lists those left as is too.
+
 - **Find more of a person.** A person's page has "Find more…": the faces in
   other people that look more like them than like the rest of the person
   they're in, faces placed by hand included, grouped by the day they were
