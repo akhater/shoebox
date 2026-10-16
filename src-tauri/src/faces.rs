@@ -41,6 +41,9 @@ const LOOKS_LIKE: f32 = 0.3;
 /// weak to group automatically. They are kept, ungrouped, for a later pass on
 /// the full-size photo.
 const GROUP_MIN_PX: f32 = 40.0;
+/// "Find more" ticks the faces from photos taken this close to one of the
+/// person's own: children change fast, and to the model babies look alike.
+pub const NEAR_DAYS: i64 = 31;
 /// Bump when the grouping rules change: catalogs sorted under older rules
 /// get their untouched faces regrouped once at start.
 const GROUPING_RULES: &str = "2";
@@ -417,6 +420,34 @@ pub struct Stray {
     pub by_hand: bool,
 }
 
+/// A face in someone else that may be this person ("Find more").
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Candidate {
+    pub face_id: i64,
+    pub photo_id: i64,
+    /// The person it's in now.
+    pub person_id: i64,
+    /// Likeness to the person asked about, 0..1.
+    pub similarity: f32,
+    /// Likeness to the rest of the person it's in; none when it's their only face.
+    pub now: Option<f32>,
+    /// The user put it where it is.
+    pub by_hand: bool,
+}
+
+/// One day's faces in "Find more".
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateDay {
+    /// The day the photos were taken (YYYY-MM-DD); none when unknown.
+    pub day: Option<String>,
+    /// Within [`NEAR_DAYS`] of a photo the person is in: ticked to start with.
+    pub near: bool,
+    /// The most alike first.
+    pub faces: Vec<Candidate>,
+}
+
 /// Where faces go when the user says who they are.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -543,6 +574,8 @@ pub struct FaceIndex {
     /// Open once the averages are read (and any regrouping done): every
     /// method waits for it, so none works from half the people.
     ready: crate::Ready,
+    /// People as last listed, until the catalog changes.
+    kept_people: crate::catalog::Kept<Vec<Person>>,
 }
 
 impl FaceIndex {
@@ -585,6 +618,7 @@ impl FaceIndex {
             models: Mutex::new(None),
             centroids: RwLock::new(Averages::default()),
             ready: crate::Ready::default(),
+            kept_people: crate::catalog::Kept::new(1),
         })
     }
 
@@ -974,6 +1008,15 @@ impl FaceIndex {
     /// Everyone, named people first, then by how many photos they're in.
     pub fn people(&self, cat: &Catalog) -> Result<Vec<Person>> {
         self.ready.wait()?;
+        self.kept_people.get(cat, String::new(), || self.people_now(cat))
+    }
+
+    /// Forgets the people list kept, so the next one is worked out again (to time it).
+    pub fn forget_kept(&self) {
+        self.kept_people.clear();
+    }
+
+    fn people_now(&self, cat: &Catalog) -> Result<Vec<Person>> {
         let db = cat.read()?;
         let people = db
             .prepare(
@@ -1436,6 +1479,106 @@ impl FaceIndex {
             return Ok(Vec::new());
         }
         Ok(all.into_iter().filter(|s| !s.by_hand && s.similarity < SAME_PERSON).collect())
+    }
+
+    /// "Find more": faces in other people that look more like this person
+    /// than like the rest of the person they're in - Clean up the other way
+    /// round. Faces placed by hand are offered too: the user decides, face by
+    /// face, and nothing moves until they do. Grouped by the day the photo was
+    /// taken: to the model babies all look alike, while a person looks like
+    /// themselves around the same time, so the days near the person's own
+    /// photos come first and start ticked. A photo they're already in is
+    /// left out (a person stays once per photo).
+    pub fn more_of(&self, cat: &Catalog, person_id: i64) -> Result<Vec<CandidateDay>> {
+        self.ready.wait()?;
+        let target = {
+            let c = self.centroids.read().unwrap();
+            match c.get(&person_id) {
+                Some((sum, n)) if *n > 0 => unit(sum.clone()),
+                _ => return Ok(Vec::new()),
+            }
+        };
+        let db = cat.read()?;
+        let faces: Vec<(i64, i64, i64, bool)> = db
+            .prepare("SELECT id, person_id, photo_id, by_hand FROM faces WHERE person_id IS NOT NULL ORDER BY id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let theirs: HashSet<i64> = faces.iter().filter(|f| f.1 == person_id).map(|f| f.2).collect();
+
+        // Alike enough to be them: one pass over the fingerprints, in face order.
+        let mut alike: Vec<(i64, i64, i64, bool, f32, Vec<f32>)> = Vec::new();
+        {
+            let mut faces = faces.iter().filter(|f| f.1 != person_id && !theirs.contains(&f.2)).peekable();
+            let emb = self.db.lock().unwrap();
+            let mut stmt = emb.prepare("SELECT face_id, vec FROM emb ORDER BY face_id")?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                let fid: i64 = r.get(0)?;
+                while faces.next_if(|f| f.0 < fid).is_some() {}
+                let Some(&(_, pid, photo, by_hand)) = faces.next_if(|f| f.0 == fid) else { continue };
+                let blob = r.get_ref(1)?.as_blob()?;
+                if blob.len() != DIM * 4 {
+                    continue;
+                }
+                let v: Vec<f32> = blob.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+                let s = dot(&v, &target);
+                if s >= SAME_PERSON {
+                    alike.push((fid, pid, photo, by_hand, s, v));
+                }
+            }
+        }
+
+        // More like them than like the rest of their own person (a face alone
+        // in its person has no rest to compare with).
+        let mut found: Vec<Candidate> = Vec::new();
+        {
+            let c = self.centroids.read().unwrap();
+            for (fid, pid, photo, by_hand, s, v) in alike {
+                let now = c.get(&pid).filter(|(_, n)| *n > 1).map(|(sum, _)| {
+                    let rest: Vec<f32> = sum.iter().zip(&v).map(|(a, b)| a - b).collect();
+                    let norm = rest.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::EPSILON);
+                    dot(&rest, &v) / norm
+                });
+                if now.is_none_or(|n| s > n) {
+                    found.push(Candidate {
+                        face_id: fid,
+                        photo_id: photo,
+                        person_id: pid,
+                        similarity: s,
+                        now,
+                        by_hand,
+                    });
+                }
+            }
+        }
+
+        // By day, and near the person's own photos or not.
+        let mut taken = db.prepare("SELECT taken_ts FROM photos WHERE id = ?1 AND COALESCE(taken_ts, 0) > 0")?;
+        let mut when = |photo: i64| -> Result<Option<i64>> { Ok(taken.query_row([photo], |r| r.get(0)).optional()?) };
+        let mut own: Vec<i64> = Vec::new();
+        for &photo in &theirs {
+            own.extend(when(photo)?);
+        }
+        own.sort_unstable();
+        let near = |ts: i64| {
+            let i = own.partition_point(|&t| t < ts - NEAR_DAYS * 86_400);
+            own.get(i).is_some_and(|&t| t <= ts + NEAR_DAYS * 86_400)
+        };
+        let mut days: HashMap<Option<String>, CandidateDay> = HashMap::new();
+        for f in found {
+            let ts = when(f.photo_id)?;
+            let day = ts.and_then(|t| chrono::DateTime::from_timestamp(t, 0)).map(|d| d.format("%Y-%m-%d").to_string());
+            let d = days.entry(day.clone()).or_insert_with(|| CandidateDay { day, near: false, faces: Vec::new() });
+            d.near |= ts.is_some_and(near);
+            d.faces.push(f);
+        }
+        let mut days: Vec<CandidateDay> = days.into_values().collect();
+        for d in &mut days {
+            d.faces.sort_by(|a, b| b.similarity.total_cmp(&a.similarity).then(a.face_id.cmp(&b.face_id)));
+        }
+        let best = |d: &CandidateDay| d.faces[0].similarity;
+        days.sort_by(|a, b| b.near.cmp(&a.near).then(best(b).total_cmp(&best(a))).then(a.day.cmp(&b.day)));
+        Ok(days)
     }
 
     /// The faces found in one photo, for the viewer.

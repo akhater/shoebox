@@ -53,6 +53,10 @@
 //!       a face already theirs in that photo makes room
 //!   shoebox-cli restore-faces '<undo JSON>'   undo a move-faces (its "undo" output)
 //!   shoebox-cli person-strays <person-id> [--apply]   Clean up: faces unlike the person
+//!   shoebox-cli more-faces <person-id> [--apply]   Find more: faces in other people that look more
+//!       like this person than like the person they are in (placed by hand too), by day, the days
+//!       within 31 days of their own photos marked "near"; --apply moves the near ones to them
+//!       (placed by hand; its "undo" output goes to restore-faces)
 //!   shoebox-cli person-rename <person-id> ["name"]    name someone (no name: unnamed again).
 //!       A name already taken makes two people called the same, never one
 //!   shoebox-cli people-merge <person-id>... --into <person-id>   "Same person": they become
@@ -336,6 +340,20 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::json!({ "moved": moved.faces }));
             } else {
                 println!("{}", serde_json::to_string_pretty(&strays)?);
+            }
+        }
+        Some("more-faces") => {
+            // Faces elsewhere that may be the person: shoebox-cli more-faces <id> [--apply]
+            let pid: i64 = args.get(1).ok_or_else(|| anyhow::anyhow!("more-faces <person-id> [--apply]"))?.parse()?;
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            let days = faces.more_of(&cat, pid)?;
+            if args.get(2).is_some_and(|a| a == "--apply") {
+                let ids: Vec<i64> =
+                    days.iter().filter(|d| d.near).flat_map(|d| d.faces.iter().map(|f| f.face_id)).collect();
+                let to = shoebox_lib::faces::FaceTarget::Person { id: pid };
+                println!("{}", serde_json::to_string_pretty(&faces.reassign(&cat, &ids, &to)?)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&days)?);
             }
         }
         Some("person-rename") => {
@@ -644,15 +662,6 @@ fn bench(cat: &Catalog, args: &[String]) -> anyhow::Result<()> {
     }
     cat.set_memory(memory)?;
     let ms = |t: Instant| (t.elapsed().as_secs_f64() * 10_000.0).round() / 10.0;
-    let best = |f: &dyn Fn() -> anyhow::Result<()>| -> anyhow::Result<f64> {
-        let mut b = f64::MAX;
-        for _ in 0..3 {
-            let t = Instant::now();
-            f()?;
-            b = b.min(ms(t));
-        }
-        Ok(b)
-    };
     // Start-up: what is read before word search and faces work.
     let t = Instant::now();
     let search = shoebox_lib::search::SearchIndex::open(cat)?;
@@ -660,6 +669,23 @@ fn bench(cat: &Catalog, args: &[String]) -> anyhow::Result<()> {
     let t = Instant::now();
     let faces = shoebox_lib::faces::FaceIndex::open(cat)?;
     let faces_ms = ms(t);
+    // Worked out each time (the answers kept are forgotten first), then asked
+    // again with nothing changed: what the window gets back from memory.
+    let timed = |f: &dyn Fn() -> anyhow::Result<()>, fresh: bool| -> anyhow::Result<f64> {
+        let mut b = f64::MAX;
+        for _ in 0..3 {
+            if fresh {
+                cat.forget_kept();
+                faces.forget_kept();
+            }
+            let t = Instant::now();
+            f()?;
+            b = b.min(ms(t));
+        }
+        Ok(b)
+    };
+    let best =
+        |f: &dyn Fn() -> anyhow::Result<()>| -> anyhow::Result<(f64, f64)> { Ok((timed(f, true)?, timed(f, false)?)) };
 
     let none = Filters::default();
     let browse = cat.browse()?;
@@ -691,7 +717,10 @@ fn bench(cat: &Catalog, args: &[String]) -> anyhow::Result<()> {
         cat.db().query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?,
         cat.data.db_path().metadata().map(|m| m.len()).unwrap_or(0),
     );
-    let views: Vec<_> = views.into_iter().map(|(v, ms)| serde_json::json!({ "view": v, "ms": ms })).collect();
+    let views: Vec<_> = views
+        .into_iter()
+        .map(|(v, (ms, kept))| serde_json::json!({ "view": v, "ms": ms, "askedAgainMs": kept }))
+        .collect();
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -700,7 +729,7 @@ fn bench(cat: &Catalog, args: &[String]) -> anyhow::Result<()> {
             "memory": cat.memory(),
             "startup": { "wordSearchMs": search_ms, "descriptions": search.indexed(), "facesMs": faces_ms },
             "views": views,
-            "note": "ms, best of 3; a view is its photos and its filter counts",
+            "note": "ms, best of 3; a view is its photos and its filter counts; askedAgainMs: the same with nothing changed",
         }))?
     );
     Ok(())

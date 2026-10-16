@@ -9,8 +9,9 @@ use crate::volumes::{self, MountedVolume};
 use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 pub struct Catalog {
@@ -27,6 +28,17 @@ pub struct Catalog {
     /// (renamed, moved, deleted): (volume id, relative path). Their photos are
     /// treated like an unplugged disk's - unreachable, not missing.
     unreachable: RwLock<Vec<(i64, String)>>,
+    /// Notices every commit to the catalog, by Shoebox or another program
+    /// (shoebox-cli): a connection that never writes, its `data_version` last
+    /// seen, and how many times it changed. See [`Catalog::generation`].
+    watch: Mutex<(Connection, i64, u64)>,
+    /// How many times the disks plugged in, or the catalog folders found, changed.
+    disks_changed: AtomicU64,
+    /// Answers kept until the catalog changes: asked again, they come back at once.
+    kept_overview: Kept<Overview>,
+    kept_browse: Kept<Browse>,
+    kept_lists: Kept<PhotoList>,
+    kept_facets: Kept<Facets>,
 }
 
 impl Catalog {
@@ -36,6 +48,8 @@ impl Catalog {
         let memory = memory_for(&settings, &data);
         let conn = db::open(&data.db_path(), memory)?;
         gear::tidy_if_new_rules(&conn)?;
+        let watch = db::open_reader(&data.db_path(), db::Memory { cache_mb: 1, map_mb: 0 })?;
+        let version: i64 = watch.query_row("PRAGMA data_version", [], |r| r.get(0))?;
         let cat = Self {
             data,
             db: Mutex::new(conn),
@@ -44,6 +58,13 @@ impl Catalog {
             settings: RwLock::new(settings),
             online: RwLock::new(HashMap::new()),
             unreachable: RwLock::new(Vec::new()),
+            watch: Mutex::new((watch, version, 0)),
+            disks_changed: AtomicU64::new(0),
+            kept_overview: Kept::new(1),
+            kept_browse: Kept::new(1),
+            // A list of 190,000 photos is about 20 MB: the last three views.
+            kept_lists: Kept::new(3),
+            kept_facets: Kept::new(8),
         };
         cat.refresh_volumes()?;
         cat.refresh_roots()?;
@@ -67,6 +88,9 @@ impl Catalog {
         let mut cur = self.unreachable.write().unwrap();
         let changed = *cur != gone;
         *cur = gone;
+        if changed {
+            self.disks_changed.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(changed)
     }
 
@@ -88,6 +112,27 @@ impl Catalog {
             None => db::open_reader(&self.data.db_path(), self.memory())?,
         };
         Ok(Reader { cat: self, conn: Some(conn) })
+    }
+
+    /// Changes whenever the catalog does: anything committed to it, by Shoebox
+    /// or another program, or a disk or catalog folder coming or going. An
+    /// answer worked out at one generation is good for as long as it lasts.
+    pub fn generation(&self) -> Result<Generation> {
+        let mut watch = self.watch.lock().unwrap_or_else(|e| e.into_inner());
+        let version: i64 = watch.0.query_row("PRAGMA data_version", [], |r| r.get(0))?;
+        if version != watch.1 {
+            watch.1 = version;
+            watch.2 += 1;
+        }
+        Ok((watch.2, self.disks_changed.load(Ordering::SeqCst)))
+    }
+
+    /// Forgets the answers kept, so the next ones are worked out again (to time them).
+    pub fn forget_kept(&self) {
+        self.kept_overview.clear();
+        self.kept_browse.clear();
+        self.kept_lists.clear();
+        self.kept_facets.clear();
     }
 
     pub fn settings(&self) -> Settings {
@@ -153,6 +198,9 @@ impl Catalog {
         let mut online = self.online.write().unwrap();
         let changed = *online != now_online;
         *online = now_online;
+        if changed {
+            self.disks_changed.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(changed)
     }
 
@@ -175,6 +223,7 @@ impl Catalog {
             )?
         };
         self.online.write().unwrap().insert(id, folder.to_string_lossy().into_owned());
+        self.disks_changed.fetch_add(1, Ordering::SeqCst);
         self.refresh_roots()?;
         Ok(id)
     }
@@ -214,6 +263,7 @@ impl Catalog {
         let id = tx.last_insert_rowid();
         tx.commit()?;
         self.online.write().unwrap().insert(vid, mv.mount.clone());
+        self.disks_changed.fetch_add(1, Ordering::SeqCst);
         Ok(id)
     }
 
@@ -349,6 +399,10 @@ impl Catalog {
     }
 
     pub fn overview(&self) -> Result<Overview> {
+        self.kept_overview.get(self, String::new(), || self.overview_now())
+    }
+
+    fn overview_now(&self) -> Result<Overview> {
         let online = self.online.read().unwrap().clone();
         let state = state_sql(&self.online_sql());
         let db = self.read()?;
@@ -428,7 +482,8 @@ impl Catalog {
     /// Photos in a scope narrowed by `filters`, in `sort` order, as parallel
     /// arrays (compact for 100k+).
     pub fn list_photos(&self, scope: &Scope, sort: Sort, filters: &Filters) -> Result<PhotoList> {
-        self.list_among(scope, sort, filters, None)
+        let asked = serde_json::to_string(&(scope, sort, filters))?;
+        self.kept_lists.get(self, asked, || self.list_among(scope, sort, filters, None))
     }
 
     /// [`Catalog::list_photos`], only among the photos `only` (when given).
@@ -517,6 +572,11 @@ impl Catalog {
     /// stays possible after ticking the first. People or tags asking for all
     /// of them count with their own ticks too: only who is with them is left.
     pub fn facets(&self, scope: &Scope, filters: &Filters) -> Result<Facets> {
+        let asked = serde_json::to_string(&(scope, filters))?;
+        self.kept_facets.get(self, asked, || self.facets_now(scope, filters))
+    }
+
+    fn facets_now(&self, scope: &Scope, filters: &Filters) -> Result<Facets> {
         let db = self.read()?;
         let state = state_sql(&self.online_sql());
         let (filter, p1, p2) = self.scope_sql(&db, scope, &state)?;
@@ -681,6 +741,10 @@ impl Catalog {
 
     /// Ways to browse: dates, cameras and lenses, and the folder tree under each root.
     pub fn browse(&self) -> Result<Browse> {
+        self.kept_browse.get(self, String::new(), || self.browse_now())
+    }
+
+    fn browse_now(&self) -> Result<Browse> {
         let db = self.read()?;
 
         let mut years: Vec<YearNode> = Vec::new();
@@ -1025,6 +1089,50 @@ fn memory_for(s: &Settings, data: &DataDir) -> db::Memory {
     db::Memory::for_catalog(s.catalog_cache_mb, s.catalog_map_mb, bytes)
 }
 
+/// The latest few answers, by what was asked, each with the
+/// [`Catalog::generation`] it was worked out at: given again only while the
+/// catalog hasn't changed since.
+pub(crate) struct Kept<T> {
+    room: usize,
+    answers: Mutex<VecDeque<Answer<T>>>,
+}
+
+/// What [`Catalog::generation`] counts: commits seen, and disk or folder changes.
+pub type Generation = (u64, u64);
+
+struct Answer<T> {
+    asked: String,
+    at: Generation,
+    answer: T,
+}
+
+impl<T: Clone> Kept<T> {
+    pub(crate) fn new(room: usize) -> Self {
+        Self { room, answers: Mutex::new(VecDeque::new()) }
+    }
+
+    pub(crate) fn clear(&self) {
+        self.answers.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    pub(crate) fn get(&self, cat: &Catalog, asked: String, work: impl FnOnce() -> Result<T>) -> Result<T> {
+        // Taken before working: a change made meanwhile makes this answer old.
+        let now = cat.generation()?;
+        {
+            let answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(a) = answers.iter().find(|a| a.asked == asked && a.at == now) {
+                return Ok(a.answer.clone());
+            }
+        }
+        let answer = work()?;
+        let mut answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
+        answers.retain(|a| a.asked != asked);
+        answers.push_front(Answer { asked, at: now, answer: answer.clone() });
+        answers.truncate(self.room);
+        Ok(answer)
+    }
+}
+
 /// A reading connection from [`Catalog::read`]; back to the pool when dropped.
 pub struct Reader<'a> {
     cat: &'a Catalog,
@@ -1332,7 +1440,7 @@ fn has_sql(m: Match, n: u8, rows: &str, col: &str) -> String {
 }
 
 /// Someone the People filter offers.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PersonValue {
     pub id: i64,
@@ -1343,14 +1451,14 @@ pub struct PersonValue {
     pub count: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FacetValue {
     pub value: String,
     pub count: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TypeValue {
     /// Extension, lower case.
@@ -1359,7 +1467,7 @@ pub struct TypeValue {
     pub count: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Facets {
     /// Days ("2026-09-26") and "unknown", oldest first; the window rolls them up into months and years.
@@ -1390,7 +1498,7 @@ pub enum Sort {
 
 const SEP: char = std::path::MAIN_SEPARATOR;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Browse {
     pub years: Vec<YearNode>,
@@ -1399,7 +1507,7 @@ pub struct Browse {
     pub folders: Vec<RootTree>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct YearNode {
     pub year: String,
@@ -1407,7 +1515,7 @@ pub struct YearNode {
     pub months: Vec<MonthNode>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MonthNode {
     pub key: String,
@@ -1415,14 +1523,14 @@ pub struct MonthNode {
     pub count: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RootTree {
     pub root_id: i64,
     pub children: Vec<FolderNode>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderNode {
     pub name: String,
@@ -1526,7 +1634,7 @@ mod tests {
     }
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct PhotoList {
     pub ids: Vec<i64>,
     pub taken: Vec<i64>,
@@ -1561,7 +1669,7 @@ pub struct Day {
     pub photos: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Overview {
     pub volumes: Vec<VolumeInfo>,
@@ -1574,7 +1682,7 @@ pub struct Overview {
     pub data_dir: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeInfo {
     pub id: i64,
@@ -1586,7 +1694,7 @@ pub struct VolumeInfo {
     pub roots: Vec<RootInfo>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RootInfo {
     pub id: i64,
