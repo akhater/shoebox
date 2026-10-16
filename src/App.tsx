@@ -17,6 +17,7 @@ import {
   Trash2,
   Unplug,
   UserCog,
+  UserSearch,
   UserX,
   X,
 } from "lucide-react";
@@ -61,6 +62,7 @@ import { CalendarView } from "./components/CalendarView";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
 import { StraysDialog } from "./components/StraysDialog";
+import { FindMoreDialog } from "./components/FindMoreDialog";
 import { TagEditor } from "./components/Tags";
 import { NameEditor, PeopleView, PersonSearch } from "./components/PeopleView";
 import { PhotoGrid } from "./components/PhotoGrid";
@@ -268,6 +270,7 @@ export default function App() {
   const [personFound, setPersonFound] = useState<Person[] | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [straysFor, setStraysFor] = useState<Person | null>(null);
+  const [moreFor, setMoreFor] = useState<Person | null>(null);
   // "Who is this?" for a person's face in the selected photos.
   const [reassigning, setReassigning] = useState<{ faceIds: number[]; from: Person; photos: number } | null>(null);
   // Faces changed in the viewer: the grid is reloaded when it closes.
@@ -1115,6 +1118,15 @@ export default function App() {
                 <UserCog size={15} /> Clean up faces…
               </button>
             )}
+            {view === "photos" && scope.kind === "person" && (
+              <button
+                className="btn ghost"
+                onClick={() => setMoreFor(peopleList.find((p) => p.id === scope.id) ?? null)}
+                title="Find faces in other people that look more like them, and move them here"
+              >
+                <UserSearch size={15} /> Find more…
+              </button>
+            )}
             {view === "photos" && scope.kind === "person" && (freshHere > 0 || newOnlyHere) && (
               <button
                 className={`btn ghost ${newOnlyHere ? "on" : ""}`}
@@ -1375,6 +1387,17 @@ export default function App() {
           onDone={(moved, to) => {
             facesMoved(moved, to, straysFor);
             setStraysFor(null);
+          }}
+        />
+      )}
+      {moreFor && (
+        <FindMoreDialog
+          person={moreFor}
+          everyone={peopleList}
+          onClose={() => setMoreFor(null)}
+          onDone={(moved, to) => {
+            facesMoved(moved, to, null);
+            setMoreFor(null);
           }}
         />
       )}

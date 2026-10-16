@@ -721,6 +721,7 @@ pub fn run() {
             commands::look_alikes,
             commands::person_strays,
             commands::person_faces,
+            commands::more_faces,
             commands::photo_faces,
             commands::faces_in_photos,
             commands::ai_status,

@@ -53,6 +53,10 @@
 //!       a face already theirs in that photo makes room
 //!   shoebox-cli restore-faces '<undo JSON>'   undo a move-faces (its "undo" output)
 //!   shoebox-cli person-strays <person-id> [--apply]   Clean up: faces unlike the person
+//!   shoebox-cli more-faces <person-id> [--apply]   Find more: faces in other people that look more
+//!       like this person than like the person they are in (placed by hand too), by day, the days
+//!       within 31 days of their own photos marked "near"; --apply moves the near ones to them
+//!       (placed by hand; its "undo" output goes to restore-faces)
 //!   shoebox-cli person-rename <person-id> ["name"]    name someone (no name: unnamed again).
 //!       A name already taken makes two people called the same, never one
 //!   shoebox-cli people-merge <person-id>... --into <person-id>   "Same person": they become
@@ -336,6 +340,20 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::json!({ "moved": moved.faces }));
             } else {
                 println!("{}", serde_json::to_string_pretty(&strays)?);
+            }
+        }
+        Some("more-faces") => {
+            // Faces elsewhere that may be the person: shoebox-cli more-faces <id> [--apply]
+            let pid: i64 = args.get(1).ok_or_else(|| anyhow::anyhow!("more-faces <person-id> [--apply]"))?.parse()?;
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            let days = faces.more_of(&cat, pid)?;
+            if args.get(2).is_some_and(|a| a == "--apply") {
+                let ids: Vec<i64> =
+                    days.iter().filter(|d| d.near).flat_map(|d| d.faces.iter().map(|f| f.face_id)).collect();
+                let to = shoebox_lib::faces::FaceTarget::Person { id: pid };
+                println!("{}", serde_json::to_string_pretty(&faces.reassign(&cat, &ids, &to)?)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&days)?);
             }
         }
         Some("person-rename") => {

@@ -6,6 +6,14 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **Find more of a person.** A person's page has "Find more…": the faces in
+  other people that look more like them than like the rest of the person
+  they're in, faces placed by hand included, grouped by the day they were
+  taken. The days within a month of the person's own photos start ticked;
+  the others are left to check, since to the face model babies look alike.
+  The ticked faces move to the person in one step, with Undo.
+  `shoebox-cli more-faces <person-id> [--apply]` does the same.
+
 - **Catalog memory, and a benchmark for any computer.** Settings > General >
   Catalog memory sets how much of the catalog is read straight from memory;
   Automatic (the default) follows the catalog's size, and Windows gives the
