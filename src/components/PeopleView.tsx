@@ -1,5 +1,5 @@
 import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Search, Sparkles, Square, UserCheck, X } from "lucide-react";
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { faceUrl, fmtNum, modelsApi, people as peopleApi, sameName, type Person } from "../api";
 import { PeopleCheckDialog } from "./PeopleCheckDialog";
 
@@ -20,6 +20,34 @@ interface Props {
 }
 
 type Group = "named" | "toName" | "ignored";
+
+/** Faces drawn at a time: more as the end of what is drawn comes near the screen. */
+const STEP = 240;
+
+/** Draws the first faces, then more as the list is scrolled near its end:
+ *  thousands at once would hold the window up. All of them where the browser
+ *  can't tell what is on screen. */
+function Grow({ items, draw }: { items: Person[]; draw: (p: Person) => ReactNode }) {
+  const [shown, setShown] = useState(STEP);
+  const end = useRef<HTMLDivElement>(null);
+  const watching = typeof IntersectionObserver !== "undefined";
+  const more = watching && shown < items.length;
+  useEffect(() => {
+    const el = end.current;
+    if (!el || !more) return;
+    const near = new IntersectionObserver((seen) => seen.some((e) => e.isIntersecting) && setShown((n) => n + STEP), {
+      rootMargin: "800px",
+    });
+    near.observe(el);
+    return () => near.disconnect();
+  }, [more, shown]);
+  return (
+    <>
+      {(watching ? items.slice(0, shown) : items).map(draw)}
+      {more && <div ref={end} className="people-more" />}
+    </>
+  );
+}
 
 /** Which groups are folded, remembered between sessions (convenience only).
  *  Ignored starts folded. */
@@ -235,7 +263,13 @@ export const PeopleView = memo(function PeopleView({
           )}
         </div>
         {open &&
-          (list.length ? <div className="people-grid">{list.map(card)}</div> : <p className="muted small people-empty">{empty}</p>)}
+          (list.length ? (
+            <div className="people-grid">
+              <Grow items={list} draw={card} />
+            </div>
+          ) : (
+            <p className="muted small people-empty">{empty}</p>
+          ))}
       </section>
     );
   };

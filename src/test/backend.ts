@@ -1,5 +1,18 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Facets, Merged, Overview, PeopleCheck, Person, PhotoDetail, PhotoList, Placement, Scope, Sort } from "../api";
+import type {
+  CandidateDay,
+  FaceTarget,
+  Facets,
+  Merged,
+  Overview,
+  PeopleCheck,
+  Person,
+  PhotoDetail,
+  PhotoList,
+  Placement,
+  Scope,
+  Sort,
+} from "../api";
 
 /** A photo in the fake catalog. */
 interface Photo {
@@ -156,6 +169,16 @@ export function fakeBackend() {
     };
   };
 
+  /** A face of the unnamed person (8) in this photo, as "Find more" offers it. */
+  const face = (photoId: number, similarity: number) => ({
+    faceId: 1000 + photoId,
+    photoId,
+    personId: 8,
+    similarity,
+    now: 0.4,
+    byHand: false,
+  });
+
   const answer = (cmd: string, a: Record<string, unknown>): unknown => {
     switch (cmd) {
       case "get_overview":
@@ -188,9 +211,30 @@ export function fakeBackend() {
         return 0;
       case "check_people":
         return check;
+      case "more_faces": {
+        // Faces in others that look like Ana: one a day after her photos, one long before.
+        if (a.personId !== 7) return [];
+        const days: CandidateDay[] = [
+          { day: "2026-01-06", near: true, faces: [face(102, 0.8)] },
+          { day: "2024-06-01", near: false, faces: [face(202, 0.6)] },
+        ];
+        return days
+          .map((d) => ({ ...d, faces: d.faces.filter((c) => !inPerson[7].includes(c.photoId)) }))
+          .filter((d) => d.faces.length);
+      }
       case "reassign_faces": {
-        // Every face was Ana's (7) before, seen, Shoebox's guess.
         const ids = a.faceIds as number[];
+        // From 1000, a face id is 1000 + its photo id ("Find more"): the photos move.
+        const moved = ids.filter((f) => f >= 1000).map((f) => f - 1000);
+        if (moved.length) {
+          const to = a.to as FaceTarget;
+          if (to.kind !== "person") throw new Error("only moves to someone in People are faked");
+          for (const id of Object.keys(inPerson)) inPerson[+id] = inPerson[+id].filter((p) => !moved.includes(p));
+          inPerson[to.id] = [...inPerson[to.id], ...moved];
+          people = people.map((p) => ({ ...p, photos: inPerson[p.id].length, faces: inPerson[p.id].length }));
+          return { faces: moved.length, people: [to.id], bumped: [], undo: [] };
+        }
+        // The check's faces: every one was Ana's (7) before, seen, Shoebox's guess.
         const undo: Placement[] = ids.map((faceId) => ({ faceId, personId: 7, byHand: false, seen: true }));
         return { faces: ids.length, people: [], bumped: [], undo };
       }

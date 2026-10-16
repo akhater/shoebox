@@ -20,6 +20,14 @@ Newest first. Same format and versioning as Argentum.
   `shoebox-cli people-check` gives the same list as JSON; `people-merge`
   now prints what it changed, and `people-unmerge` undoes it.
 
+- **Find more of a person.** A person's page has "Find more…": the faces in
+  other people that look more like them than like the rest of the person
+  they're in, faces placed by hand included, grouped by the day they were
+  taken. The days within a month of the person's own photos start ticked;
+  the others are left to check, since to the face model babies look alike.
+  The ticked faces move to the person in one step, with Undo.
+  `shoebox-cli more-faces <person-id> [--apply]` does the same.
+
 - **Catalog memory, and a benchmark for any computer.** Settings > General >
   Catalog memory sets how much of the catalog is read straight from memory;
   Automatic (the default) follows the catalog's size, and Windows gives the
@@ -44,6 +52,19 @@ Newest first. Same format and versioning as Argentum.
   The names follow renames, merges and splits as before. The first start
   after the update takes a moment more (under half a second for 64,000
   photos) while they are stored.
+- **Going back to a view is instant, and a scan no longer floods the
+  window.** What the window asks (a view's photos and filter counts, the
+  sidebar, the totals, People) is kept until the catalog changes - by
+  Shoebox, or by `shoebox-cli` or another program - or a disk comes or
+  goes: asked again, it comes back at once (under 25 ms instead of up to
+  1.6 s on 190,000 photos). While a scan changes the catalog every few
+  seconds, the window never starts a refresh before the last one has
+  answered. `shoebox-cli bench` shows both times.
+- **The thumbnail size slider stays smooth, and People opens at once.**
+  Dragging the slider no longer waits for the grid to be laid out again
+  at each step (tens of milliseconds on a big catalog): the grid follows
+  when it can. People draws its first few hundred faces, and more as the
+  list is scrolled near its end, instead of thousands at once.
 
 - **No more freezes between views.** The window no longer stops drawing
   while it waits for the catalog: its questions run beside the scan and the

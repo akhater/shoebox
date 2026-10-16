@@ -560,6 +560,29 @@ export interface Stray {
   byHand: boolean;
 }
 
+/** A face in someone else that may be this person ("Find more"). */
+export interface Candidate {
+  faceId: number;
+  photoId: number;
+  /** The person it's in now. */
+  personId: number;
+  /** Likeness to the person asked about, 0..1. */
+  similarity: number;
+  /** Likeness to the rest of the person it's in; null when it's their only face. */
+  now: number | null;
+  /** Put where it is by hand. */
+  byHand: boolean;
+}
+
+/** One day's faces in "Find more", the most alike first. */
+export interface CandidateDay {
+  /** "2019-03-26"; null when the date is unknown. */
+  day: string | null;
+  /** Near the person's own photos: ticked to start with. */
+  near: boolean;
+  faces: Candidate[];
+}
+
 /** Where faces go: someone in People, someone new, or (not them, don't know
  *  who) whoever they resemble most. */
 export type FaceTarget = { kind: "person"; id: number } | { kind: "new"; name: string | null } | { kind: "elsewhere" };
@@ -643,6 +666,9 @@ export const people = {
     invoke<{ personId: number; similarity: number }[]>("look_alikes", { faceIds, except }),
   /** Faces in a person that don't look like them, worst first. */
   strays: (personId: number) => invoke<Stray[]>("person_strays", { personId }),
+  /** "Find more": faces in other people that look more like this person than
+   *  like the person they're in, by day, the days near their own photos first. */
+  more: (personId: number) => invoke<CandidateDay[]>("more_faces", { personId }),
   /** Every face of a person, the least like them first. */
   faces: (personId: number) => invoke<Stray[]>("person_faces", { personId }),
   inPhoto: (photoId: number) => invoke<PhotoFace[]>("photo_faces", { photoId }),

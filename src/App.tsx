@@ -17,10 +17,11 @@ import {
   Trash2,
   Unplug,
   UserCog,
+  UserSearch,
   UserX,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   ai,
   api,
@@ -61,6 +62,7 @@ import { CalendarView } from "./components/CalendarView";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
 import { StraysDialog } from "./components/StraysDialog";
+import { FindMoreDialog } from "./components/FindMoreDialog";
 import { TagEditor } from "./components/Tags";
 import { NameEditor, PeopleView, PersonSearch } from "./components/PeopleView";
 import { PhotoGrid } from "./components/PhotoGrid";
@@ -246,6 +248,9 @@ export default function App() {
         }
       : { text, warn: true };
   const [rowHeight, setRowHeight] = useState(loadRowHeight);
+  // The slider follows the mouse at once; the grid, laid out again for each
+  // size (tens of ms on a big catalog), follows when it can.
+  const gridRowHeight = useDeferredValue(rowHeight);
   const [sort, setSort] = useState<Sort>(loadSort);
   // File type (CR3, JPG...) on each thumbnail.
   const [showType, setShowType] = useRemembered("shoebox.showType", false);
@@ -268,6 +273,7 @@ export default function App() {
   const [personFound, setPersonFound] = useState<Person[] | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [straysFor, setStraysFor] = useState<Person | null>(null);
+  const [moreFor, setMoreFor] = useState<Person | null>(null);
   // "Who is this?" for a person's face in the selected photos.
   const [reassigning, setReassigning] = useState<{ faceIds: number[]; from: Person; photos: number } | null>(null);
   // Faces changed in the viewer: the grid is reloaded when it closes.
@@ -351,28 +357,44 @@ export default function App() {
         if (seq === catalogSeq.current) set(v);
       };
     const warn = (e: unknown) => setMessage({ text: String(e), warn: true });
-    api.overview().then(latest(setOverview)).catch(warn);
-    api.browse().then(latest(setBrowse)).catch(warn);
-    people
-      .list()
-      .then(latest(setPeopleList))
-      .catch(() => {});
+    return Promise.all([
+      api.overview().then(latest(setOverview)).catch(warn),
+      api.browse().then(latest(setBrowse)).catch(warn),
+      people
+        .list()
+        .then(latest(setPeopleList))
+        .catch(() => {}),
+    ]);
   }, []);
 
-  const refresh = useCallback(() => {
-    loadView();
-    loadCatalog();
-  }, [loadView, loadCatalog]);
+  const refresh = useCallback(() => Promise.all([loadView(), loadCatalog()]), [loadView, loadCatalog]);
 
   const timer = useRef<number | undefined>(undefined);
   // When People was last reloaded while faces are being found.
   const facesShown = useRef(0);
+  // A refresh asked for by background work (a scan, faces found) never starts
+  // while the last one is still answering: on a big catalog they would pile
+  // up. It runs once that one is done.
+  const refreshing = useRef(false);
+  const again = useRef(false);
   const refreshSoon = useCallback(() => {
     if (timer.current) return;
-    timer.current = window.setTimeout(() => {
+    const go = () => {
       timer.current = undefined;
-      refresh();
-    }, 400);
+      if (refreshing.current) {
+        again.current = true;
+        return;
+      }
+      refreshing.current = true;
+      refresh().finally(() => {
+        refreshing.current = false;
+        if (again.current) {
+          again.current = false;
+          timer.current = window.setTimeout(go, 400);
+        }
+      });
+    };
+    timer.current = window.setTimeout(go, 400);
   }, [refresh]);
 
   // Another view loads only its own photos; the rest is reloaded when the catalog changes.
@@ -1115,6 +1137,15 @@ export default function App() {
                 <UserCog size={15} /> Clean up faces…
               </button>
             )}
+            {view === "photos" && scope.kind === "person" && (
+              <button
+                className="btn ghost"
+                onClick={() => setMoreFor(peopleList.find((p) => p.id === scope.id) ?? null)}
+                title="Find faces in other people that look more like them, and move them here"
+              >
+                <UserSearch size={15} /> Find more…
+              </button>
+            )}
             {view === "photos" && scope.kind === "person" && (freshHere > 0 || newOnlyHere) && (
               <button
                 className={`btn ghost ${newOnlyHere ? "on" : ""}`}
@@ -1283,7 +1314,7 @@ export default function App() {
             <PhotoGrid
               key={loaded.key}
               list={shown}
-              rowHeight={rowHeight}
+              rowHeight={gridRowHeight}
               onOpen={openPhoto}
               onSelect={selectPhotos}
               onMark={setMarked}
@@ -1375,6 +1406,17 @@ export default function App() {
           onDone={(moved, to) => {
             facesMoved(moved, to, straysFor);
             setStraysFor(null);
+          }}
+        />
+      )}
+      {moreFor && (
+        <FindMoreDialog
+          person={moreFor}
+          everyone={peopleList}
+          onClose={() => setMoreFor(null)}
+          onDone={(moved, to) => {
+            facesMoved(moved, to, null);
+            setMoreFor(null);
           }}
         />
       )}

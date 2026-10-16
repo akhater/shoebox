@@ -334,6 +334,13 @@ pub async fn person_strays(state: State<'_, AppState>, person_id: i64) -> Res<Ve
     blocking(move || faces.strays(&cat, person_id)).await
 }
 
+/// "Find more": faces in other people that may be this person, by day.
+#[tauri::command]
+pub async fn more_faces(state: State<'_, AppState>, person_id: i64) -> Res<Vec<crate::faces::CandidateDay>> {
+    let (cat, faces) = (state.cat.clone(), state.faces.clone());
+    blocking(move || faces.more_of(&cat, person_id)).await
+}
+
 /// Every face of a person, the least like them first.
 #[tauri::command]
 pub async fn person_faces(state: State<'_, AppState>, person_id: i64) -> Res<Vec<crate::faces::Stray>> {
