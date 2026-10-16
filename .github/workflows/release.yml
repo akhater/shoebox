@@ -87,13 +87,15 @@ jobs:
       - name: Build
         run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
+      # Not `dpkg-deb -c | grep -q`: grep -q stops reading at the first match,
+      # dpkg-deb then fails writing to the closed pipe, and pipefail fails the step.
       - name: Check shoebox-cli is in the installers
         shell: bash
         run: |
           case "$RUNNER_OS" in
             Windows) grep -q 'shoebox-cli.exe' "$BIN"/nsis/*/installer.nsi ;;
             macOS) test -x "$BIN/bundle/macos/Shoebox.app/Contents/MacOS/shoebox-cli" ;;
-            Linux) dpkg-deb -c "$BIN"/bundle/deb/*.deb | grep -q 'usr/bin/shoebox-cli' ;;
+            Linux) dpkg-deb -c "$BIN"/bundle/deb/*.deb | grep 'usr/bin/shoebox-cli' > /dev/null ;;
           esac
 
       - name: Package
