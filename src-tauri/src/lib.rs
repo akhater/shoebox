@@ -722,6 +722,8 @@ pub fn run() {
             commands::read_all_people,
             commands::rename_person,
             commands::merge_people,
+            commands::unmerge_people,
+            commands::check_people,
             commands::ignore_people,
             commands::regroup_faces,
             commands::reassign_faces,

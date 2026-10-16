@@ -173,4 +173,110 @@ describe("People", () => {
     await key(document.body, "Escape");
     expect(title(host)).toBe("People");
   });
+
+  test("Check: findings by kind, each fixed in one click through the usual moves and merges, each with Undo", async () => {
+    const be = fakeBackend();
+    const person = (id: number, name: string, cover: number) => ({
+      id,
+      name,
+      faces: 1,
+      photos: 1,
+      cover,
+      ignored: false,
+      isNew: false,
+      newPhotos: 0,
+    });
+    be.addPerson(person(9, "Bea", 90), [103]);
+    be.addPerson(person(10, "Bee", 91), [203]);
+    const face = (faceId: number, photoId: number, similarity: number) => ({ faceId, photoId, similarity, byHand: false });
+    be.peopleCheck({
+      people: 3,
+      faces: 40,
+      // Ana twice in photo 101: face 2 is someone else.
+      twice: [{ personId: 7, photoId: 101, faces: [face(1, 101, 0.9), face(2, 101, 0.1)], elsewhere: [2] }],
+      ageJumps: [],
+      likeOthers: [
+        { personId: 7, face: face(3, 201, 0.2), otherId: 9, other: 0.8, near: true },
+        { personId: 7, face: face(4, 301, 0.3), otherId: 10, other: 0.7, near: false },
+      ],
+      samePeople: [{ personId: 9, otherId: 10, similarity: 0.7, sameName: false, together: 0 }],
+    });
+    const host = await renderApp();
+    await click(sidebarItem(host, "People"));
+    await click(byText(host, ".people-bar button", "Check"));
+    await wait(100);
+    expect(be.calls.filter((c) => c.cmd === "check_people")).toHaveLength(1);
+    const dialog = host.querySelector(".check-modal")!;
+    expect([...dialog.querySelectorAll(".check-section h3")].map((h) => h.textContent)).toEqual([
+      "Twice in one photo 1",
+      "More like someone else 1",
+      "Unsure: more like someone else, far apart in time 1",
+      "One person under two names? 1",
+    ]);
+    const cards = () => [...dialog.querySelectorAll<HTMLElement>(".check-card")];
+    const ticks = (c: HTMLElement) => [...c.querySelectorAll(".stray")].map((s) => s.classList.contains("on"));
+    const action = (c: HTMLElement) => c.querySelector<HTMLButtonElement>(".check-card-foot button")!;
+    // Suggested faces come ticked; the unsure ones don't.
+    expect(cards().map(ticks)).toEqual([[false, true], [true], [false], []]);
+    expect(cards().map((c) => action(c).textContent)).toEqual([
+      "Move 1 face out",
+      "Move 1 face to Bea",
+      "Move 0 faces to Bee",
+      "Same person",
+    ]);
+    expect(action(cards()[2]).disabled).toBe(true);
+
+    // Twice: the unlike face leaves for whoever it resembles; Undo puts it back.
+    let from = be.calls.length;
+    await click(action(cards()[0]));
+    await wait(100);
+    expect(be.calls.slice(from).find((c) => c.cmd === "reassign_faces")!.args).toEqual({
+      faceIds: [2],
+      to: { kind: "elsewhere" },
+    });
+    expect(be.cmdsSince(from)).toContain("people"); // People reloaded
+    expect(cards()[0].querySelector(".check-card-foot")!.textContent).toBe("1 face moved.Undo");
+    from = be.calls.length;
+    await click(byText(cards()[0], "button", "Undo"));
+    await wait(100);
+    expect(be.calls.slice(from).find((c) => c.cmd === "restore_faces")!.args).toEqual({
+      placements: [{ faceId: 2, personId: 7, byHand: false, seen: true }],
+    });
+    expect(action(cards()[0]).textContent).toBe("Move 1 face out");
+
+    // Unticked, a face stays where it is; ticked, it moves to the one it looks like.
+    await click(cards()[1].querySelector(".stray")!);
+    expect(action(cards()[1]).textContent).toBe("Move 0 faces to Bea");
+    await click(cards()[1].querySelector(".stray")!);
+    from = be.calls.length;
+    await click(action(cards()[1]));
+    await wait(100);
+    expect(be.calls.slice(from).find((c) => c.cmd === "reassign_faces")!.args).toEqual({
+      faceIds: [3],
+      to: { kind: "person", id: 9 },
+    });
+
+    // Same person: Bee joins Bea. What was about Bee waits for "Check again"; Undo brings her back.
+    from = be.calls.length;
+    await click(action(cards()[3]));
+    await wait(100);
+    expect(be.calls.slice(from).find((c) => c.cmd === "merge_people")!.args).toEqual({ ids: [9, 10], into: 9 });
+    expect(cards()[3].querySelector(".check-card-foot")!.textContent).toBe("Now one person: Bea.Undo");
+    expect(cards()[2].querySelector(".check-card-foot")!.textContent).toBe("Changed since the check: check again.");
+    from = be.calls.length;
+    await click(byText(cards()[3], "button", "Undo"));
+    await wait(100);
+    expect(be.calls.slice(from).find((c) => c.cmd === "unmerge_people")!.args).toEqual({
+      merged: { into: 9, name: "Bea", joined: [{ id: 10, name: "Bee", ignored: false, createdAt: 0, faces: [91] }] },
+    });
+    expect(action(cards()[2]).textContent).toBe("Move 0 faces to Bee");
+    expect(action(cards()[3]).textContent).toBe("Same person");
+
+    // Check again asks once more; Esc closes.
+    await click(byText(dialog, ".modal-head button", "Check again"));
+    await wait(100);
+    expect(be.calls.filter((c) => c.cmd === "check_people")).toHaveLength(2);
+    await key(document.body, "Escape");
+    expect(host.querySelector(".check-modal")).toBeNull();
+  });
 });

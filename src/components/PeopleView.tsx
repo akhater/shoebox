@@ -1,6 +1,7 @@
-import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Search, Sparkles, Square, X } from "lucide-react";
+import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Search, Sparkles, Square, UserCheck, X } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 import { faceUrl, fmtNum, modelsApi, people as peopleApi, sameName, type Person } from "../api";
+import { PeopleCheckDialog } from "./PeopleCheckDialog";
 
 interface Props {
   people: Person[];
@@ -68,6 +69,8 @@ export const PeopleView = memo(function PeopleView({
   }, [none]);
   const [editing, setEditing] = useState<number | null>(null);
   const [showOnce, setShowOnce] = useState(false);
+  // "Check": likely mix-ups among named people.
+  const [checking, setChecking] = useState(false);
   const [folded, fold] = useFolded();
 
   // New people, and people found in new photos, since the last visit.
@@ -113,14 +116,14 @@ export const PeopleView = memo(function PeopleView({
   /** "Same person": this one joins `into`, which keeps its name. */
   const mergeInto = (p: Person, into: Person) => {
     setEditing(null);
-    act(() => peopleApi.merge([p.id, into.id], into.id));
+    act(() => peopleApi.merge([p.id, into.id], into.id).then(() => {}));
   };
 
   const merge = () => {
     // Keep a named person if there is one, else the one with most photos.
     const chosen = people.filter((p) => selected.includes(p.id));
     const into = (chosen.find((p) => p.name) ?? [...chosen].sort((a, b) => b.photos - a.photos)[0]).id;
-    act(() => peopleApi.merge(selected, into));
+    act(() => peopleApi.merge(selected, into).then(() => {}));
   };
 
   if (!people.length) {
@@ -297,6 +300,15 @@ export const PeopleView = memo(function PeopleView({
             <CheckCheck size={14} /> Mark all as read
           </button>
         )}
+        {active.some((p) => p.name) && (
+          <button
+            className="btn small ghost"
+            title="Look for likely mix-ups among named people: someone twice in a photo, a face from another age, faces more like someone else, one person under two names"
+            onClick={() => setChecking(true)}
+          >
+            <UserCheck size={14} /> Check
+          </button>
+        )}
         <button
           className="btn small ghost"
           title="Sort again every face that isn't named, ignored or placed by hand"
@@ -322,6 +334,7 @@ export const PeopleView = memo(function PeopleView({
       {group("named", "Named", named, "Nobody named yet. Click “Add a name” under a face.")}
       {group("toName", "To name", toName, "Everyone found is named.")}
       {group("ignored", "Ignored", ignored, "Nobody ignored. Strangers you ignore go here; their new faces still join them.")}
+      {checking && <PeopleCheckDialog everyone={people} onChanged={onChanged} onClose={() => setChecking(false)} />}
     </div>
   );
 });

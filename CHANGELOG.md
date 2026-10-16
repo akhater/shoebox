@@ -6,6 +6,20 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **Check people.** People has a Check button: it looks for likely mix-ups
+  among the people you named and lists them by kind, each with its faces
+  and one button. Someone twice in one photo: the face less like them moves
+  out. A face from another age, unlike the person the year it was taken but
+  like them years apart: a brother or sister, a child or a parent filed
+  under them. Faces much more like another named person: suggested when the
+  photo is within a month of theirs, listed as unsure otherwise (to the face
+  model newborns look alike). Two named people who may be one, alike and
+  never in the same photo or called the same: "Same person". Every change
+  has Undo on its card, merges included. Under a second on a catalog of
+  108,000 faces, 67,000 of them named.
+  `shoebox-cli people-check` gives the same list as JSON; `people-merge`
+  now prints what it changed, and `people-unmerge` undoes it.
+
 - **Catalog memory, and a benchmark for any computer.** Settings > General >
   Catalog memory sets how much of the catalog is read straight from memory;
   Automatic (the default) follows the catalog's size, and Windows gives the
