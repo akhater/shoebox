@@ -263,3 +263,54 @@ describe("background work refreshes only what its event changed", () => {
     expect(renders.people - before).toBe(0);
   });
 });
+
+describe("big catalogs stay smooth", () => {
+  test("People draws its faces a few hundred at a time, more as they're scrolled to", async () => {
+    // What the browser says is near the screen, told by the test.
+    const watched: { see: () => void; done: boolean }[] = [];
+    class Near {
+      private entry = { done: false, see: () => {} };
+      constructor(callback: IntersectionObserverCallback) {
+        this.entry.see = () => callback([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+        watched.push(this.entry);
+      }
+      observe() {}
+      unobserve() {}
+      takeRecords() {
+        return [];
+      }
+      disconnect() {
+        this.entry.done = true;
+      }
+    }
+    vi.stubGlobal("IntersectionObserver", Near);
+    try {
+      const be = fakeBackend();
+      for (let i = 0; i < 600; i++) {
+        be.addPerson({ id: 1000 + i, name: `Person ${i}`, faces: 2, photos: 2, cover: 1, ignored: false, isNew: false, newPhotos: 0 }, [101, 102]);
+      }
+      const host = await renderApp();
+      await click(sidebarItem(host, "People"));
+      await wait(100);
+      // 601 named people and 1 to name: the first 240 of each group are drawn.
+      expect(host.querySelectorAll(".person")).toHaveLength(241);
+      // Scrolled near the end of what is drawn: 240 more.
+      await act(async () => watched.filter((w) => !w.done).forEach((w) => w.see()));
+      expect(host.querySelectorAll(".person")).toHaveLength(481);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("the thumbnail size slider still sizes the photos", async () => {
+    fakeBackend();
+    const host = await renderApp();
+    await wait(100);
+    const height = () => parseFloat((host.querySelector(".tile") as HTMLElement).style.height);
+    const slider = host.querySelector('.toolbar input[type="range"]') as HTMLInputElement;
+    const before = height();
+    await type(slider, "320");
+    await wait(50);
+    expect(height()).toBeGreaterThan(before);
+  });
+});
