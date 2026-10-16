@@ -8,6 +8,7 @@
 //! - Nothing is ever deleted because a disk is unplugged. A file only becomes
 //!   "missing" when its disk is plugged in, scanned, and the file is not there.
 
+use crate::gear;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -112,6 +113,10 @@ CREATE TABLE face_scan (
     faces       INTEGER NOT NULL
 );
 "#;
+
+/// A file's type, its extension in lower case ("cr3", "jpg"), on file `f`.
+/// Also an index's key (v14), so queries must spell it exactly so.
+pub const FILE_TYPE_SQL: &str = "lower(replace(f.name, rtrim(f.name, replace(f.name, '.', '')), ''))";
 
 pub const FILE_PRESENT: i64 = 0;
 pub const FILE_MISSING: i64 = 1;
@@ -272,6 +277,31 @@ fn migrate(conn: &Connection) -> Result<()> {
              PRAGMA user_version = 13;
              COMMIT;",
         )?;
+    }
+    if version < 14 {
+        // Each photo's camera and lens as shown, stored with it: views and
+        // filters read them instead of working them out for every photo of
+        // every query (30 times quicker on a big catalog). Triggers fill them
+        // whenever a photo is added or its camera or lens changes, whatever
+        // writes it; crate::gear::store_shown when the names themselves do.
+        // Each file's type sits in an index with its photo, state and folder,
+        // so the grid and the filters read them without opening the file rows.
+        let (camera, lens) = (gear::Kind::Camera.shown_sql(), gear::Kind::Lens.shown_sql());
+        let file_type = FILE_TYPE_SQL.replace("f.", "");
+        let triggers = gear::shown_triggers_sql();
+        conn.execute_batch(&format!(
+            "BEGIN;
+             ALTER TABLE photos ADD COLUMN camera_shown TEXT;
+             ALTER TABLE photos ADD COLUMN lens_shown TEXT;
+             UPDATE photos AS p SET camera_shown = {camera}, lens_shown = {lens};
+             CREATE INDEX photos_camera_shown ON photos (camera_shown);
+             CREATE INDEX photos_lens_shown ON photos (lens_shown);
+             {triggers}
+             CREATE INDEX files_photo_state ON files (photo_id, state, folder_id, {file_type});
+             DROP INDEX IF EXISTS files_photo;
+             PRAGMA user_version = 14;
+             COMMIT;"
+        ))?;
     }
     Ok(())
 }
