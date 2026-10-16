@@ -58,7 +58,7 @@ export function fakeBackend() {
   /** What "Check" in People finds (a test sets it). */
   let check: PeopleCheck = { people: 0, faces: 0, twice: [], ageJumps: [], likeOthers: [], samePeople: [] };
   /** People merged into someone, as they were, for Undo. */
-  const unmerged = new Map<number, Person>();
+  const unmerged = new Map<number, { person: Person; photos: number[] }>();
   const calls: Call[] = [];
   /** Extra time for some answers: by command, and by view (`viewName`) for the commands named. */
   const cmdDelays = new Map<string, number>();
@@ -246,8 +246,9 @@ export function fakeBackend() {
         people = people.filter((p) => !gone.includes(p));
         // Their photos are the merged person's now.
         for (const p of gone) {
-          unmerged.set(p.id, p);
+          unmerged.set(p.id, { person: p, photos: inPerson[p.id] ?? [] });
           inPerson[into] = [...(inPerson[into] ?? []), ...(inPerson[p.id] ?? [])];
+          delete inPerson[p.id];
         }
         people = people.map((p) => (p.id === into ? { ...p, photos: inPerson[into].length } : p));
         const joined = gone.map((p) => ({ id: p.id, name: p.name, ignored: p.ignored, createdAt: 0, faces: [p.cover] }));
@@ -255,9 +256,15 @@ export function fakeBackend() {
       }
       case "unmerge_people": {
         const m = a.merged as Merged;
-        const back = m.joined.map((j) => unmerged.get(j.id)!);
-        const theirs = new Set(back.flatMap((p) => inPerson[p.id] ?? []));
-        inPerson[m.into] = inPerson[m.into].filter((id) => !theirs.has(id));
+        let next = Math.max(...people.map((p) => p.id)) + 1;
+        const back = m.joined.map((j) => {
+          const { person, photos } = unmerged.get(j.id)!;
+          // Their own id, unless someone new got it since.
+          const id = people.some((p) => p.id === j.id) ? next++ : j.id;
+          inPerson[m.into] = inPerson[m.into].filter((ph) => !photos.includes(ph));
+          inPerson[id] = photos;
+          return { ...person, id };
+        });
         people = [...people.map((p) => (p.id === m.into ? { ...p, photos: inPerson[m.into].length } : p)), ...back];
         return m.joined.reduce((n, j) => n + j.faces.length, 0);
       }

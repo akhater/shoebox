@@ -1,6 +1,8 @@
 // What a user does in the window, against the fake backend: each step lands
 // on the right view, asks the backend for the right thing and draws the
 // right photos (and keeps doing so as the window gets faster).
+import { emit } from "@tauri-apps/api/event";
+import { act } from "react";
 import { describe, expect, test } from "vitest";
 import { ALL, fakeBackend, photosOf, SEARCH } from "./backend";
 import {
@@ -340,14 +342,10 @@ describe("People", () => {
       expect(status(host)).toBe("Bea and Bee are apart again.");
     });
 
-    test("from a person's page: their photos join the other's page; Undo goes back to theirs", async () => {
-      const be = fakeBackend();
-      be.addPerson(someone(9, "Bea", 90), [103]);
-      be.addPerson(someone(10, "Bee", 91), [203]);
-      const host = await renderApp();
+    /** People > Bee's page > her name box: "Same person" as Bea. */
+    const mergeOnPage = async (be: ReturnType<typeof fakeBackend>, host: HTMLElement) => {
       await click(sidebarItem(host, "People"));
-      const card = [...host.querySelectorAll(".person")].find((c) => c.querySelector(".person-name")?.textContent?.trim() === "Bee")!;
-      await click(card.querySelector(".person-face")!);
+      await click(card(host, "Bee").querySelector(".person-face")!);
       await wait(100);
       expect(title(host)).toBe("Bee");
       expect(gridIds(host)).toEqual([203]);
@@ -360,6 +358,16 @@ describe("People", () => {
       expect(title(host)).toBe("Bea");
       expect(gridIds(host)).toEqual([103, 203]);
       expect(status(host)).toBe("Bee is now part of Bea.");
+    };
+    const card = (host: HTMLElement, name: string) =>
+      [...host.querySelectorAll(".person")].find((c) => c.querySelector(".person-name")?.textContent?.trim() === name)!;
+
+    test("from a person's page: their photos join the other's page; Undo goes back to theirs", async () => {
+      const be = fakeBackend();
+      be.addPerson(someone(9, "Bea", 90), [103]);
+      be.addPerson(someone(10, "Bee", 91), [203]);
+      const host = await renderApp();
+      await mergeOnPage(be, host);
 
       await click(undo(host));
       await wait(100);
@@ -374,6 +382,33 @@ describe("People", () => {
       await click(backButton(host)!);
       expect(title(host)).toBe("People");
       expect(names(host)).toEqual(["Ana", "Bea", "Bee", "Add a name"]);
+    });
+
+    test("from a person's page, when someone new got their id meanwhile: Undo goes to People, where they are back", async () => {
+      const be = fakeBackend();
+      be.addPerson(someone(9, "Bea", 90), [103]);
+      be.addPerson(someone(10, "Bee", 91), [203]);
+      const host = await renderApp();
+      await mergeOnPage(be, host);
+      // Faces found in the background: someone new under Bee's old id.
+      be.addPerson(someone(10, "Cy", 92), [303]);
+      await act(async () => {
+        await emit("catalog-changed", null);
+      });
+      await wait(600);
+
+      await click(undo(host));
+      await wait(100);
+      expect(be.calls.filter((c) => c.cmd === "unmerge_people")).toHaveLength(1);
+      expect(title(host)).toBe("People");
+      expect(names(host)).toEqual(["Ana", "Bea", "Cy", "Bee", "Add a name"]);
+      expect(status(host)).toBe("Bea and Bee are apart again.");
+
+      // Under another id, with her own photos.
+      await click(card(host, "Bee").querySelector(".person-face")!);
+      await wait(100);
+      expect(title(host)).toBe("Bee");
+      expect(gridIds(host)).toEqual([203]);
     });
   });
 
