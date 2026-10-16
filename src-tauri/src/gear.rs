@@ -497,7 +497,7 @@ pub fn tidy_if_new_rules(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct GearItem {
     /// As shown everywhere.
@@ -512,7 +512,7 @@ pub struct GearItem {
     pub unknown: bool,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Gear {
     pub cameras: Vec<GearItem>,

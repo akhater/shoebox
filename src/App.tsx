@@ -351,28 +351,44 @@ export default function App() {
         if (seq === catalogSeq.current) set(v);
       };
     const warn = (e: unknown) => setMessage({ text: String(e), warn: true });
-    api.overview().then(latest(setOverview)).catch(warn);
-    api.browse().then(latest(setBrowse)).catch(warn);
-    people
-      .list()
-      .then(latest(setPeopleList))
-      .catch(() => {});
+    return Promise.all([
+      api.overview().then(latest(setOverview)).catch(warn),
+      api.browse().then(latest(setBrowse)).catch(warn),
+      people
+        .list()
+        .then(latest(setPeopleList))
+        .catch(() => {}),
+    ]);
   }, []);
 
-  const refresh = useCallback(() => {
-    loadView();
-    loadCatalog();
-  }, [loadView, loadCatalog]);
+  const refresh = useCallback(() => Promise.all([loadView(), loadCatalog()]), [loadView, loadCatalog]);
 
   const timer = useRef<number | undefined>(undefined);
   // When People was last reloaded while faces are being found.
   const facesShown = useRef(0);
+  // A refresh asked for by background work (a scan, faces found) never starts
+  // while the last one is still answering: on a big catalog they would pile
+  // up. It runs once that one is done.
+  const refreshing = useRef(false);
+  const again = useRef(false);
   const refreshSoon = useCallback(() => {
     if (timer.current) return;
-    timer.current = window.setTimeout(() => {
+    const go = () => {
       timer.current = undefined;
-      refresh();
-    }, 400);
+      if (refreshing.current) {
+        again.current = true;
+        return;
+      }
+      refreshing.current = true;
+      refresh().finally(() => {
+        refreshing.current = false;
+        if (again.current) {
+          again.current = false;
+          timer.current = window.setTimeout(go, 400);
+        }
+      });
+    };
+    timer.current = window.setTimeout(go, 400);
   }, [refresh]);
 
   // Another view loads only its own photos; the rest is reloaded when the catalog changes.
