@@ -173,4 +173,39 @@ describe("People", () => {
     await key(document.body, "Escape");
     expect(title(host)).toBe("People");
   });
+
+  test("Find more: the faces near their photos come ticked, and Move puts them in the person", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(sidebarItem(host, "People"));
+    await click(host.querySelector(".person-face")!);
+    await wait(100);
+    expect(title(host)).toBe("Ana");
+
+    await click(byText(host, ".tools button", "Find more…"));
+    await wait(100);
+    expect(be.calls.filter((c) => c.cmd === "more_faces").map((c) => c.args.personId)).toEqual([7]);
+    const dialog = host.querySelector(".strays-modal")!;
+    const days = [...dialog.querySelectorAll(".more-day-head")];
+    expect(days.map((d) => d.getAttribute("aria-pressed"))).toEqual(["true", "false"]);
+    expect(days[0].textContent).toMatch(/near Ana's photos/);
+    expect([...dialog.querySelectorAll(".stray")].map((s) => s.classList.contains("on"))).toEqual([true, false]);
+    const move = () => byText(dialog, ".modal-foot button", /^Move /);
+    expect(move().textContent).toBe("Move 1 face to Ana");
+
+    // A day's header ticks the whole day, and unticks it.
+    await click(days[1]);
+    expect(move().textContent).toBe("Move 2 faces to Ana");
+    await click(days[1]);
+    expect(move().textContent).toBe("Move 1 face to Ana");
+
+    await click(move());
+    await wait(150);
+    expect(be.calls.filter((c) => c.cmd === "reassign_faces").map((c) => c.args)).toEqual([
+      { faceIds: [1102], to: { kind: "person", id: 7 } },
+    ]);
+    expect(host.querySelector(".strays-modal")).toBeNull();
+    expect(host.querySelector(".status-left")?.textContent).toBe("1 face moved to Ana.");
+    expect(gridIds(host)).toEqual([101, 102, 201, 301]);
+  });
 });
