@@ -405,6 +405,8 @@ pub struct FaceIndex {
     /// Open once the averages are read (and any regrouping done): every
     /// method waits for it, so none works from half the people.
     ready: crate::Ready,
+    /// People as last listed, until the catalog changes.
+    kept_people: crate::catalog::Kept<Vec<Person>>,
 }
 
 impl FaceIndex {
@@ -447,6 +449,7 @@ impl FaceIndex {
             models: Mutex::new(None),
             centroids: RwLock::new(HashMap::new()),
             ready: crate::Ready::default(),
+            kept_people: crate::catalog::Kept::new(1),
         })
     }
 
@@ -819,6 +822,15 @@ impl FaceIndex {
     /// Everyone, named people first, then by how many photos they're in.
     pub fn people(&self, cat: &Catalog) -> Result<Vec<Person>> {
         self.ready.wait()?;
+        self.kept_people.get(cat, String::new(), || self.people_now(cat))
+    }
+
+    /// Forgets the people list kept, so the next one is worked out again (to time it).
+    pub fn forget_kept(&self) {
+        self.kept_people.clear();
+    }
+
+    fn people_now(&self, cat: &Catalog) -> Result<Vec<Person>> {
         let db = cat.read()?;
         let people = db
             .prepare(

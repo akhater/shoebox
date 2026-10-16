@@ -214,6 +214,24 @@ describe("background work refreshes only what its event changed", () => {
     expect(be.cmdsSince(from).sort()).toEqual(["browse", "facets", "get_overview", "list_photos", "people"]);
   });
 
+  test("a scan's refreshes never pile up: the next one waits for the last to answer", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await wait(100);
+    // A long scan on a big catalog: it changes every half second, and the
+    // photos take 2 s to come back.
+    be.delay("list_photos", 2000);
+    const from = be.calls.length;
+    for (let i = 0; i < 5; i++) {
+      await send("catalog-changed", null);
+      await wait(500);
+    }
+    await wait(5000);
+    // One at once, and one after it for everything that changed meanwhile.
+    expect(be.cmdsSince(from).filter((c) => c === "list_photos")).toHaveLength(2);
+    expect(gridIds(host)).toEqual(ALL);
+  });
+
   test("the grid and People aren't drawn again for a scan's progress or a letter typed", async () => {
     fakeBackend();
     const host = await renderApp();
