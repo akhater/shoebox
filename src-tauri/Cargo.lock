@@ -4715,7 +4715,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shoebox"
-version = "26.42.3"
+version = "26.42.4"
 dependencies = [
  "anyhow",
  "blake3",

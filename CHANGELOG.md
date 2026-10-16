@@ -2,7 +2,7 @@
 
 Newest first. Same format and versioning as Argentum.
 
-## 26.42.3 - unreleased
+## 26.42.4 - unreleased
 
 ### Added
 
@@ -13,6 +13,10 @@ Newest first. Same format and versioning as Argentum.
   the others are left to check, since to the face model babies look alike.
   The ticked faces move to the person in one step, with Undo.
   `shoebox-cli more-faces <person-id> [--apply]` does the same.
+
+## 26.42.3 - 2026-10-16
+
+### Added
 
 - **Catalog memory, and a benchmark for any computer.** Settings > General >
   Catalog memory sets how much of the catalog is read straight from memory;
