@@ -2,7 +2,7 @@
 //! No UI code here, so the CLI and the app share it.
 
 use crate::db::{self, FILE_MISSING, FILE_PRESENT, PREVIEW_OK, under_sql};
-use crate::gear::{self, CAMERA_SQL, LENS_SQL};
+use crate::gear::{self, Kind};
 use crate::paths::{self, DataDir};
 use crate::settings::Settings;
 use crate::volumes::{self, MountedVolume};
@@ -568,11 +568,14 @@ impl Catalog {
         let date = "CASE WHEN COALESCE(p.taken_ts, 0) > 0 THEN strftime('%Y-%m-%d', p.taken_ts, 'unixepoch') ELSE 'unknown' END";
         Ok(Facets {
             dates: count(date, "photos p", "v", Facet::Dates)?.into_iter().map(value).collect(),
-            cameras: count(CAMERA_SQL, "photos p", "COUNT(*) DESC, v", Facet::Cameras)?
+            cameras: count(Kind::Camera.stored_sql(), "photos p", "COUNT(*) DESC, v", Facet::Cameras)?
                 .into_iter()
                 .map(value)
                 .collect(),
-            lenses: count(LENS_SQL, "photos p", "COUNT(*) DESC, v", Facet::Lenses)?.into_iter().map(value).collect(),
+            lenses: count(Kind::Lens.stored_sql(), "photos p", "COUNT(*) DESC, v", Facet::Lenses)?
+                .into_iter()
+                .map(value)
+                .collect(),
             types: count(
                 EXT_SQL,
                 "photos p JOIN files f ON f.photo_id = p.id",
@@ -626,8 +629,8 @@ impl Catalog {
                 0,
                 key.clone(),
             ),
-            Scope::Camera { name } => (format!("{CAMERA_SQL} = ?2"), 0, name.clone()),
-            Scope::Lens { name } => (format!("{LENS_SQL} = ?2"), 0, name.clone()),
+            Scope::Camera { name } => (format!("{} = ?2", Kind::Camera.stored_sql()), 0, name.clone()),
+            Scope::Lens { name } => (format!("{} = ?2", Kind::Lens.stored_sql()), 0, name.clone()),
             Scope::Person { id, new_only } => (
                 format!(
                     "p.id IN (SELECT photo_id FROM faces WHERE person_id = ?1{})",
@@ -739,11 +742,9 @@ impl Catalog {
         let db = self.read()?;
         let mut d = db
             .query_row(
-                &format!(
-                    "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
-                            exposure, focal, preview_state, preview_rev, error, {CAMERA_SQL}, {LENS_SQL}
-                       FROM photos p WHERE id = ?1"
-                ),
+                "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
+                        exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown
+                   FROM photos p WHERE id = ?1",
                 [id],
                 |r| {
                     Ok(PhotoDetail {
@@ -763,8 +764,8 @@ impl Catalog {
                         preview_state: r.get(13)?,
                         preview_rev: r.get(14)?,
                         error: r.get(15)?,
-                        camera: Some(r.get::<_, String>(16)?).filter(|c| c != gear::Kind::Camera.unknown()),
-                        lens: Some(r.get::<_, String>(17)?).filter(|l| l != gear::Kind::Lens.unknown()),
+                        camera: r.get::<_, Option<String>>(16)?.filter(|c| c != Kind::Camera.unknown()),
+                        lens: r.get::<_, Option<String>>(17)?.filter(|l| l != Kind::Lens.unknown()),
                         files: Vec::new(),
                     })
                 },
@@ -1293,7 +1294,7 @@ impl Filters {
 }
 
 /// A file's extension, lower case ("IMG_0001.CR3" -> "cr3"), on file alias `f`.
-const EXT_SQL: &str = "lower(replace(f.name, rtrim(f.name, replace(f.name, '.', '')), ''))";
+const EXT_SQL: &str = db::FILE_TYPE_SQL;
 
 /// The filters as one SQL condition on photo `p` whose state is `state`
 /// ([`state_sql`]), with parameters ?3 dates, ?4 cameras, ?5 lenses, ?6 types,
@@ -1308,8 +1309,8 @@ fn filters_sql(f: &Filters, state: &str) -> String {
           OR (COALESCE(p.taken_ts, 0) > 0
               AND strftime(CASE length(j.value) WHEN 4 THEN '%Y' WHEN 7 THEN '%Y-%m' ELSE '%Y-%m-%d' END,
                            p.taken_ts, 'unixepoch') = j.value)))
-     AND (json_array_length(?4) = 0 OR {CAMERA_SQL} IN (SELECT value FROM json_each(?4)))
-     AND (json_array_length(?5) = 0 OR {LENS_SQL} IN (SELECT value FROM json_each(?5)))
+     AND (json_array_length(?4) = 0 OR p.camera_shown IN (SELECT value FROM json_each(?4)))
+     AND (json_array_length(?5) = 0 OR p.lens_shown IN (SELECT value FROM json_each(?5)))
      AND (json_array_length(?6) = 0 OR EXISTS (SELECT 1 FROM files f WHERE f.photo_id = p.id
              AND {EXT_SQL} IN (SELECT value FROM json_each(?6))))
      AND (json_array_length(?7) = 0 OR {status} IN (SELECT value FROM json_each(?7)))

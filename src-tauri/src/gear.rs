@@ -102,12 +102,54 @@ impl Kind {
         }
     }
 
+    /// The name shown, worked out from the photo's files and the names grouped,
+    /// renamed or split (on photo `p`). Views read [`Kind::stored_sql`] instead.
     pub fn shown_sql(self) -> &'static str {
         match self {
             Kind::Camera => CAMERA_SQL,
             Kind::Lens => LENS_SQL,
         }
     }
+
+    /// The name shown, as stored with photo `p` (see [`store_shown`]).
+    pub fn stored_sql(self) -> &'static str {
+        match self {
+            Kind::Camera => "p.camera_shown",
+            Kind::Lens => "p.lens_shown",
+        }
+    }
+}
+
+/// [`Kind::shown_sql`] on row `row` instead of `p` (a trigger's NEW).
+pub fn shown_of(kind: Kind, row: &str) -> String {
+    kind.shown_sql().replace("p.", &format!("{row}."))
+}
+
+/// Triggers storing with each photo the camera and lens it shows when it is
+/// added or its camera or lens changes, whatever writes it.
+pub fn shown_triggers_sql() -> String {
+    let (camera, lens) = (shown_of(Kind::Camera, "NEW"), shown_of(Kind::Lens, "NEW"));
+    format!(
+        "CREATE TRIGGER IF NOT EXISTS photos_gear_added AFTER INSERT ON photos BEGIN
+             UPDATE photos SET camera_shown = {camera}, lens_shown = {lens} WHERE id = NEW.id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS photos_gear_changed AFTER UPDATE OF make, model, lens ON photos BEGIN
+             UPDATE photos SET camera_shown = {camera}, lens_shown = {lens} WHERE id = NEW.id;
+         END;"
+    )
+}
+
+/// Stores with each photo the camera and lens it shows, where that changed:
+/// after names are grouped, renamed or split. A photo added or whose camera
+/// or lens changes gets them from a trigger (db.rs, v14). Returns how many.
+pub fn store_shown(db: &Connection) -> Result<usize> {
+    Ok(db.execute(
+        &format!(
+            "UPDATE photos AS p SET camera_shown = {CAMERA_SQL}, lens_shown = {LENS_SQL}
+              WHERE p.camera_shown IS NOT {CAMERA_SQL} OR p.lens_shown IS NOT {LENS_SQL}"
+        ),
+        [],
+    )?)
 }
 
 /// A name as a file gives it, tidied: inner spaces collapsed. None for one
@@ -440,6 +482,7 @@ pub fn tidy(db: &Connection) -> Result<()> {
         }
     }
     tx.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('gear_rules', ?1)", [GEAR_RULES])?;
+    store_shown(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -484,7 +527,7 @@ pub fn list(db: &Connection) -> Result<Gear> {
             "SELECT {} AS s, {files} AS f, COUNT(*),
                     EXISTS (SELECT 1 FROM gear_names g WHERE g.kind = ?1 AND g.name = {files} AND g.by_hand = 1)
                FROM photos p GROUP BY s, f",
-            kind.shown_sql()
+            kind.stored_sql()
         );
         let mut out: Vec<GearItem> = Vec::new();
         let mut stmt = db.prepare(&sql)?;
@@ -560,6 +603,7 @@ pub fn rename(db: &Connection, kind: Kind, from: &str, to: &str) -> Result<Strin
             params![kind.as_str(), f, to],
         )?;
     }
+    store_shown(&tx)?;
     tx.commit()?;
     Ok(to)
 }
@@ -578,6 +622,7 @@ pub fn split(db: &Connection, kind: Kind, name: &str) -> Result<Vec<String>> {
             params![kind.as_str(), f],
         )?;
     }
+    store_shown(&tx)?;
     tx.commit()?;
     Ok(files)
 }
@@ -708,12 +753,14 @@ mod tests {
     fn catalog() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE photos (id INTEGER PRIMARY KEY, make TEXT, model TEXT, lens TEXT, taken_ts INTEGER, taken_exif INTEGER NOT NULL DEFAULT 0);
+            "CREATE TABLE photos (id INTEGER PRIMARY KEY, make TEXT, model TEXT, lens TEXT, taken_ts INTEGER, taken_exif INTEGER NOT NULL DEFAULT 0,
+                                  camera_shown TEXT, lens_shown TEXT);
              CREATE TABLE gear_names (kind TEXT NOT NULL, name TEXT NOT NULL, shown TEXT NOT NULL, by_hand INTEGER NOT NULL,
                                       PRIMARY KEY (kind, name)) WITHOUT ROWID;
              CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )
         .unwrap();
+        db.execute_batch(&shown_triggers_sql()).unwrap();
         db
     }
 
