@@ -51,6 +51,10 @@ jobs:
       # Includes the guards behind Shoebox's promises: no code outside paths.rs
       # and organize.rs can write a file, and nothing writes outside its own
       # folders. Tests in tests/ (they write sample photos) run too.
+      # And the guards that keep the window quick: no command touching the
+      # catalog or a disk runs on the main thread, the window's queries answer
+      # while the catalog is being written (window_never_waits), and a small
+      # view costs a fraction of the whole catalog (view_cost).
       - name: cargo test
         working-directory: src-tauri
         run: cargo test --lib --test '*'
