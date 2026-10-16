@@ -742,11 +742,9 @@ impl Catalog {
         let db = self.read()?;
         let mut d = db
             .query_row(
-                &format!(
-                    "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
-                            exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown
-                       FROM photos p WHERE id = ?1"
-                ),
+                "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
+                        exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown
+                   FROM photos p WHERE id = ?1",
                 [id],
                 |r| {
                     Ok(PhotoDetail {

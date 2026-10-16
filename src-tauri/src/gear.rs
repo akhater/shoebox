@@ -130,10 +130,10 @@ pub fn shown_of(kind: Kind, row: &str) -> String {
 pub fn shown_triggers_sql() -> String {
     let (camera, lens) = (shown_of(Kind::Camera, "NEW"), shown_of(Kind::Lens, "NEW"));
     format!(
-        "CREATE TRIGGER photos_gear_added AFTER INSERT ON photos BEGIN
+        "CREATE TRIGGER IF NOT EXISTS photos_gear_added AFTER INSERT ON photos BEGIN
              UPDATE photos SET camera_shown = {camera}, lens_shown = {lens} WHERE id = NEW.id;
          END;
-         CREATE TRIGGER photos_gear_changed AFTER UPDATE OF make, model, lens ON photos BEGIN
+         CREATE TRIGGER IF NOT EXISTS photos_gear_changed AFTER UPDATE OF make, model, lens ON photos BEGIN
              UPDATE photos SET camera_shown = {camera}, lens_shown = {lens} WHERE id = NEW.id;
          END;"
     )

@@ -289,15 +289,22 @@ fn migrate(conn: &Connection) -> Result<()> {
         let (camera, lens) = (gear::Kind::Camera.shown_sql(), gear::Kind::Lens.shown_sql());
         let file_type = FILE_TYPE_SQL.replace("f.", "");
         let triggers = gear::shown_triggers_sql();
+        // Safe to run again on a catalog that already has them (its version set back by hand).
+        let has_shown =
+            conn.prepare("SELECT 1 FROM pragma_table_info('photos') WHERE name = 'camera_shown'")?.exists([])?;
+        let columns = if has_shown {
+            ""
+        } else {
+            "ALTER TABLE photos ADD COLUMN camera_shown TEXT; ALTER TABLE photos ADD COLUMN lens_shown TEXT;"
+        };
         conn.execute_batch(&format!(
             "BEGIN;
-             ALTER TABLE photos ADD COLUMN camera_shown TEXT;
-             ALTER TABLE photos ADD COLUMN lens_shown TEXT;
+             {columns}
              UPDATE photos AS p SET camera_shown = {camera}, lens_shown = {lens};
-             CREATE INDEX photos_camera_shown ON photos (camera_shown);
-             CREATE INDEX photos_lens_shown ON photos (lens_shown);
+             CREATE INDEX IF NOT EXISTS photos_camera_shown ON photos (camera_shown);
+             CREATE INDEX IF NOT EXISTS photos_lens_shown ON photos (lens_shown);
              {triggers}
-             CREATE INDEX files_photo_state ON files (photo_id, state, folder_id, {file_type});
+             CREATE INDEX IF NOT EXISTS files_photo_state ON files (photo_id, state, folder_id, {file_type});
              DROP INDEX IF EXISTS files_photo;
              PRAGMA user_version = 14;
              COMMIT;"
