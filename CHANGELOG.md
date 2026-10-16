@@ -31,6 +31,21 @@ Newest first. Same format and versioning as Argentum.
   it comes first. People's faces are read in one pass, about four times
   faster (0.5 s instead of 2.1 s for 108,000 faces). On a catalog of
   190,000 photos, a person's page and People take half the time they did.
+- **Camera and lens pages are quick on a big catalog.** Each photo's camera
+  and lens names are kept with it instead of being worked out again for
+  every photo of every view and filter. On 190,000 photos a camera's page
+  takes about 1.1 s instead of 3.6 s, and all photos 1.5 s instead of 2.5 s.
+  The names follow renames, merges and splits as before. The first start
+  after the update takes a moment more (under half a second for 64,000
+  photos) while they are stored.
+- **Going back to a view is instant, and a scan no longer floods the
+  window.** What the window asks (a view's photos and filter counts, the
+  sidebar, the totals, People) is kept until the catalog changes - by
+  Shoebox, or by `shoebox-cli` or another program - or a disk comes or
+  goes: asked again, it comes back at once (under 25 ms instead of up to
+  1.6 s on 190,000 photos). While a scan changes the catalog every few
+  seconds, the window never starts a refresh before the last one has
+  answered. `shoebox-cli bench` shows both times.
 
 - **No more freezes between views.** The window no longer stops drawing
   while it waits for the catalog: its questions run beside the scan and the

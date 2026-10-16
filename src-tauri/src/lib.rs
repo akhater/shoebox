@@ -609,6 +609,14 @@ pub fn run() {
     let scans = Arc::new(ScanQueue::default());
     let (c, q) = (cat.clone(), scans.clone());
     std::thread::spawn(move || check_saved_files(&c, &q));
+    // Camera and lens names stored with photos, caught up if anything left them
+    // behind (an older Shoebox renaming a camera in this catalog).
+    let c = cat.clone();
+    std::thread::spawn(move || match gear::store_shown(&c.db()) {
+        Ok(0) => {}
+        Ok(n) => log::info!("{n} photos' camera or lens names brought up to date"),
+        Err(e) => log::warn!("bringing camera and lens names up to date: {e:#}"),
+    });
     // Read in the background: the window opens at once, a search or a face
     // waits until theirs are read.
     let index = search::SearchIndex::open_in_background(&cat).expect("open search index");

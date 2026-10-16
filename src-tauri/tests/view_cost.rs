@@ -13,10 +13,12 @@ use std::time::{Duration, Instant};
 
 const PHOTOS: i64 = 20_000;
 
-/// The quickest of a few runs, so a pause of the machine doesn't count.
-fn quickest(f: impl Fn()) -> Duration {
+/// The quickest of a few runs, so a pause of the machine doesn't count. Each
+/// is worked out: the answers kept from the last one are forgotten first.
+fn quickest(cat: &Catalog, f: impl Fn()) -> Duration {
     (0..5)
         .map(|_| {
+            cat.forget_kept();
             let t = Instant::now();
             f();
             t.elapsed()
@@ -88,8 +90,8 @@ fn a_view_costs_what_it_shows() {
 
     let none = Filters::default();
     let all_list =
-        quickest(|| assert_eq!(cat.list_photos(&Scope::All, Sort::Oldest, &none).unwrap().ids.len(), 20_000));
-    let all_counts = quickest(|| {
+        quickest(&cat, || assert_eq!(cat.list_photos(&Scope::All, Sort::Oldest, &none).unwrap().ids.len(), 20_000));
+    let all_counts = quickest(&cat, || {
         cat.facets(&Scope::All, &none).unwrap();
     });
     let views = [
@@ -100,8 +102,9 @@ fn a_view_costs_what_it_shows() {
     ];
     let mut slow = Vec::new();
     for (what, view, photos) in views {
-        let list = quickest(|| assert_eq!(cat.list_photos(&view, Sort::Oldest, &none).unwrap().ids.len(), photos));
-        let counts = quickest(|| {
+        let list =
+            quickest(&cat, || assert_eq!(cat.list_photos(&view, Sort::Oldest, &none).unwrap().ids.len(), photos));
+        let counts = quickest(&cat, || {
             cat.facets(&view, &none).unwrap();
         });
         // A twentieth of the photos or less: a quarter of the time at most.

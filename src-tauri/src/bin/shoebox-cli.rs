@@ -662,15 +662,6 @@ fn bench(cat: &Catalog, args: &[String]) -> anyhow::Result<()> {
     }
     cat.set_memory(memory)?;
     let ms = |t: Instant| (t.elapsed().as_secs_f64() * 10_000.0).round() / 10.0;
-    let best = |f: &dyn Fn() -> anyhow::Result<()>| -> anyhow::Result<f64> {
-        let mut b = f64::MAX;
-        for _ in 0..3 {
-            let t = Instant::now();
-            f()?;
-            b = b.min(ms(t));
-        }
-        Ok(b)
-    };
     // Start-up: what is read before word search and faces work.
     let t = Instant::now();
     let search = shoebox_lib::search::SearchIndex::open(cat)?;
@@ -678,6 +669,23 @@ fn bench(cat: &Catalog, args: &[String]) -> anyhow::Result<()> {
     let t = Instant::now();
     let faces = shoebox_lib::faces::FaceIndex::open(cat)?;
     let faces_ms = ms(t);
+    // Worked out each time (the answers kept are forgotten first), then asked
+    // again with nothing changed: what the window gets back from memory.
+    let timed = |f: &dyn Fn() -> anyhow::Result<()>, fresh: bool| -> anyhow::Result<f64> {
+        let mut b = f64::MAX;
+        for _ in 0..3 {
+            if fresh {
+                cat.forget_kept();
+                faces.forget_kept();
+            }
+            let t = Instant::now();
+            f()?;
+            b = b.min(ms(t));
+        }
+        Ok(b)
+    };
+    let best =
+        |f: &dyn Fn() -> anyhow::Result<()>| -> anyhow::Result<(f64, f64)> { Ok((timed(f, true)?, timed(f, false)?)) };
 
     let none = Filters::default();
     let browse = cat.browse()?;
@@ -709,7 +717,10 @@ fn bench(cat: &Catalog, args: &[String]) -> anyhow::Result<()> {
         cat.db().query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?,
         cat.data.db_path().metadata().map(|m| m.len()).unwrap_or(0),
     );
-    let views: Vec<_> = views.into_iter().map(|(v, ms)| serde_json::json!({ "view": v, "ms": ms })).collect();
+    let views: Vec<_> = views
+        .into_iter()
+        .map(|(v, (ms, kept))| serde_json::json!({ "view": v, "ms": ms, "askedAgainMs": kept }))
+        .collect();
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -718,7 +729,7 @@ fn bench(cat: &Catalog, args: &[String]) -> anyhow::Result<()> {
             "memory": cat.memory(),
             "startup": { "wordSearchMs": search_ms, "descriptions": search.indexed(), "facesMs": faces_ms },
             "views": views,
-            "note": "ms, best of 3; a view is its photos and its filter counts",
+            "note": "ms, best of 3; a view is its photos and its filter counts; askedAgainMs: the same with nothing changed",
         }))?
     );
     Ok(())
