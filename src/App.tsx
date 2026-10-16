@@ -223,13 +223,16 @@ function whoOf(names: string[], unnamed: number) {
 
 const namesOf = (joined: Merged["joined"]) => joined.flatMap((j) => (j.name ? [j.name] : []));
 
+/** A sentence ending in a name: one full stop, even after "Jr." */
+const stop = (s: string) => (s.endsWith(".") ? s : `${s}.`);
+
 /** Who a merge made one: "Bee is now part of Bea." */
 function mergedText(m: Merged) {
   const names = namesOf(m.joined);
   const unnamed = m.joined.length - names.length;
-  if (m.name) return `${whoOf(names, unnamed)} ${m.joined.length === 1 ? "is" : "are"} now part of ${m.name}.`;
+  if (m.name) return stop(`${whoOf(names, unnamed)} ${m.joined.length === 1 ? "is" : "are"} now part of ${m.name}`);
   // The person they joined had no name: it took the first of theirs, if any.
-  return `${whoOf(names, unnamed + 1)} are now one person${names.length ? `: ${names[0]}` : ""}.`;
+  return stop(`${whoOf(names, unnamed + 1)} are now one person${names.length ? `: ${names[0]}` : ""}`);
 }
 
 /** After its Undo: "Bea and Bee are apart again." */

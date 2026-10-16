@@ -342,6 +342,17 @@ describe("People", () => {
       expect(status(host)).toBe("Bea and Bee are apart again.");
     });
 
+    test("a name ending in a full stop ends the sentence once", async () => {
+      fakeBackend().addPerson(someone(9, "Bea Jr.", 90), [103]);
+      const host = await renderApp();
+      await click(sidebarItem(host, "People"));
+      await click(byText(host, ".person-name", "Add a name"));
+      await type(host.querySelector<HTMLInputElement>(".person-name-input")!, "Bea");
+      await click(byText(host, ".name-suggest .same-person", "Same person"));
+      await wait(100);
+      expect(status(host)).toBe("An unnamed person is now part of Bea Jr.");
+    });
+
     /** People > Bee's page > her name box: "Same person" as Bea. */
     const mergeOnPage = async (be: ReturnType<typeof fakeBackend>, host: HTMLElement) => {
       await click(sidebarItem(host, "People"));
