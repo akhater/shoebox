@@ -46,6 +46,11 @@ Newest first. Same format and versioning as Argentum.
   1.6 s on 190,000 photos). While a scan changes the catalog every few
   seconds, the window never starts a refresh before the last one has
   answered. `shoebox-cli bench` shows both times.
+- **The thumbnail size slider stays smooth, and People opens at once.**
+  Dragging the slider no longer waits for the grid to be laid out again
+  at each step (tens of milliseconds on a big catalog): the grid follows
+  when it can. People draws its first few hundred faces, and more as the
+  list is scrolled near its end, instead of thousands at once.
 
 - **No more freezes between views.** The window no longer stops drawing
   while it waits for the catalog: its questions run beside the scan and the

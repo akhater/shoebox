@@ -21,7 +21,7 @@ import {
   UserX,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   ai,
   api,
@@ -248,6 +248,9 @@ export default function App() {
         }
       : { text, warn: true };
   const [rowHeight, setRowHeight] = useState(loadRowHeight);
+  // The slider follows the mouse at once; the grid, laid out again for each
+  // size (tens of ms on a big catalog), follows when it can.
+  const gridRowHeight = useDeferredValue(rowHeight);
   const [sort, setSort] = useState<Sort>(loadSort);
   // File type (CR3, JPG...) on each thumbnail.
   const [showType, setShowType] = useRemembered("shoebox.showType", false);
@@ -1311,7 +1314,7 @@ export default function App() {
             <PhotoGrid
               key={loaded.key}
               list={shown}
-              rowHeight={rowHeight}
+              rowHeight={gridRowHeight}
               onOpen={openPhoto}
               onSelect={selectPhotos}
               onMark={setMarked}
