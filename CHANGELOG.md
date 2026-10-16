@@ -20,6 +20,12 @@ Newest first. Same format and versioning as Argentum.
   `shoebox-cli people-check` gives the same list as JSON; `people-merge`
   now prints what it changed, and `people-unmerge` undoes it.
 
+- **Undo for merges in People.** "Merge into one person" and "Same person"
+  (while naming someone in People or on their page) now say in the status
+  bar who became one ("Bee is now part of Bea"), with Undo, as moving faces
+  does. Undo makes them two people again, each under their own name with
+  their own faces; merged from a person's page, it goes back to that page.
+
 - **Find more of a person.** A person's page has "Find more…": the faces in
   other people that look more like them than like the rest of the person
   they're in, faces placed by hand included, grouped by the day they were

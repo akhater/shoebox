@@ -244,13 +244,21 @@ export function fakeBackend() {
         const into = a.into as number;
         const gone = people.filter((p) => p.id !== into && (a.ids as number[]).includes(p.id));
         people = people.filter((p) => !gone.includes(p));
-        for (const p of gone) unmerged.set(p.id, p);
+        // Their photos are the merged person's now.
+        for (const p of gone) {
+          unmerged.set(p.id, p);
+          inPerson[into] = [...(inPerson[into] ?? []), ...(inPerson[p.id] ?? [])];
+        }
+        people = people.map((p) => (p.id === into ? { ...p, photos: inPerson[into].length } : p));
         const joined = gone.map((p) => ({ id: p.id, name: p.name, ignored: p.ignored, createdAt: 0, faces: [p.cover] }));
         return { into, name: people.find((p) => p.id === into)?.name ?? null, joined } satisfies Merged;
       }
       case "unmerge_people": {
         const m = a.merged as Merged;
-        people = [...people, ...m.joined.map((j) => unmerged.get(j.id)!)];
+        const back = m.joined.map((j) => unmerged.get(j.id)!);
+        const theirs = new Set(back.flatMap((p) => inPerson[p.id] ?? []));
+        inPerson[m.into] = inPerson[m.into].filter((id) => !theirs.has(id));
+        people = [...people.map((p) => (p.id === m.into ? { ...p, photos: inPerson[m.into].length } : p)), ...back];
         return m.joined.reduce((n, j) => n + j.faces.length, 0);
       }
       case "scan_status":

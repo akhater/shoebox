@@ -45,6 +45,7 @@ import {
   type PhotoDetail,
   type FolderNode,
   type Overview,
+  type Merged,
   type Moved,
   type Person,
   type PhotoList,
@@ -207,6 +208,34 @@ function summarize(name: string, r: Report) {
     r.missing && `${fmtNum(r.missing)} not found`,
   ].filter(Boolean);
   return `${name}: ${parts.length ? parts.join(" · ") : "nothing changed"} · ${Math.max(1, Math.round(r.seconds))} s`;
+}
+
+/** People at the start of a status message: up to three names, then how many more. */
+function whoOf(names: string[], unnamed: number) {
+  const shown = names.slice(0, 3);
+  const rest = names.length - shown.length + unnamed;
+  const parts = [...shown];
+  if (names.length > shown.length) parts.push(rest === 1 ? "1 other" : `${fmtNum(rest)} others`);
+  else if (unnamed) parts.push(unnamed === 1 ? "an unnamed person" : `${fmtNum(unnamed)} unnamed people`);
+  const text = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
+  return shown.length ? text : text[0].toUpperCase() + text.slice(1);
+}
+
+const namesOf = (joined: Merged["joined"]) => joined.flatMap((j) => (j.name ? [j.name] : []));
+
+/** Who a merge made one: "Bee is now part of Bea." */
+function mergedText(m: Merged) {
+  const names = namesOf(m.joined);
+  const unnamed = m.joined.length - names.length;
+  if (m.name) return `${whoOf(names, unnamed)} ${m.joined.length === 1 ? "is" : "are"} now part of ${m.name}.`;
+  // The person they joined had no name: it took the first of theirs, if any.
+  return `${whoOf(names, unnamed + 1)} are now one person${names.length ? `: ${names[0]}` : ""}.`;
+}
+
+/** After its Undo: "Bea and Bee are apart again." */
+function unmergedText(m: Merged) {
+  const names = [...(m.name ? [m.name] : []), ...namesOf(m.joined)];
+  return `${whoOf(names, m.joined.length + 1 - names.length)} are apart again.`;
 }
 
 export default function App() {
@@ -634,6 +663,33 @@ export default function App() {
     refresh();
   };
 
+  /** People made one: says who, with Undo (they are apart again). `from`: merged
+   *  from that person's page, which now shows the person they joined. */
+  const peopleMerged = (m: Merged, from?: number) => {
+    if (!m.joined.length) return;
+    setMessage({ text: mergedText(m), action: { label: "Undo", run: () => unmerge(m, from) } });
+  };
+
+  /** Undo of a merge. Merged from a person's page and still on the page of the
+   *  person they joined: back to their page - or to People, should their id
+   *  have gone to someone new since (they come back under another one). */
+  const unmerge = useLatest((m: Merged, from?: number) => {
+    const free = from != null && !peopleList.some((p) => p.id === from);
+    const toPeople = trail[trail.length - 1]?.view === "people";
+    const onJoined = () => scopeRef.current.kind === "person" && scopeRef.current.id === m.into;
+    run(
+      people.unmerge(m).then(async () => {
+        setMessage({ text: unmergedText(m) });
+        if (from == null || !onJoined() || (!free && !toPeople)) return refresh();
+        // Their page once People knows them again: never an "Unnamed person" in between.
+        await loadCatalog();
+        if (!onJoined()) return;
+        if (free) setScope({ kind: "person", id: from });
+        else goBack();
+      }),
+    );
+  });
+
   /** From a person's page. Ignoring a stranger goes back to People, with Undo. */
   const ignorePerson = (p: Person) => {
     const ignored = !p.ignored;
@@ -956,6 +1012,7 @@ export default function App() {
     drill({ kind: "person", id: p.id, ...(peopleNewOnly && (p.isNew || p.newPhotos > 0) ? { newOnly: true } : {}) }),
   );
   const peopleError = useLatest((e: string) => setMessage({ text: e, warn: true }));
+  const mergedInPeople = useLatest((m: Merged) => peopleMerged(m));
   const openModels = useLatest(() => setSettingsTab("models"));
   const flatLabel = loaded.query
     ? `Best matches for "${loaded.query}"`
@@ -1056,7 +1113,14 @@ export default function App() {
                   }}
                   onMerge={(into) => {
                     setNamingTitle(false);
-                    run(people.merge([personHere.id, into.id], into.id).then(() => setScope({ kind: "person", id: into.id })));
+                    const from = personHere.id;
+                    run(
+                      people.merge([from, into.id], into.id).then((m) => {
+                        setScope({ kind: "person", id: into.id });
+                        loadCatalog(); // People without them
+                        peopleMerged(m, from);
+                      }),
+                    );
                   }}
                   onCancel={() => setNamingTitle(false)}
                 />
@@ -1291,6 +1355,7 @@ export default function App() {
             onNewOnly={setPeopleNewOnly}
             onOpen={openPerson}
             onChanged={refresh}
+            onMerged={mergedInPeople}
             onError={peopleError}
             onOpenModels={openModels}
           />
