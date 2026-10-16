@@ -290,7 +290,7 @@ fn month_of(taken_ts: Option<i64>) -> Option<i64> {
 /// draws in a newborn brother or cousin, the faces from the same months don't.
 /// Sums add, so merging people is just adding.
 /// Read as a map, it holds each person's whole-life sum and how many faces.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Averages {
     life: HashMap<i64, (Vec<f32>, u32)>,
     /// Per person, per month: only months holding faces.
@@ -1124,7 +1124,8 @@ impl FaceIndex {
         // looked over the months of their photos.
         let mut joins: Vec<(f32, i64, i64)> = Vec::new();
         {
-            let c = self.centroids.read().unwrap();
+            // A copy: a face moved meanwhile ("who is this") doesn't wait for the comparing.
+            let c = self.centroids.read().unwrap().clone();
             let size = |id: &i64| c.life.get(id).map_or(0, |(_, n)| *n);
             let bigger = |a: i64, b: i64| size(&a) > size(&b) || (size(&a) == size(&b) && a < b);
             // Grouped by their months, so each person's look then is worked out once.
