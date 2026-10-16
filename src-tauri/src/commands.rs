@@ -439,8 +439,9 @@ pub async fn backup_catalog(state: State<'_, AppState>) -> Res<crate::catalog::B
 }
 
 #[tauri::command]
-pub fn last_backup(state: State<'_, AppState>) -> Option<i64> {
-    state.cat.last_backup()
+pub async fn last_backup(state: State<'_, AppState>) -> Res<Option<i64>> {
+    let cat = state.cat.clone();
+    blocking(move || Ok(cat.last_backup())).await
 }
 
 #[tauri::command]
@@ -830,6 +831,34 @@ pub fn open_releases(state: State<'_, AppState>) -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window's main thread never waits for the catalog or a disk: a
+    /// command that isn't `async` runs on it, so only those answering from
+    /// memory stay plain, and the others hand their work to a worker thread.
+    #[test]
+    fn only_answers_from_memory_run_on_the_main_thread() {
+        // Plain on purpose: settings and the count of photos described are kept
+        // in memory; switching catalogs restarts Shoebox.
+        const PLAIN: &[&str] = &["get_settings", "ai_status", "switch_catalog"];
+        const TOUCHES: &[&str] = &["state.cat", "state.faces", "state.search", "cat.", "faces."];
+        const HANDS_OFF: &[&str] = &["blocking(", "in_order(", "spawn_blocking("];
+        let source = include_str!("commands.rs").split("#[cfg(test)]").next().unwrap();
+        let mut bad = Vec::new();
+        for command in source.split("#[tauri::command]").skip(1) {
+            let command = command.trim_start();
+            let body = &command[..command.find("\n}\n").unwrap_or(command.len())];
+            let name = command.split('(').next().unwrap().rsplit(' ').next().unwrap();
+            if !TOUCHES.iter().any(|t| body.contains(t)) || PLAIN.contains(&name) {
+                continue;
+            }
+            if !command.starts_with("pub async fn") {
+                bad.push(format!("{name}: runs on the main thread"));
+            } else if !HANDS_OFF.iter().any(|h| body.contains(h)) {
+                bad.push(format!("{name}: async, but does its work on the async runtime"));
+            }
+        }
+        assert!(bad.is_empty(), "commands that make the window wait:\n{}", bad.join("\n"));
+    }
 
     #[test]
     fn a_change_that_fails_does_not_stop_the_next_ones() {
