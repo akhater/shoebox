@@ -130,6 +130,19 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// One more connection to an open catalog, for reading only: in WAL mode a
+/// reader never waits for the writer, so the window's queries run side by
+/// side and don't queue behind a scan or the AI. `query_only` refuses any write.
+pub fn open_reader(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(Duration::from_secs(30))?;
+    conn.pragma_update(None, "query_only", true)?;
+    Ok(conn)
+}
+
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version < 1 {
@@ -213,6 +226,18 @@ fn migrate(conn: &Connection) -> Result<()> {
              PRAGMA user_version = 12;
              COMMIT;"
         ))?;
+    }
+    if version < 13 {
+        // A person's faces by photo: "is this photo new for them?" was a walk
+        // through all their faces for each of their photos (seconds per page).
+        // It covers everything faces_person did.
+        conn.execute_batch(
+            "BEGIN;
+             CREATE INDEX IF NOT EXISTS faces_person_photo ON faces (person_id, photo_id);
+             DROP INDEX IF EXISTS faces_person;
+             PRAGMA user_version = 13;
+             COMMIT;",
+        )?;
     }
     Ok(())
 }

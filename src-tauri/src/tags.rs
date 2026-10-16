@@ -28,7 +28,7 @@ fn clean(name: &str) -> Option<String> {
 
 /// Every tag, most used first (unused ones too, so they're still suggested).
 pub fn all(cat: &Catalog) -> Result<Vec<Tag>> {
-    let db = cat.db();
+    let db = cat.read()?;
     let tags = db
         .prepare(
             "SELECT t.id, t.name, COUNT(pt.photo_id) FROM tags t LEFT JOIN photo_tags pt ON pt.tag_id = t.id
@@ -41,7 +41,7 @@ pub fn all(cat: &Catalog) -> Result<Vec<Tag>> {
 
 /// The tags on some photos; `count` = how many of them have it.
 pub fn on(cat: &Catalog, photo_ids: &[i64]) -> Result<Vec<Tag>> {
-    let db = cat.db();
+    let db = cat.read()?;
     let tags = db
         .prepare(
             "SELECT t.id, t.name, COUNT(*) FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id

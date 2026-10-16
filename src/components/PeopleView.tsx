@@ -1,5 +1,5 @@
 import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Search, Sparkles, Square, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { faceUrl, fmtNum, modelsApi, people as peopleApi, sameName, type Person } from "../api";
 
 interface Props {
@@ -42,8 +42,19 @@ function useFolded() {
 }
 
 /** Everyone the face recogniser found: open, name, merge, ignore strangers.
- *  Named people and people still to name are two groups that fold away. */
-export function PeopleView({ people, found, query, newOnly, onNewOnly, onOpen, onChanged, onError, onOpenModels }: Props) {
+ *  Named people and people still to name are two groups that fold away.
+ *  Drawn again only when what it shows changes: it can hold thousands of faces. */
+export const PeopleView = memo(function PeopleView({
+  people,
+  found,
+  query,
+  newOnly,
+  onNewOnly,
+  onOpen,
+  onChanged,
+  onError,
+  onOpenModels,
+}: Props) {
   const [selected, setSelected] = useState<number[]>([]);
   // With nobody yet: is the face model (and a runtime) here at all?
   const [facesReady, setFacesReady] = useState<boolean | null>(null);
@@ -135,7 +146,10 @@ export function PeopleView({ people, found, query, newOnly, onNewOnly, onOpen, o
   const card = (p: Person) => {
     const isSel = selected.includes(p.id);
     return (
-      <div key={p.id} className={`person ${isSel ? "selected" : ""} ${p.ignored ? "ignored" : ""}`}>
+      <div
+        key={p.id}
+        className={`person ${isSel ? "selected" : ""} ${p.ignored ? "ignored" : ""} ${editing === p.id ? "editing" : ""}`}
+      >
         <button
           className="person-face"
           onClick={() => (selecting ? toggle(p.id) : onOpen(p))}
@@ -310,7 +324,7 @@ export function PeopleView({ people, found, query, newOnly, onNewOnly, onOpen, o
       {group("ignored", "Ignored", ignored, "Nobody ignored. Strangers you ignore go here; their new faces still join them.")}
     </div>
   );
-}
+});
 
 /** Typing a name: people with a matching name are suggested (face, name,
  *  photos). Clicking one takes its name - a different person can share a

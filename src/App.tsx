@@ -104,6 +104,14 @@ function useRemembered(key: string, initial: boolean) {
   return [on, setOn] as const;
 }
 
+/** A handler that stays the same from one render to the next but always runs
+ *  the latest `f`: the grid and People aren't drawn again because of it. */
+function useLatest<A extends unknown[], R>(f: (...args: A) => R) {
+  const latest = useRef(f);
+  latest.current = f;
+  return useCallback((...args: A) => latest.current(...args), []);
+}
+
 /** A place to come back to: the view, what it showed, and the photo looked at. */
 interface Place {
   view: "photos" | "people";
@@ -207,7 +215,16 @@ export default function App() {
   // Each new version is announced once in the status bar; the sidebar keeps it.
   const announced = useRef<string | null>(null);
   const [scope, setScope] = useState<Scope>({ kind: "all" });
-  const [list, setList] = useState<PhotoList>(EMPTY);
+  // The photos shown, and the view they were loaded for (see `viewKey`): its
+  // search and order, which the grid follows until the next view's photos are here.
+  const [loaded, setLoaded] = useState<{ key: string; query: string; sort: Sort; list: PhotoList; clear: number }>({
+    key: "",
+    query: "",
+    sort: "oldest",
+    list: EMPTY,
+    clear: 0,
+  });
+  const { list, clear: clearCount } = loaded;
   const [viewerId, setViewerId] = useState<number | null>(null);
   const [focusId, setFocusId] = useState<number | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
@@ -240,7 +257,6 @@ export default function App() {
   const [typed, setTyped] = useState("");
   const [query, setQuery] = useState("");
   const [aiProgress, setAiProgress] = useState<AiProgress | null>(null);
-  const [clearCount, setClearCount] = useState(0);
   const [showPossible, setShowPossible] = useState(false);
   // "people" shows the People view instead of the photo grid.
   const [view, setView] = useState<"photos" | "people">("photos");
@@ -297,34 +313,56 @@ export default function App() {
   queryRef.current = query;
   const lastRootName = useRef("Scan");
 
-  const refresh = useCallback(async () => {
+  // What the grid shows: the view asked for, and whether its photos are here yet.
+  const viewKey = JSON.stringify([scope, query, sort, filters]);
+  const viewKeyRef = useRef(viewKey);
+  viewKeyRef.current = viewKey;
+  const current = loaded.key === viewKey;
+
+  // The photos of the view shown, then its filters' counts. Only the latest
+  // request counts: an answer for a view already left is dropped.
+  const viewSeq = useRef(0);
+  const loadView = useCallback(async () => {
+    const seq = ++viewSeq.current;
+    const [key, s, q, o, f] = [viewKeyRef.current, scopeRef.current, queryRef.current, sortRef.current, filtersRef.current];
+    const counts = api.facets(s, f).catch(() => null);
     try {
-      const q = queryRef.current;
-      const f = filtersRef.current;
-      const [ov, l, b, pp, fc] = await Promise.all([
-        api.overview(),
-        q
-          ? ai.search(q, scopeRef.current, f).then((r) => {
-              setClearCount(r.clear);
-              return r.list;
-            })
-          : api.listPhotos(scopeRef.current, sortRef.current, f),
-        api.browse(),
-        people.list().catch(() => [] as Person[]),
-        api.facets(scopeRef.current, f).catch(() => null),
-      ]);
-      setBrowse(b);
-      setPeopleList(pp);
-      setOverview(ov);
-      setList(l);
-      setFacets(fc);
+      const found = q ? await ai.search(q, s, f) : { list: await api.listPhotos(s, o, f), clear: 0 };
+      if (seq !== viewSeq.current) return;
+      setLoaded({ key, query: q, sort: o, ...found });
     } catch (e) {
+      if (seq !== viewSeq.current) return;
       // The folder or disk shown may have been absorbed into another one.
-      if (queryRef.current) setMessage(modelHint(`Search: ${e}`));
-      else if (scopeRef.current.kind !== "all") setScope({ kind: "all" });
-      else setMessage({ text: String(e), warn: true });
+      if (!q && s.kind !== "all") return setScope({ kind: "all" });
+      setLoaded({ key, query: q, sort: o, list: EMPTY, clear: 0 });
+      setMessage(q ? modelHint(`Search: ${e}`) : { text: String(e), warn: true });
     }
+    const fc = await counts;
+    if (seq === viewSeq.current) setFacets(fc);
   }, []);
+
+  // The sidebar, the status bar's totals and People: the same whatever the view.
+  const catalogSeq = useRef(0);
+  const loadCatalog = useCallback(() => {
+    const seq = ++catalogSeq.current;
+    const latest =
+      <T,>(set: (v: T) => void) =>
+      (v: T) => {
+        if (seq === catalogSeq.current) set(v);
+      };
+    const warn = (e: unknown) => setMessage({ text: String(e), warn: true });
+    api.overview().then(latest(setOverview)).catch(warn);
+    api.browse().then(latest(setBrowse)).catch(warn);
+    people
+      .list()
+      .then(latest(setPeopleList))
+      .catch(() => {});
+  }, []);
+
+  const refresh = useCallback(() => {
+    loadView();
+    loadCatalog();
+  }, [loadView, loadCatalog]);
 
   const timer = useRef<number | undefined>(undefined);
   // When People was last reloaded while faces are being found.
@@ -337,9 +375,22 @@ export default function App() {
     }, 400);
   }, [refresh]);
 
+  // Another view loads only its own photos; the rest is reloaded when the catalog changes.
   useEffect(() => {
-    refresh();
-  }, [scope, query, sort, filters, refresh]);
+    loadView();
+  }, [viewKey, loadView]);
+  useEffect(() => {
+    loadCatalog();
+  }, [loadCatalog]);
+
+  // A view still loading after a moment says so (and dims the last one); a
+  // quicker one just takes its place.
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    if (current) return setSlow(false);
+    const t = window.setTimeout(() => setSlow(true), 150);
+    return () => window.clearTimeout(t);
+  }, [current]);
 
   useEffect(() => {
     try {
@@ -384,10 +435,16 @@ export default function App() {
       listen<AiProgress>("ai-progress", (e) => {
         if (e.payload.error) setMessage(modelHint(`Word search: ${e.payload.error}`));
         setAiProgress(e.payload.finished ? null : e.payload);
-        // People fills in while faces are found, and is complete when they're done.
-        if (e.payload.finished || (e.payload.task === "faces" && Date.now() - facesShown.current > 3000)) {
+        // People (and the photos shown, with their filters) fill in while faces
+        // are found; everything is reloaded once they're done.
+        if (e.payload.finished) refreshSoon();
+        else if (e.payload.task === "faces" && Date.now() - facesShown.current > 3000) {
           facesShown.current = Date.now();
-          refreshSoon();
+          loadView();
+          people
+            .list()
+            .then(setPeopleList)
+            .catch(() => {});
         }
       }),
       listen<Progress>("scan-progress", (e) => {
@@ -433,7 +490,7 @@ export default function App() {
       }),
     ];
     return () => subs.forEach((p) => p.then((un) => un()));
-  }, [refreshSoon]);
+  }, [refreshSoon, loadView]);
 
   useEffect(() => {
     try {
@@ -462,7 +519,10 @@ export default function App() {
   const setMarked = useCallback(
     (ids: number[], marked: boolean) => {
       const set = new Set(ids);
-      setList((l) => ({ ...l, marked: l.marked.map((m, i) => (set.has(l.ids[i]) ? +marked : m)) }));
+      setLoaded((v) => ({
+        ...v,
+        list: { ...v.list, marked: v.list.marked.map((m, i) => (set.has(v.list.ids[i]) ? +marked : m)) },
+      }));
       cull
         .mark(ids, marked)
         .then(() => api.overview().then(setOverview))
@@ -762,15 +822,24 @@ export default function App() {
 
   // A search shows its clear matches unless "show more" was pressed.
   const shown = useMemo(
-    () => (query && !showPossible ? headOf(list, clearCount) : list),
-    [list, query, showPossible, clearCount],
+    () => (loaded.query && !showPossible ? headOf(list, clearCount) : list),
+    [list, loaded.query, showPossible, clearCount],
   );
   // On a person's page: photos they were found in since you last looked at them.
-  const freshHere = useMemo(() => shown.fresh.filter((f) => f === 1).length, [shown]);
+  const freshHere = useMemo(() => (current ? shown.fresh.filter((f) => f === 1).length : 0), [shown, current]);
   // ...and "Only new" there: just those photos.
   const newOnlyHere = scope.kind === "person" && !!scope.newOnly;
   const viewerIndex = useMemo(() => (viewerId == null ? -1 : shown.ids.indexOf(viewerId)), [viewerId, shown]);
   const focusIndex = useMemo(() => (focusId == null ? null : shown.ids.indexOf(focusId)), [focusId, shown]);
+  // Stable, so the grid isn't drawn again for a scan's progress or a letter typed in the search box.
+  const openPhoto = useLatest((i: number) => setViewerId(shown.ids[i]));
+  const selectPhotos = useLatest((cursor: number, sel: Set<number>) => {
+    setFocusId(cursor >= 0 ? shown.ids[cursor] : null);
+    setSelected(sel);
+  });
+  const topPhoto = useLatest((i: number) => {
+    gridTop.current = i;
+  });
 
   // A new place starts with nothing selected, or with the photo it was reached from.
   const selectOnArrival = useRef<number | null>(null);
@@ -857,7 +926,22 @@ export default function App() {
 
   const empty = overview && overview.volumes.length === 0;
   // The people People shows without asking: not ignored, not seen only once.
-  const shownPeople = peopleList.filter((p) => !p.ignored && (p.name || p.photos >= 2));
+  const shownPeople = useMemo(() => peopleList.filter((p) => !p.ignored && (p.name || p.photos >= 2)), [peopleList]);
+  const peopleNew = useMemo(() => shownPeople.filter((p) => p.isNew || p.newPhotos > 0).length, [shownPeople]);
+  const sidebarBrowse = useMemo(() => (browse && sort === "newest" ? newestFirst(browse) : browse), [browse, sort]);
+  // People's handlers. From "Only new", straight to what's new in them.
+  const openPerson = useLatest((p: Person) =>
+    drill({ kind: "person", id: p.id, ...(peopleNewOnly && (p.isNew || p.newPhotos > 0) ? { newOnly: true } : {}) }),
+  );
+  const peopleError = useLatest((e: string) => setMessage({ text: e, warn: true }));
+  const openModels = useLatest(() => setSettingsTab("models"));
+  const flatLabel = loaded.query
+    ? `Best matches for "${loaded.query}"`
+    : loaded.sort === "name"
+      ? "By file name"
+      : loaded.sort === "added"
+        ? "Most recently added first"
+        : undefined;
 
   return (
     <div className={`app ${folded ? "folded" : ""}`}>
@@ -865,7 +949,7 @@ export default function App() {
         folded={folded}
         onFold={setFolded}
         overview={overview}
-        browse={browse && sort === "newest" ? newestFirst(browse) : browse}
+        browse={sidebarBrowse}
         version={version}
         update={update?.newer ? update.latest : null}
         onUpdate={() => run(updatesApi.openPage())}
@@ -875,7 +959,7 @@ export default function App() {
         onRegenerate={(id) => regenerate(id)}
         onRemove={removeFolder}
         people={shownPeople.length}
-        peopleNew={shownPeople.filter((p) => p.isNew || p.newPhotos > 0).length}
+        peopleNew={peopleNew}
         peopleOpen={view === "people"}
         onPeople={(newOnly = false) => {
           setTrail([]);
@@ -983,7 +1067,9 @@ export default function App() {
                 ? personFound
                   ? `${fmtNum(personFound.length)} found`
                   : `${fmtNum(shownPeople.length)} people`
-                : `${fmtNum(shown.ids.length)} ${query ? "matches" : newOnlyHere ? "new photos" : "photos"}`}
+                : slow
+                  ? "Loading…"
+                  : `${fmtNum(shown.ids.length)} ${query ? "matches" : newOnlyHere ? "new photos" : "photos"}`}
               {view === "photos" && personHere && freshHere > 0 && !newOnlyHere && (
                 <b className="new-count"> · {fmtNum(freshHere)} new</b>
               )}
@@ -1116,7 +1202,7 @@ export default function App() {
         {view === "photos" && !empty && (
           <FilterBar facets={facets} filters={filters} onChange={setFilters} people={peopleList} />
         )}
-        {view === "photos" && filtersOn(filters) && list.ids.length === 0 && (
+        {view === "photos" && current && filtersOn(filters) && list.ids.length === 0 && (
           <div className="banner">
             No photos here match these filters.
             <button className="btn small ghost" onClick={() => setFilters(NO_FILTERS)}>
@@ -1136,7 +1222,7 @@ export default function App() {
             from Shoebox's copies. Put it back and press ↻ next to it to scan it again.
           </div>
         )}
-        {query && list.ids.length > clearCount && (
+        {query && current && list.ids.length > clearCount && (
           <div className="banner">
             {showPossible
               ? `Showing ${fmtNum(clearCount)} clear and ${fmtNum(list.ids.length - clearCount)} possible matches, best first.`
@@ -1172,13 +1258,10 @@ export default function App() {
             query={personTyped}
             newOnly={peopleNewOnly}
             onNewOnly={setPeopleNewOnly}
-            // From "Only new", straight to what's new in them.
-            onOpen={(p) =>
-              drill({ kind: "person", id: p.id, ...(peopleNewOnly && (p.isNew || p.newPhotos > 0) ? { newOnly: true } : {}) })
-            }
+            onOpen={openPerson}
             onChanged={refresh}
-            onError={(e) => setMessage({ text: e, warn: true })}
-            onOpenModels={() => setSettingsTab("models")}
+            onError={peopleError}
+            onOpenModels={openModels}
           />
         ) : empty ? (
           <div className="empty">
@@ -1194,39 +1277,32 @@ export default function App() {
             </div>
           </div>
         ) : (
-          <div className="grid-stack">
+          // Until the view's photos are here the last ones stay (not clickable),
+          // dimmed if it takes a moment; the grid is rebuilt when they arrive.
+          <div className={`grid-stack ${current ? "" : "stale"} ${slow ? "slow" : ""}`}>
             <PhotoGrid
-              key={JSON.stringify(scope) + query + sort + JSON.stringify(filters)}
+              key={loaded.key}
               list={shown}
               rowHeight={rowHeight}
-              onOpen={(i) => setViewerId(shown.ids[i])}
-              onSelect={(cursor, sel) => {
-                setFocusId(cursor >= 0 ? shown.ids[cursor] : null);
-                setSelected(sel);
-              }}
+              onOpen={openPhoto}
+              onSelect={selectPhotos}
               onMark={setMarked}
               onTag={setTagging}
               selected={selected}
-              keyboard={viewerIndex < 0 && !calendar && !deleteOpen && !settingsOpen && !straysFor && !tagging && !reassigning}
+              keyboard={
+                current && viewerIndex < 0 && !calendar && !deleteOpen && !settingsOpen && !straysFor && !tagging && !reassigning
+              }
               focusRequest={gridFocus}
               focusIndex={focusIndex}
               showType={showType}
-              flatLabel={
-                query
-                  ? `Best matches for "${query}"`
-                  : sort === "name"
-                    ? "By file name"
-                    : sort === "added"
-                      ? "Most recently added first"
-                      : undefined
-              }
+              flatLabel={flatLabel}
               jump={jump}
-              onTopPhoto={(i) => (gridTop.current = i)}
+              onTopPhoto={topPhoto}
             />
             {calendar && (
               <CalendarView
                 list={shown}
-                newestFirst={sort === "newest" && !query}
+                newestFirst={loaded.sort === "newest" && !loaded.query}
                 startIndex={focusIndex != null && focusIndex >= 0 ? focusIndex : gridTop.current}
                 onPick={(i) => {
                   setCalendar(false);
