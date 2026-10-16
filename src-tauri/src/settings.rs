@@ -15,11 +15,25 @@ pub struct Settings {
     pub workers: usize,
     /// Ask GitHub at start and every few hours whether a newer release is out.
     pub check_updates: bool,
+    /// Memory for reading the catalog, in MB: pages kept by each connection.
+    /// 0 = automatic (see [`crate::db::Memory`]).
+    pub catalog_cache_mb: u32,
+    /// The catalog file mapped into memory, in MB, through the system's file
+    /// cache (shared, given back when other programs need it). 0 = automatic.
+    pub catalog_map_mb: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { preview_size: 1080, preview_quality: 84, thumb_height: 320, workers: 4, check_updates: true }
+        Self {
+            preview_size: 1080,
+            preview_quality: 84,
+            thumb_height: 320,
+            workers: 4,
+            check_updates: true,
+            catalog_cache_mb: 0,
+            catalog_map_mb: 0,
+        }
     }
 }
 
@@ -42,6 +56,10 @@ impl Settings {
         self.preview_quality = self.preview_quality.clamp(50, 95);
         self.thumb_height = self.thumb_height.clamp(160, 640);
         self.workers = self.workers.clamp(1, 16);
+        if self.catalog_cache_mb != 0 {
+            self.catalog_cache_mb = self.catalog_cache_mb.clamp(2, 1024);
+        }
+        self.catalog_map_mb = self.catalog_map_mb.min(32_768);
         self
     }
 }

@@ -174,6 +174,34 @@ impl Kick {
     }
 }
 
+/// Opens once an index has read what it keeps in memory (word search's
+/// descriptions, people's average faces), so it can be read in the background
+/// while the window is already open: until then, its users wait. If reading
+/// failed, they get the error instead of working from half the data.
+#[derive(Default)]
+pub struct Ready {
+    state: Mutex<Option<Result<(), String>>>,
+    wake: Condvar,
+}
+
+impl Ready {
+    pub fn open(&self, result: Result<(), String>) {
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+        self.wake.notify_all();
+    }
+
+    pub fn wait(&self) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match state.as_ref() {
+                Some(Ok(())) => return Ok(()),
+                Some(Err(e)) => anyhow::bail!("{e}"),
+                None => state = self.wake.wait(state).unwrap_or_else(|e| e.into_inner()),
+            }
+        }
+    }
+}
+
 /// Reads the lenses an older Shoebox couldn't, from the originals plugged in
 /// (metadata only), and lets a shot's other file lend its lens. Kicked at
 /// start, after each scan, and when a disk is plugged in.
@@ -560,6 +588,7 @@ fn serve_image(data: &DataDir, path: &str) -> tauri::http::Response<Vec<u8>> {
 }
 
 pub fn run() {
+    let started = Instant::now();
     volumes::quiet_errors();
     let data = DataDir::locate();
     if let Err(e) = data.ensure() {
@@ -580,8 +609,10 @@ pub fn run() {
     let scans = Arc::new(ScanQueue::default());
     let (c, q) = (cat.clone(), scans.clone());
     std::thread::spawn(move || check_saved_files(&c, &q));
-    let index = Arc::new(search::SearchIndex::open(&cat).expect("open search index"));
-    let face_index = Arc::new(faces::FaceIndex::open(&cat).expect("open face index"));
+    // Read in the background: the window opens at once, a search or a face
+    // waits until theirs are read.
+    let index = search::SearchIndex::open_in_background(&cat).expect("open search index");
+    let face_index = faces::FaceIndex::open_in_background(cat.clone()).expect("open face index");
     let ai = Arc::new(AiQueue::default());
     let model_queue = Arc::new(ModelQueue::default());
     let lens_kick = Arc::new(Kick::default());
@@ -630,6 +661,7 @@ pub fn run() {
             updates: update_status.clone(),
         })
         .setup(move |app| {
+            log::info!("window ready {} ms after start", started.elapsed().as_millis());
             let handle = app.handle().clone();
             let (c, q, a, l) = (cat.clone(), scans.clone(), ai.clone(), lens_kick.clone());
             std::thread::Builder::new().name("scan".into()).spawn(move || scan_worker(handle, c, q, a, l))?;
@@ -726,4 +758,30 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Shoebox");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_index_is_waited_for_until_read_then_says_if_reading_failed() {
+        let ready = Arc::new(Ready::default());
+        let (r, waited) = (ready.clone(), Arc::new(AtomicBool::new(false)));
+        let w = waited.clone();
+        let waiter = std::thread::spawn(move || {
+            let result = r.wait();
+            w.store(true, Ordering::SeqCst);
+            result
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!waited.load(Ordering::SeqCst), "answered before the index was read");
+        ready.open(Ok(()));
+        assert!(waiter.join().unwrap().is_ok());
+        assert!(ready.wait().is_ok());
+
+        let failed = Ready::default();
+        failed.open(Err("faces.db is damaged".into()));
+        assert_eq!(failed.wait().unwrap_err().to_string(), "faces.db is damaged");
+    }
 }

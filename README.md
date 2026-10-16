@@ -143,6 +143,7 @@ shoebox-cli stats                # catalog overview
 shoebox-cli search kids on a beach
 shoebox-cli people               # everyone found, with their names
 shoebox-cli models               # which AI models are installed
+shoebox-cli bench                # how fast the main views are on this catalog and computer
 ```
 
 The full list of commands is documented at the top of

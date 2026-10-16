@@ -120,9 +120,10 @@ pub const PREVIEW_PENDING: i64 = 0;
 pub const PREVIEW_OK: i64 = 1;
 pub const PREVIEW_FAILED: i64 = 2;
 
-pub fn open(path: &Path) -> Result<Connection> {
+pub fn open(path: &Path, memory: Memory) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(30))?;
+    memory.apply(&conn)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -133,14 +134,47 @@ pub fn open(path: &Path) -> Result<Connection> {
 /// One more connection to an open catalog, for reading only: in WAL mode a
 /// reader never waits for the writer, so the window's queries run side by
 /// side and don't queue behind a scan or the AI. `query_only` refuses any write.
-pub fn open_reader(path: &Path) -> Result<Connection> {
+pub fn open_reader(path: &Path, memory: Memory) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(Duration::from_secs(30))?;
     conn.pragma_update(None, "query_only", true)?;
+    memory.apply(&conn)?;
     Ok(conn)
+}
+
+/// How much memory SQLite uses to read the catalog: pages kept by each
+/// connection, and how much of the catalog file is mapped into memory (read
+/// through the system's file cache, shared by every connection and given back
+/// when other programs need it). SQLite's default, 2 MB of pages and nothing
+/// mapped, read most of a 190,000-photo catalog from disk again for each view:
+/// about twice as slow. `shoebox-cli bench` times other values on any computer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Memory {
+    pub cache_mb: u32,
+    pub map_mb: u32,
+}
+
+impl Memory {
+    /// The settings' values, 0 meaning automatic: 16 MB of pages, and the
+    /// whole catalog file mapped with room to grow (twice its size, from 256 MB
+    /// to 8 GB).
+    pub fn for_catalog(cache_mb: u32, map_mb: u32, catalog_bytes: u64) -> Self {
+        let auto_map = u32::try_from((catalog_bytes >> 20).saturating_mul(2)).unwrap_or(u32::MAX).clamp(256, 8192);
+        Self {
+            cache_mb: if cache_mb == 0 { 16 } else { cache_mb },
+            map_mb: if map_mb == 0 { auto_map } else { map_mb },
+        }
+    }
+
+    pub fn apply(&self, conn: &Connection) -> Result<()> {
+        conn.pragma_update(None, "cache_size", -(i64::from(self.cache_mb) * 1024))?;
+        conn.pragma_update(None, "mmap_size", i64::from(self.map_mb) << 20)?;
+        Ok(())
+    }
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
@@ -309,4 +343,22 @@ pub fn is_under(path: &str, root: &str) -> bool {
     root.is_empty()
         || path == root
         || (path.len() > root.len() && path.starts_with(root) && path.as_bytes()[root.len()] == b'\\')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Memory;
+
+    #[test]
+    fn automatic_memory_follows_the_catalog_size() {
+        let mb = |n: u64| n << 20;
+        // Small or new catalogs: 16 MB of pages, 256 MB mapped.
+        assert_eq!(Memory::for_catalog(0, 0, 0), Memory { cache_mb: 16, map_mb: 256 });
+        assert_eq!(Memory::for_catalog(0, 0, mb(100)), Memory { cache_mb: 16, map_mb: 256 });
+        // Bigger ones: twice the file, up to 8 GB.
+        assert_eq!(Memory::for_catalog(0, 0, mb(700)).map_mb, 1400);
+        assert_eq!(Memory::for_catalog(0, 0, mb(20_000)).map_mb, 8192);
+        // Values set by hand are kept.
+        assert_eq!(Memory::for_catalog(64, 512, mb(700)), Memory { cache_mb: 64, map_mb: 512 });
+    }
 }

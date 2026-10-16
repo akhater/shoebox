@@ -4,7 +4,25 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.42.3 - unreleased
 
+### Added
+
+- **Catalog memory, and a benchmark for any computer.** Settings > General >
+  Catalog memory sets how much of the catalog is read straight from memory;
+  Automatic (the default) follows the catalog's size, and Windows gives the
+  memory back when other programs need it. `shoebox-cli bench` times what
+  the window does most (start-up, the sidebar, People, all photos, a camera,
+  a year, a person) on this catalog and computer, and `--cache-mb` /
+  `--map-mb` try other values for one run. `shoebox-cli settings` shows and
+  changes every setting.
+
 ### Fixed
+
+- **Opens at once, however big the catalog.** The window no longer waits
+  for word search's descriptions and everyone's faces to be read: they are
+  read in the background, and a search or a face waits for them only if
+  it comes first. People's faces are read in one pass, about four times
+  faster (0.5 s instead of 2.1 s for 108,000 faces). On a catalog of
+  190,000 photos, a person's page and People take half the time they did.
 
 - **No more freezes between views.** The window no longer stops drawing
   while it waits for the catalog: its questions run beside the scan and the

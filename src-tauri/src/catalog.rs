@@ -18,6 +18,8 @@ pub struct Catalog {
     db: Mutex<Connection>,
     /// Idle reading connections (see [`Catalog::read`]).
     readers: Mutex<Vec<Connection>>,
+    /// What every connection may use to read the catalog (from the settings).
+    memory: RwLock<db::Memory>,
     pub settings: RwLock<Settings>,
     /// volume id -> current mount point, for every known disk that is plugged in.
     online: RwLock<HashMap<i64, String>>,
@@ -30,13 +32,15 @@ pub struct Catalog {
 impl Catalog {
     pub fn open(data: DataDir) -> Result<Self> {
         data.ensure()?;
-        let conn = db::open(&data.db_path())?;
-        gear::tidy_if_new_rules(&conn)?;
         let settings = Settings::load(&data.settings_path());
+        let memory = memory_for(&settings, &data);
+        let conn = db::open(&data.db_path(), memory)?;
+        gear::tidy_if_new_rules(&conn)?;
         let cat = Self {
             data,
             db: Mutex::new(conn),
             readers: Mutex::new(Vec::new()),
+            memory: RwLock::new(memory),
             settings: RwLock::new(settings),
             online: RwLock::new(HashMap::new()),
             unreachable: RwLock::new(Vec::new()),
@@ -81,7 +85,7 @@ impl Catalog {
         let idle = self.readers.lock().unwrap_or_else(|e| e.into_inner()).pop();
         let conn = match idle {
             Some(c) => c,
-            None => db::open_reader(&self.data.db_path())?,
+            None => db::open_reader(&self.data.db_path(), self.memory())?,
         };
         Ok(Reader { cat: self, conn: Some(conn) })
     }
@@ -94,7 +98,22 @@ impl Catalog {
         let s = s.sanitized();
         s.save(&self.data)?;
         *self.settings.write().unwrap() = s.clone();
+        self.set_memory(memory_for(&s, &self.data))?;
         Ok(s)
+    }
+
+    /// What each connection may use to read the catalog now.
+    pub fn memory(&self) -> db::Memory {
+        *self.memory.read().unwrap()
+    }
+
+    /// Uses this much memory from now on: the writer at once, readers as they
+    /// are opened again (the idle ones are closed).
+    pub fn set_memory(&self, memory: db::Memory) -> Result<()> {
+        memory.apply(&self.db())?;
+        *self.memory.write().unwrap() = memory;
+        self.readers.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        Ok(())
     }
 
     pub fn mount_of(&self, volume_id: i64) -> Option<String> {
@@ -279,6 +298,7 @@ impl Catalog {
             preview_bytes,
             thumb_bytes,
             total_bytes: db_bytes + preview_bytes + thumb_bytes,
+            memory: self.memory(),
         })
     }
 
@@ -998,6 +1018,12 @@ impl Catalog {
     }
 }
 
+/// The settings' catalog memory for this catalog's size today.
+fn memory_for(s: &Settings, data: &DataDir) -> db::Memory {
+    let bytes = data.db_path().metadata().map(|m| m.len()).unwrap_or(0);
+    db::Memory::for_catalog(s.catalog_cache_mb, s.catalog_map_mb, bytes)
+}
+
 /// A reading connection from [`Catalog::read`]; back to the pool when dropped.
 pub struct Reader<'a> {
     cat: &'a Catalog,
@@ -1112,6 +1138,8 @@ pub struct Stats {
     pub preview_bytes: u64,
     pub thumb_bytes: u64,
     pub total_bytes: u64,
+    /// What reading the catalog may use now (the settings' automatic values resolved).
+    pub memory: db::Memory,
 }
 
 #[derive(Serialize)]
