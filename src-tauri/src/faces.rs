@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub const FACE_MODEL: &str = "buffalo_l";
 const DET_SIZE: u32 = 640;
@@ -402,6 +402,9 @@ pub struct FaceIndex {
     /// Per person: the sum of its faces' fingerprints and how many. Sums add,
     /// so merging people is just adding.
     centroids: RwLock<HashMap<i64, (Vec<f32>, u32)>>,
+    /// Open once the averages are read (and any regrouping done): every
+    /// method waits for it, so none works from half the people.
+    ready: crate::Ready,
 }
 
 impl FaceIndex {
@@ -411,19 +414,58 @@ impl FaceIndex {
         *self.models.lock().unwrap() = None;
     }
 
+    /// Opens the face index and reads it before returning.
     pub fn open(cat: &Catalog) -> Result<Self> {
+        let index = Self::unread(cat)?;
+        let result = index.read(cat);
+        index.ready.open(result.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
+        result.map(|_| index)
+    }
+
+    /// Opens the face index at once and reads it in the background (the
+    /// window opens meanwhile); what needs it waits until it's read.
+    pub fn open_in_background(cat: Arc<Catalog>) -> Result<Arc<Self>> {
+        let index = Arc::new(Self::unread(&cat)?);
+        let reading = index.clone();
+        std::thread::Builder::new().name("faces-open".into()).spawn(move || {
+            let result = reading.read(&cat).map_err(|e| {
+                log::warn!("faces: couldn't read the face index: {e:#}");
+                format!("The face index couldn't be read: {e:#}")
+            });
+            reading.ready.open(result);
+        })?;
+        Ok(index)
+    }
+
+    fn unread(cat: &Catalog) -> Result<Self> {
         let conn = Connection::open(cat.data.root.join("faces.db"))?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS emb (face_id INTEGER PRIMARY KEY, vec BLOB NOT NULL);")?;
-        let index = Self { db: Mutex::new(conn), models: Mutex::new(None), centroids: RwLock::new(HashMap::new()) };
-        index.rebuild_centroids(cat)?;
+        Ok(Self {
+            db: Mutex::new(conn),
+            models: Mutex::new(None),
+            centroids: RwLock::new(HashMap::new()),
+            ready: crate::Ready::default(),
+        })
+    }
+
+    /// Everyone's average face, then the regrouping or joining a catalog
+    /// from an older Shoebox needs once.
+    fn read(&self, cat: &Catalog) -> Result<()> {
+        let started = std::time::Instant::now();
+        self.rebuild_centroids(cat)?;
+        log::info!(
+            "faces: {} people's average faces read in {} ms",
+            self.centroids.read().unwrap().len(),
+            started.elapsed().as_millis()
+        );
         // Catalogs grouped under older rules get regrouped once, and so does
         // one whose regrouping was cut short.
         let done: Option<String> =
             cat.db().query_row("SELECT value FROM meta WHERE key = 'face_grouping'", [], |r| r.get(0)).optional()?;
         if done.as_deref() != Some(GROUPING_RULES) {
-            let (faces, people) = index.regroup(cat)?;
+            let (faces, people) = self.regroup_now(cat)?;
             log::info!("faces: regrouped {faces} faces into {people} people (rules {GROUPING_RULES})");
         }
         // Catalogs grouped before people found twice were joined get theirs
@@ -433,7 +475,7 @@ impl FaceIndex {
             .query_row("SELECT value FROM meta WHERE key = 'look_alikes_joined'", [], |r| r.get(0))
             .optional()?;
         if joined.as_deref() != Some(JOIN_RULES) {
-            match index.join_look_alikes(cat) {
+            match self.join_now(cat) {
                 Ok(_) => {
                     cat.db().execute(
                         "INSERT OR REPLACE INTO meta (key, value) VALUES ('look_alikes_joined', ?1)",
@@ -444,7 +486,7 @@ impl FaceIndex {
                 Err(e) => log::warn!("faces: joining people found twice failed: {e:#}"),
             }
         }
-        Ok(index)
+        Ok(())
     }
 
     /// Sorts again every face the user hasn't touched - not in a named or ignored
@@ -456,6 +498,12 @@ impl FaceIndex {
     /// a Shoebox stopped halfway sorts them all again at its next start,
     /// rather than leaving faces with nobody.
     pub fn regroup(&self, cat: &Catalog) -> Result<(usize, usize)> {
+        self.ready.wait()?;
+        self.regroup_now(cat)
+    }
+
+    /// [`FaceIndex::regroup`], also while the index is being read.
+    fn regroup_now(&self, cat: &Catalog) -> Result<(usize, usize)> {
         let loose: Vec<(i64, i64, [f64; 4])> = cat
             .db()
             .prepare(
@@ -522,7 +570,7 @@ impl FaceIndex {
         cat.db().execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('face_grouping', ?1)", [GROUPING_RULES])?;
         // Only people just made can join someone (the rest have a name, are
         // ignored or hold a face placed by hand).
-        let joined = self.join_look_alikes(cat).unwrap_or_else(|e| {
+        let joined = self.join_now(cat).unwrap_or_else(|e| {
             log::warn!("faces: joining people found twice failed: {e:#}");
             0
         });
@@ -541,20 +589,32 @@ impl FaceIndex {
             .map(|b| b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()))
     }
 
+    /// Everyone's average face, from the catalog's faces and faces.db's
+    /// fingerprints read side by side in face order: one pass over each, not
+    /// one look-up per face (seconds on a big catalog).
     fn rebuild_centroids(&self, cat: &Catalog) -> Result<()> {
         let faces: Vec<(i64, i64)> = cat
-            .db()
+            .read()?
             // In face order: the sums come out the same to the last bit, whatever index the query uses.
             .prepare("SELECT id, person_id FROM faces WHERE person_id IS NOT NULL ORDER BY id")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
+        let mut faces = faces.into_iter().peekable();
         let mut c: HashMap<i64, (Vec<f32>, u32)> = HashMap::new();
-        for (fid, pid) in faces {
-            if let Some(v) = self.vector(fid)? {
-                let e = c.entry(pid).or_insert_with(|| (vec![0.0; DIM], 0));
-                e.0.iter_mut().zip(&v).for_each(|(s, x)| *s += x);
-                e.1 += 1;
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT face_id, vec FROM emb ORDER BY face_id")?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let fid: i64 = r.get(0)?;
+            while faces.next_if(|(id, _)| *id < fid).is_some() {}
+            let Some((_, pid)) = faces.next_if(|(id, _)| *id == fid) else { continue };
+            let blob = r.get_ref(1)?.as_blob()?;
+            if blob.len() != DIM * 4 {
+                continue;
             }
+            let e = c.entry(pid).or_insert_with(|| (vec![0.0; DIM], 0));
+            e.0.iter_mut().zip(blob.as_chunks::<4>().0).for_each(|(s, x)| *s += f32::from_le_bytes(*x));
+            e.1 += 1;
         }
         *self.centroids.write().unwrap() = c;
         Ok(())
@@ -589,6 +649,7 @@ impl FaceIndex {
         cancel: &AtomicBool,
         progress: &dyn Fn(&crate::search::AiProgress),
     ) -> Result<()> {
+        self.ready.wait()?;
         let todo: Vec<i64> = cat
             .db()
             .prepare(&format!(
@@ -660,7 +721,7 @@ impl FaceIndex {
         // The faces are saved either way; a failed join is tried again after
         // the next photos.
         if total_faces > 0
-            && let Err(e) = self.join_look_alikes(cat)
+            && let Err(e) = self.join_now(cat)
         {
             log::warn!("faces: joining people found twice failed: {e:#}");
         }
@@ -678,6 +739,7 @@ impl FaceIndex {
         img: &DynamicImage,
         faces: Vec<(Detected, Vec<f32>)>,
     ) -> Result<()> {
+        self.ready.wait()?;
         let (w, h) = img.dimensions();
         let (fw, fh) = (w as f64, h as f64);
         // Cut out before the catalog is held.
@@ -756,6 +818,7 @@ impl FaceIndex {
 
     /// Everyone, named people first, then by how many photos they're in.
     pub fn people(&self, cat: &Catalog) -> Result<Vec<Person>> {
+        self.ready.wait()?;
         let db = cat.read()?;
         let people = db
             .prepare(
@@ -784,12 +847,14 @@ impl FaceIndex {
 
     /// People's search box: whoever's name matches what's typed, best first.
     pub fn find_people(&self, cat: &Catalog, query: &str) -> Result<Vec<Person>> {
+        self.ready.wait()?;
         Ok(find(self.people(cat)?, query))
     }
 
     /// The user has seen these people's photos (they left their page): no longer new.
     /// Returns how many faces that was.
     pub fn mark_read(&self, cat: &Catalog, person_ids: &[i64]) -> Result<usize> {
+        self.ready.wait()?;
         let mut db = cat.db();
         let tx = db.transaction()?;
         let mut n = 0;
@@ -803,6 +868,7 @@ impl FaceIndex {
     /// "Mark as read" on one of People's groups: its people are no longer new.
     /// Returns how many faces that was.
     pub fn mark_group_read(&self, cat: &Catalog, group: PeopleGroup) -> Result<usize> {
+        self.ready.wait()?;
         let ids: Vec<i64> =
             self.people(cat)?.into_iter().filter(|p| p.group() == group && p.has_news()).map(|p| p.id).collect();
         self.mark_read(cat, &ids)
@@ -810,12 +876,14 @@ impl FaceIndex {
 
     /// "Mark all as read" in People: every face found so far has been seen.
     pub fn mark_all_read(&self, cat: &Catalog) -> Result<usize> {
+        self.ready.wait()?;
         Ok(cat.db().execute("UPDATE faces SET seen = 1 WHERE seen = 0", [])?)
     }
 
     /// Names someone (an empty name: unnamed again). A name already taken
     /// stays two people called the same: only `merge` makes them one.
     pub fn rename(&self, cat: &Catalog, person_id: i64, name: &str) -> Result<()> {
+        self.ready.wait()?;
         let name = name.trim();
         let n = cat.db().execute(
             "UPDATE people SET name = ?1 WHERE id = ?2",
@@ -831,6 +899,7 @@ impl FaceIndex {
     /// so they never come back as someone new. All or nothing: an unknown
     /// id changes nobody.
     pub fn set_ignored(&self, cat: &Catalog, ids: &[i64], ignored: bool) -> Result<()> {
+        self.ready.wait()?;
         let mut db = cat.db();
         let tx = db.transaction()?;
         for id in ids {
@@ -853,6 +922,12 @@ impl FaceIndex {
     /// Two people seen in the same photo never join. Returns how many people
     /// joined someone.
     pub fn join_look_alikes(&self, cat: &Catalog) -> Result<usize> {
+        self.ready.wait()?;
+        self.join_now(cat)
+    }
+
+    /// [`FaceIndex::join_look_alikes`], also while the index is being read.
+    fn join_now(&self, cat: &Catalog) -> Result<usize> {
         // A join moves an average, which can bring someone else close enough:
         // again until nobody joins (two or three passes on a real catalog).
         let mut joined = 0;
@@ -933,7 +1008,7 @@ impl FaceIndex {
         for (t, ls) in &joining {
             let mut ids = ls.clone();
             ids.push(*t);
-            self.merge(cat, &ids, *t)?;
+            self.merge_now(cat, &ids, *t)?;
         }
         Ok(moved.len())
     }
@@ -942,6 +1017,12 @@ impl FaceIndex {
     /// join - sharing a name never does it. Keeps `into`'s name, or the
     /// first name found.
     pub fn merge(&self, cat: &Catalog, ids: &[i64], into: i64) -> Result<()> {
+        self.ready.wait()?;
+        self.merge_now(cat, ids, into)
+    }
+
+    /// [`FaceIndex::merge`], also while the index is being read.
+    fn merge_now(&self, cat: &Catalog, ids: &[i64], into: i64) -> Result<()> {
         let others: Vec<i64> = ids.iter().copied().filter(|&i| i != into).collect();
         if others.is_empty() {
             return Ok(());
@@ -991,6 +1072,7 @@ impl FaceIndex {
     /// Shoebox places itself (`Elsewhere`, and faces making room) count as new
     /// for the person they join, so they show up there to be checked.
     pub fn reassign(&self, cat: &Catalog, face_ids: &[i64], to: &FaceTarget) -> Result<Moved> {
+        self.ready.wait()?;
         let mut moved = Moved::default();
         // Fingerprint changes, applied to the people's averages once saved.
         let mut changes: Vec<(i64, Option<i64>, i64)> = Vec::new();
@@ -1078,6 +1160,7 @@ impl FaceIndex {
     /// Undo: puts faces back as they were (`Moved::undo`). Returns how many
     /// changed.
     pub fn restore(&self, cat: &Catalog, placements: &[Placement]) -> Result<usize> {
+        self.ready.wait()?;
         let mut changes: Vec<(i64, Option<i64>, Option<i64>)> = Vec::new();
         {
             let mut db = cat.db();
@@ -1123,6 +1206,7 @@ impl FaceIndex {
     /// The people these faces look most like, best first, to suggest who
     /// they are: by each person's average face, not counting `except`.
     pub fn look_alikes(&self, face_ids: &[i64], except: &[i64], n: usize) -> Result<Vec<LookAlike>> {
+        self.ready.wait()?;
         let mut vs = Vec::new();
         for &fid in face_ids {
             if let Some(v) = self.vector(fid)? {
@@ -1153,6 +1237,7 @@ impl FaceIndex {
     /// the average, refined a few times, so a minority of strangers can't
     /// pull it their way. Faces without a fingerprint are left out.
     pub fn person_faces(&self, cat: &Catalog, person_id: i64) -> Result<Vec<Stray>> {
+        self.ready.wait()?;
         let faces: Vec<(i64, i64, bool)> = cat
             .read()?
             .prepare("SELECT id, photo_id, by_hand FROM faces WHERE person_id = ?1 ORDER BY id")?
@@ -1181,6 +1266,7 @@ impl FaceIndex {
     /// first. Faces placed by hand are never offered, and a person with fewer
     /// than 3 faces has no "rest of them" to compare with.
     pub fn strays(&self, cat: &Catalog, person_id: i64) -> Result<Vec<Stray>> {
+        self.ready.wait()?;
         let all = self.person_faces(cat, person_id)?;
         if all.len() < 3 {
             return Ok(Vec::new());
@@ -1190,11 +1276,13 @@ impl FaceIndex {
 
     /// The faces found in one photo, for the viewer.
     pub fn photo_faces(&self, cat: &Catalog, photo_id: i64) -> Result<Vec<PhotoFace>> {
+        self.ready.wait()?;
         self.faces_in(cat, &[photo_id])
     }
 
     /// The faces found in some photos, photo by photo, left to right.
     pub fn faces_in(&self, cat: &Catalog, photo_ids: &[i64]) -> Result<Vec<PhotoFace>> {
+        self.ready.wait()?;
         let db = cat.read()?;
         let mut stmt = db.prepare(
             "SELECT f.id, f.photo_id, f.person_id, p.name, f.x1, f.y1, f.x2, f.y2 FROM faces f

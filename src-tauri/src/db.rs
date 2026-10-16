@@ -123,6 +123,7 @@ pub const PREVIEW_FAILED: i64 = 2;
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(30))?;
+    cache(&conn)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -140,7 +141,18 @@ pub fn open_reader(path: &Path) -> Result<Connection> {
     )?;
     conn.busy_timeout(Duration::from_secs(30))?;
     conn.pragma_update(None, "query_only", true)?;
+    cache(&conn)?;
     Ok(conn)
+}
+
+/// Memory for reading a big catalog: 16 MB of pages per connection, and the
+/// catalog file mapped into memory, shared by every connection through the
+/// system's file cache. SQLite's default (2 MB) read most of a 190,000-photo
+/// catalog from disk again for each view: about twice as slow.
+fn cache(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "cache_size", -16_384)?;
+    conn.pragma_update(None, "mmap_size", 256_i64 << 20)?;
+    Ok(())
 }
 
 fn migrate(conn: &Connection) -> Result<()> {

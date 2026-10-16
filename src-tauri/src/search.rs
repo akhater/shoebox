@@ -11,7 +11,7 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub struct SearchIndex {
     db: Mutex<Connection>,
@@ -20,6 +20,8 @@ pub struct SearchIndex {
     vecs: RwLock<Vec<f32>>,
     visual: Mutex<Option<ClipVisual>>,
     text: Mutex<Option<ClipText>>,
+    /// Open once the descriptions are read: searching and describing wait for it.
+    ready: crate::Ready,
 }
 
 #[derive(Clone, Default, Serialize, Debug)]
@@ -35,7 +37,30 @@ pub struct AiProgress {
 }
 
 impl SearchIndex {
+    /// Opens word search and reads its descriptions before returning.
     pub fn open(cat: &Catalog) -> Result<Self> {
+        let index = Self::unread(cat)?;
+        let result = index.read();
+        index.ready.open(result.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
+        result.map(|_| index)
+    }
+
+    /// Opens word search at once and reads its descriptions in the background
+    /// (the window opens meanwhile); a search waits until they're read.
+    pub fn open_in_background(cat: &Catalog) -> Result<Arc<Self>> {
+        let index = Arc::new(Self::unread(cat)?);
+        let reading = index.clone();
+        std::thread::Builder::new().name("search-open".into()).spawn(move || {
+            let result = reading.read().map_err(|e| {
+                log::warn!("search: couldn't read the descriptions: {e:#}");
+                format!("Word search couldn't be read: {e:#}")
+            });
+            reading.ready.open(result);
+        })?;
+        Ok(index)
+    }
+
+    fn unread(cat: &Catalog) -> Result<Self> {
         let conn = Connection::open(cat.data.root.join("search.db"))?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -59,6 +84,20 @@ impl SearchIndex {
             }
             tx.commit()?;
         }
+        Ok(Self {
+            db: Mutex::new(conn),
+            ids: RwLock::new(Vec::new()),
+            vecs: RwLock::new(Vec::new()),
+            visual: Mutex::new(None),
+            text: Mutex::new(None),
+            ready: crate::Ready::default(),
+        })
+    }
+
+    /// Every photo's description, into memory.
+    fn read(&self) -> Result<()> {
+        let started = std::time::Instant::now();
+        let conn = self.db.lock().unwrap();
         let mut ids = Vec::new();
         let mut vecs = Vec::new();
         {
@@ -72,13 +111,10 @@ impl SearchIndex {
                 }
             }
         }
-        Ok(Self {
-            db: Mutex::new(conn),
-            ids: RwLock::new(ids),
-            vecs: RwLock::new(vecs),
-            visual: Mutex::new(None),
-            text: Mutex::new(None),
-        })
+        log::info!("search: {} descriptions read in {} ms", ids.len(), started.elapsed().as_millis());
+        *self.ids.write().unwrap() = ids;
+        *self.vecs.write().unwrap() = vecs;
+        Ok(())
     }
 
     /// Lets go of CLIP (it is being deleted). Waits for describing in
@@ -95,6 +131,7 @@ impl SearchIndex {
     /// Describes every photo that has a preview and no description yet, after
     /// forgetting those that no longer fit ([`SearchIndex::tidy`]).
     pub fn index_pending(&self, cat: &Catalog, cancel: &AtomicBool, progress: &dyn Fn(&AiProgress)) -> Result<()> {
+        self.ready.wait()?;
         let ready = cat.preview_ready()?;
         self.forget_stale(&ready)?;
         let have: HashSet<i64> = self.ids.read().unwrap().iter().copied().collect();
@@ -166,6 +203,7 @@ impl SearchIndex {
     /// another photo - ids are used again, once the newest photo leaves.
     /// Returns how many. Done before every round of describing.
     pub fn tidy(&self, cat: &Catalog) -> Result<usize> {
+        self.ready.wait()?;
         self.forget_stale(&cat.preview_ready()?)
     }
 
@@ -215,6 +253,7 @@ impl SearchIndex {
     /// deviations), and stay near the best one. Weaker but still above-average
     /// matches (mean + 1 sd) come back too, for "show more".
     pub fn search(&self, query: &str, limit: usize) -> Result<(Vec<(i64, f32)>, f32)> {
+        self.ready.wait()?;
         let q = {
             let mut text = self.text.lock().unwrap();
             if text.is_none() {
