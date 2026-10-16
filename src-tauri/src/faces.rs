@@ -292,6 +292,7 @@ fn month_of(taken_ts: Option<i64>) -> Option<i64> {
 /// far apart and all newborns look alike: an average over a whole childhood
 /// draws in a newborn brother or cousin, the faces from the same months don't.
 /// Sums add, so merging people is just adding.
+///
 /// Read as a map, it holds each person's whole-life sum and how many faces.
 #[derive(Clone, Default)]
 struct Averages {
@@ -1172,16 +1173,17 @@ impl FaceIndex {
             let size = |id: &i64| c.life.get(id).map_or(0, |(_, n)| *n);
             let bigger = |a: i64, b: i64| size(&a) > size(&b) || (size(&a) == size(&b) && a < b);
             // Grouped by their months, so each person's look then is worked out once.
-            let mut by_months: BTreeMap<Option<(i64, i64)>, Vec<(i64, Vec<f32>)>> = BTreeMap::new();
-            for (l, (sum, n)) in &c.life {
+            let mut by_months: BTreeMap<Option<(i64, i64)>, Vec<i64>> = BTreeMap::new();
+            for (l, (_, n)) in &c.life {
                 if *n > 0 && movable.contains(l) {
-                    by_months.entry(c.months_of(*l)).or_default().push((*l, unit(sum.clone())));
+                    by_months.entry(c.months_of(*l)).or_default().push(*l);
                 }
             }
             for (months, ls) in by_months {
-                let faces: Vec<&[f32]> = ls.iter().map(|(_, v)| v.as_slice()).collect();
+                let averages: Vec<Vec<f32>> = ls.iter().map(|l| unit(c.life[l].0.clone())).collect();
+                let faces: Vec<&[f32]> = averages.iter().map(Vec::as_slice).collect();
                 for (s, i, t) in c.alike(&faces, months, &[]) {
-                    let l = ls[i].0;
+                    let l = ls[i];
                     if t != l && everyone.contains(&t) && (!movable.contains(&t) || bigger(t, l)) {
                         joins.push((s, l, t));
                     }

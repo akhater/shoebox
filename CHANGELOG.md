@@ -25,6 +25,21 @@ Newest first. Same format and versioning as Argentum.
 
 ### Fixed
 
+- **New photos tell children apart.** A new face is compared with each
+  person as they looked around the date of its photo - their faces from the
+  nearest months, up to a year either side - instead of one average over
+  their whole life. To the face model a child's baby and school-age faces
+  are far apart and all babies look alike, so a newborn often joined an
+  older brother or a cousin. Replayed on a copy of a real catalog (108,000
+  faces), the faces the user had placed by hand go to the right person 90%
+  of the time instead of 75%, and to someone else 8% instead of 23%; for
+  babies under one, 89% instead of 69%. Someone not photographed within a
+  year, or a photo with no date, is compared with the whole-life average as
+  before, and people found twice are joined the same way. In a photo with
+  several faces, the most alike face and person go together first. Groups
+  already made stay as they are: Regroup faces in People sorts the unnamed
+  ones again with the new comparison. Reading everyone's faces at start
+  takes about 0.05 s more.
 - **Opens at once, however big the catalog.** The window no longer waits
   for word search's descriptions and everyone's faces to be read: they are
   read in the background, and a search or a face waits for them only if

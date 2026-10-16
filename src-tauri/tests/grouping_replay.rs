@@ -171,7 +171,7 @@ fn replay_grouping_on_a_catalog_copy() {
             for &id in &held {
                 let blob: Option<Vec<u8>> = stmt.query_row([id], |r| r.get(0)).ok();
                 if let Some(b) = blob.filter(|b| b.len() == 512 * 4) {
-                    prints.insert(id, b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect());
+                    prints.insert(id, b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect());
                 }
             }
             drop(stmt);
@@ -212,7 +212,10 @@ fn replay_grouping_on_a_catalog_copy() {
                 .map(|(i, f)| {
                     let side = if f.person.is_some() { 100.0 } else { 20.0 };
                     let (x, y) = ((i % 8) as f32 * 110.0, (i / 8 % 8) as f32 * 110.0);
-                    (Detected { bbox: [x, y, x + side, y + side], kps: [0.0; 10], score: f.score }, prints[&f.id].clone())
+                    (
+                        Detected { bbox: [x, y, x + side, y + side], kps: [0.0; 10], score: f.score },
+                        prints[&f.id].clone(),
+                    )
                 })
                 .collect();
             let ids: Vec<i64> = fs.iter().filter(|f| prints.contains_key(&f.id)).map(|f| f.id).collect();
