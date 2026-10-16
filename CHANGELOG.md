@@ -4,6 +4,20 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.42.3 - unreleased
 
+### Fixed
+
+- **No more freezes between views.** The window no longer stops drawing
+  while it waits for the catalog: its questions run beside the scan and the
+  AI instead of behind them, and a new view asks only for its own photos.
+  The grid keeps the last view's photos (dimmed if it takes a moment) until
+  the new ones are there, instead of showing them under the new title, and
+  an answer that comes back for a view already left is dropped. Measured on
+  a catalog of 64,000 photos: a person's page opens in about 30 ms instead
+  of 40 s, a folder of a hundred photos in a few milliseconds instead of
+  0.8 s, and a year's filters in 30 ms instead of 1.6 s. Results are the
+  same as before. While faces are found, People and the photos shown still
+  fill in every few seconds, without reloading everything else.
+
 ## 26.42.2 - 2026-10-16
 
 ### Added

@@ -496,6 +496,14 @@ button {
   display: flex;
   min-height: 0;
 }
+/* The last view's photos while the next one loads: not clickable, dimmed after a moment. */
+.grid-stack.stale .grid-area {
+  pointer-events: none;
+}
+.grid-stack.slow .grid-area {
+  opacity: 0.35;
+  transition: opacity 0.15s;
+}
 .grid-area {
   flex: 1;
   display: flex;
@@ -1337,6 +1345,12 @@ button {
   flex-direction: column;
   align-items: center;
   gap: 4px;
+}
+/* Faces off screen are neither laid out nor drawn until scrolled to: People
+   can hold thousands. Not the one being named, whose suggestions overflow it. */
+.person:not(.editing) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 132px auto 160px;
 }
 .person-face {
   position: relative;

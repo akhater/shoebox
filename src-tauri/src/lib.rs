@@ -588,6 +588,16 @@ pub fn run() {
     let update_status = Arc::new(Mutex::new(None));
     let protocol_data = data.clone();
     let protocol_cat = cat.clone();
+    // Thumbnails, previews and face pictures are files read as they are: their
+    // own threads, so they never wait behind a photo read from its original
+    // (seconds each, on the shared pool).
+    let saved_files = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .thread_name(|i| format!("saved-files-{i}"))
+            .build()
+            .expect("thread pool for saved pictures"),
+    );
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -602,14 +612,11 @@ pub fn run() {
             let cat = protocol_cat.clone();
             let path = request.uri().path().to_string();
             let query = request.uri().query().unwrap_or("").to_string();
-            rayon::spawn(move || {
-                let response = if path.starts_with("/full/") {
-                    serve_full(&cat, &path, &query)
-                } else {
-                    serve_image(&data, &path)
-                };
-                responder.respond(response)
-            });
+            if path.starts_with("/full/") {
+                rayon::spawn(move || responder.respond(serve_full(&cat, &path, &query)));
+            } else {
+                saved_files.spawn(move || responder.respond(serve_image(&data, &path)));
+            }
         })
         .manage(AppState {
             cat: cat.clone(),

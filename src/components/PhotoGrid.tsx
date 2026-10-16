@@ -1,5 +1,5 @@
 import { ImageOff, Trash2, TriangleAlert, Unplug } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { fmtNum, thumbUrl, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
 import { TimelineRail } from "./TimelineRail";
@@ -41,7 +41,8 @@ interface Props {
 type PhotosRow = Extract<Row, { kind: "photos" }>;
 const centre = (t: Tile) => t.left + t.width / 2;
 
-export function PhotoGrid(p: Props) {
+/** Drawn again only when what it shows changes (not for every update of the window). */
+export const PhotoGrid = memo(function PhotoGrid(p: Props) {
   const { list, rowHeight, focusIndex, selected, onSelect, flatLabel } = p;
   const scroller = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -352,4 +353,4 @@ export function PhotoGrid(p: Props) {
       )}
     </div>
   );
-}
+});

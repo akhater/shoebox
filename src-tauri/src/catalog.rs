@@ -16,6 +16,8 @@ use std::sync::{Mutex, MutexGuard, RwLock};
 pub struct Catalog {
     pub data: DataDir,
     db: Mutex<Connection>,
+    /// Idle reading connections (see [`Catalog::read`]).
+    readers: Mutex<Vec<Connection>>,
     pub settings: RwLock<Settings>,
     /// volume id -> current mount point, for every known disk that is plugged in.
     online: RwLock<HashMap<i64, String>>,
@@ -34,6 +36,7 @@ impl Catalog {
         let cat = Self {
             data,
             db: Mutex::new(conn),
+            readers: Mutex::new(Vec::new()),
             settings: RwLock::new(settings),
             online: RwLock::new(HashMap::new()),
             unreachable: RwLock::new(Vec::new()),
@@ -69,6 +72,18 @@ impl Catalog {
 
     pub fn db(&self) -> MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A connection for queries that only read. Unlike [`Catalog::db`] it is
+    /// never held by a scan, the AI or another query: what the window shows
+    /// comes back while they work. It sees what the writer has committed.
+    pub fn read(&self) -> Result<Reader<'_>> {
+        let idle = self.readers.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        let conn = match idle {
+            Some(c) => c,
+            None => db::open_reader(&self.data.db_path())?,
+        };
+        Ok(Reader { cat: self, conn: Some(conn) })
     }
 
     pub fn settings(&self) -> Settings {
@@ -315,8 +330,8 @@ impl Catalog {
 
     pub fn overview(&self) -> Result<Overview> {
         let online = self.online.read().unwrap().clone();
-        let online_sql = self.online_sql();
-        let db = self.db();
+        let state = state_sql(&self.online_sql());
+        let db = self.read()?;
 
         let mut volumes: Vec<VolumeInfo> = db
             .prepare(
@@ -367,13 +382,13 @@ impl Catalog {
                 .collect::<rusqlite::Result<_>>()?;
         }
 
+        // Materialized: each photo's state is looked up once, not once per sum.
         let (total, on, off, missing, marked): (i64, i64, i64, i64, i64) = db.query_row(
             &format!(
-                "WITH st AS ({}) SELECT COUNT(*),
-                        COALESCE(SUM(st.s = 2), 0), COALESCE(SUM(st.s = 1), 0),
-                        COALESCE(SUM(COALESCE(st.s, 0) = 0), 0), COALESCE(SUM(p.marked), 0)
-                   FROM photos p LEFT JOIN st ON st.pid = p.id",
-                state_cte(&online_sql)
+                "WITH st AS MATERIALIZED (SELECT {state} AS s, p.marked FROM photos p)
+                 SELECT COUNT(*), COALESCE(SUM(s = 2), 0), COALESCE(SUM(s = 1), 0),
+                        COALESCE(SUM(s = 0), 0), COALESCE(SUM(marked), 0)
+                   FROM st"
             ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
@@ -393,7 +408,14 @@ impl Catalog {
     /// Photos in a scope narrowed by `filters`, in `sort` order, as parallel
     /// arrays (compact for 100k+).
     pub fn list_photos(&self, scope: &Scope, sort: Sort, filters: &Filters) -> Result<PhotoList> {
-        let (filter, p1, p2) = self.scope_sql(scope)?;
+        self.list_among(scope, sort, filters, None)
+    }
+
+    /// [`Catalog::list_photos`], only among the photos `only` (when given).
+    fn list_among(&self, scope: &Scope, sort: Sort, filters: &Filters, only: Option<&[i64]>) -> Result<PhotoList> {
+        let db = self.read()?;
+        let state = state_sql(&self.online_sql());
+        let (filter, p1, p2) = self.scope_sql(&db, scope, &state)?;
         // Same-second bursts follow the camera's 1/100 s (in the capture key),
         // then the file name; photos without a date go last.
         let name = "(SELECT MIN(f.name) FROM files f WHERE f.photo_id = p.id) COLLATE NOCASE";
@@ -412,21 +434,21 @@ impl Catalog {
             _ => "0",
         };
         let sql = format!(
-            "WITH st AS ({}) SELECT p.id, COALESCE(p.taken_ts, 0), COALESCE(st.s, 0),
+            "SELECT p.id, COALESCE(p.taken_ts, 0), {state},
                     COALESCE(p.thumb_w, 0), COALESCE(p.thumb_h, 0), p.preview_rev, p.preview_state, p.marked,
                     COALESCE((SELECT {EXT_SQL} FROM files f WHERE f.photo_id = p.id ORDER BY f.state LIMIT 1), ''),
                     p.kind = 'raw', {fresh}
-               FROM photos p LEFT JOIN st ON st.pid = p.id
+               FROM photos p
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
+                AND (?10 IS NULL OR p.id IN (SELECT value FROM json_each(?10)))
               ORDER BY {order}",
-            state_cte(&self.online_sql()),
-            filters_sql(filters)
+            filters_sql(filters, &state)
         );
-        let db = self.db();
+        let only = only.map(serde_json::to_string).transpose()?;
         let mut out = PhotoList::default();
         let mut stmt = db.prepare(&sql)?;
         let [d, c, l, t, s, pe, tg] = filters.params(None);
-        let mut rows = stmt.query(params![p1, p2, d, c, l, t, s, pe, tg])?;
+        let mut rows = stmt.query(params![p1, p2, d, c, l, t, s, pe, tg, only])?;
         while let Some(r) = rows.next()? {
             out.ids.push(r.get(0)?);
             out.taken.push(r.get(1)?);
@@ -446,17 +468,17 @@ impl Catalog {
     /// Photos taken each day (camera local time) in a scope narrowed by
     /// `filters`, oldest day first: the window's calendar, for agents.
     pub fn days(&self, scope: &Scope, filters: &Filters) -> Result<Days> {
-        let (filter, p1, p2) = self.scope_sql(scope)?;
+        let db = self.read()?;
+        let state = state_sql(&self.online_sql());
+        let (filter, p1, p2) = self.scope_sql(&db, scope, &state)?;
         let sql = format!(
-            "WITH st AS ({}) SELECT CASE WHEN COALESCE(p.taken_ts, 0) > 0
+            "SELECT CASE WHEN COALESCE(p.taken_ts, 0) > 0
                     THEN strftime('%Y-%m-%d', p.taken_ts, 'unixepoch') END AS d, COUNT(*)
-               FROM photos p LEFT JOIN st ON st.pid = p.id
+               FROM photos p
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
               GROUP BY d ORDER BY d",
-            state_cte(&self.online_sql()),
-            filters_sql(filters)
+            filters_sql(filters, &state)
         );
-        let db = self.db();
         let mut stmt = db.prepare(&sql)?;
         let [d, c, l, t, s, pe, tg] = filters.params(None);
         let mut rows = stmt.query(params![p1, p2, d, c, l, t, s, pe, tg])?;
@@ -475,14 +497,13 @@ impl Catalog {
     /// stays possible after ticking the first. People or tags asking for all
     /// of them count with their own ticks too: only who is with them is left.
     pub fn facets(&self, scope: &Scope, filters: &Filters) -> Result<Facets> {
-        let (filter, p1, p2) = self.scope_sql(scope)?;
-        let cte = state_cte(&self.online_sql());
-        let db = self.db();
+        let db = self.read()?;
+        let state = state_sql(&self.online_sql());
+        let (filter, p1, p2) = self.scope_sql(&db, scope, &state)?;
+        let where_ = format!("{filter} AND (?1 = ?1 AND ?2 = ?2) AND {}", filters_sql(filters, &state));
         let count = |value: &str, from: &str, order: &str, own: Facet| -> Result<Vec<(String, i64)>> {
             let sql = format!(
-                "WITH st AS ({cte}) SELECT {value} AS v, COUNT(DISTINCT p.id) FROM {from} LEFT JOIN st ON st.pid = p.id
-                  WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {} GROUP BY v ORDER BY {order}",
-                filters_sql(filters)
+                "SELECT {value} AS v, COUNT(DISTINCT p.id) FROM {from} WHERE {where_} GROUP BY v ORDER BY {order}"
             );
             let [d, c, l, t, s, pe, tg] = filters.params(Some(own));
             let rows = db
@@ -493,15 +514,13 @@ impl Catalog {
         };
         let people = {
             let sql = format!(
-                "WITH st AS ({cte}) SELECT pe.id, pe.name,
+                "SELECT pe.id, pe.name,
                         (SELECT f2.id FROM faces f2 WHERE f2.person_id = pe.id ORDER BY f2.score DESC LIMIT 1),
                         COUNT(DISTINCT p.id)
                    FROM photos p JOIN faces fa ON fa.photo_id = p.id JOIN people pe ON pe.id = fa.person_id
-                   LEFT JOIN st ON st.pid = p.id
-                  WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {} AND pe.ignored = 0
+                  WHERE {where_} AND pe.ignored = 0
                     AND (pe.name IS NOT NULL OR (SELECT COUNT(DISTINCT f3.photo_id) FROM faces f3 WHERE f3.person_id = pe.id) >= 2)
-                  GROUP BY pe.id ORDER BY pe.name IS NULL, COUNT(DISTINCT p.id) DESC, pe.name",
-                filters_sql(filters)
+                  GROUP BY pe.id ORDER BY pe.name IS NULL, COUNT(DISTINCT p.id) DESC, pe.name"
             );
             let [d, c, l, t, s, pe, tg] = filters.params(Some(Facet::People));
             db.prepare(&sql)?
@@ -513,12 +532,10 @@ impl Catalog {
         // With "all of them", counts include the tags already ticked; with "any", they don't.
         let tags = {
             let sql = format!(
-                "WITH st AS ({cte}) SELECT tg.id, tg.name, COUNT(DISTINCT p.id)
+                "SELECT tg.id, tg.name, COUNT(DISTINCT p.id)
                    FROM photos p JOIN photo_tags ptg ON ptg.photo_id = p.id JOIN tags tg ON tg.id = ptg.tag_id
-                   LEFT JOIN st ON st.pid = p.id
-                  WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
-                  GROUP BY tg.id ORDER BY COUNT(DISTINCT p.id) DESC, tg.name COLLATE NOCASE",
-                filters_sql(filters)
+                  WHERE {where_}
+                  GROUP BY tg.id ORDER BY COUNT(DISTINCT p.id) DESC, tg.name COLLATE NOCASE"
             );
             let [d, c, l, t, s, pe, tg] = filters.params(Some(Facet::Tags));
             db.prepare(&sql)?
@@ -549,34 +566,43 @@ impl Catalog {
                 count,
             })
             .collect(),
-            status: count(STATUS_SQL, "photos p", "v DESC", Facet::Status)?.into_iter().map(value).collect(),
+            status: count(&status_sql(&state), "photos p", "v DESC", Facet::Status)?.into_iter().map(value).collect(),
             people,
             tags,
         })
     }
 
-    /// The SQL condition (on photo alias `p`, state `st`) for a scope, and its two parameters.
-    fn scope_sql(&self, scope: &Scope) -> Result<(String, i64, String)> {
+    /// The SQL condition (on photo alias `p` whose state is `state`) for a
+    /// scope, and its two parameters.
+    fn scope_sql(&self, db: &Connection, scope: &Scope, state: &str) -> Result<(String, i64, String)> {
         let in_folder = format!(
             "p.id IN (SELECT f.photo_id FROM files f JOIN folders fo ON fo.id = f.folder_id WHERE fo.volume_id = ?1 AND {})",
             under_sql("fo", 2)
         );
         let (filter, p1, p2): (String, i64, String) = match scope {
             Scope::All => ("1".into(), 0, String::new()),
-            Scope::Missing => ("COALESCE(st.s, 0) = 0".into(), 0, String::new()),
+            Scope::Missing => (format!("{state} = 0"), 0, String::new()),
             Scope::Volume { id } => (
                 "p.id IN (SELECT f.photo_id FROM files f JOIN folders fo ON fo.id = f.folder_id WHERE fo.volume_id = ?1)".into(),
                 *id,
                 String::new(),
             ),
             Scope::Root { id } => {
-                let root = self.root(*id)?;
-                (in_folder, root.volume_id, root.rel_path)
+                let (volume_id, rel_path) = db
+                    .query_row("SELECT volume_id, rel_path FROM roots WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .optional()?
+                    .ok_or_else(|| anyhow!("Unknown folder {id}"))?;
+                (in_folder, volume_id, rel_path)
             }
             Scope::Folder { volume_id, rel_path } => (in_folder, *volume_id, rel_path.clone()),
             Scope::Date { key } if key == "unknown" => ("COALESCE(p.taken_ts, 0) <= 0".into(), 0, String::new()),
+            // The year or month as a range of times, so the index on them finds the photos.
             Scope::Date { key } => (
-                "COALESCE(p.taken_ts, 0) > 0 AND strftime(CASE WHEN length(?2) = 4 THEN '%Y' ELSE '%Y-%m' END, p.taken_ts, 'unixepoch') = ?2".into(),
+                "p.taken_ts > 0
+                 AND p.taken_ts >= unixepoch(?2 || CASE WHEN length(?2) = 4 THEN '-01-01' ELSE '-01' END)
+                 AND p.taken_ts < unixepoch(?2 || CASE WHEN length(?2) = 4 THEN '-01-01' ELSE '-01' END,
+                                            CASE WHEN length(?2) = 4 THEN '+1 year' ELSE '+1 month' END)"
+                    .into(),
                 0,
                 key.clone(),
             ),
@@ -609,7 +635,7 @@ impl Catalog {
 
     /// The photos of `scope` among `ranked`, in `ranked`'s order (search results).
     pub fn ranked_in_scope(&self, ranked: &[i64], scope: &Scope, filters: &Filters) -> Result<PhotoList> {
-        let all = self.list_photos(scope, Sort::default(), filters)?;
+        let all = self.list_among(scope, Sort::default(), filters, Some(ranked))?;
         let pos: HashMap<i64, usize> = all.ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         let mut out = PhotoList::default();
         for id in ranked {
@@ -632,7 +658,7 @@ impl Catalog {
 
     /// Ways to browse: dates, cameras and lenses, and the folder tree under each root.
     pub fn browse(&self) -> Result<Browse> {
-        let db = self.db();
+        let db = self.read()?;
 
         let mut years: Vec<YearNode> = Vec::new();
         let mut unknown_date = 0;
@@ -690,7 +716,7 @@ impl Catalog {
 
     pub fn photo_detail(&self, id: i64) -> Result<PhotoDetail> {
         let online = self.online.read().unwrap().clone();
-        let db = self.db();
+        let db = self.read()?;
         let mut d = db
             .query_row(
                 &format!(
@@ -924,7 +950,7 @@ impl Catalog {
     /// A copy of the photo that can be read now (disk plugged in, file there), and its kind.
     pub fn original(&self, photo_id: i64) -> Result<(PathBuf, crate::formats::Kind)> {
         let (kind, files): (String, Vec<i64>) = {
-            let db = self.db();
+            let db = self.read()?;
             let kind = db.query_row("SELECT kind FROM photos WHERE id = ?1", [photo_id], |r| r.get(0))?;
             let files = db
                 .prepare(&format!("SELECT id FROM files WHERE photo_id = ?1 AND state = {FILE_PRESENT}"))?
@@ -959,7 +985,7 @@ impl Catalog {
 
     /// Full path of a file whose disk is plugged in.
     pub fn file_path(&self, file_id: i64) -> Result<String> {
-        let (vid, rel, name): (i64, String, String) = self.db().query_row(
+        let (vid, rel, name): (i64, String, String) = self.read()?.query_row(
             "SELECT fo.volume_id, fo.rel_path, f.name FROM files f JOIN folders fo ON fo.id = f.folder_id WHERE f.id = ?1",
             [file_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -972,16 +998,44 @@ impl Catalog {
     }
 }
 
-/// Per photo: 2 = a copy is reachable now, 1 = only on unplugged disks or
-/// folders not found, 0 (or no row) = missing everywhere.
-fn state_cte(online_sql: &str) -> String {
+/// A reading connection from [`Catalog::read`]; back to the pool when dropped.
+pub struct Reader<'a> {
+    cat: &'a Catalog,
+    conn: Option<Connection>,
+}
+
+impl std::ops::Deref for Reader<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("reader in use")
+    }
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        let Some(conn) = self.conn.take() else { return };
+        let mut idle = self.cat.readers.lock().unwrap_or_else(|e| e.into_inner());
+        // As many as the window asks for at once; more are closed.
+        if idle.len() < 6 {
+            idle.push(conn);
+        }
+    }
+}
+
+/// Per photo `p`: 2 = a copy is reachable now, 1 = only on unplugged disks or
+/// folders not found, 0 = missing everywhere. Looked up through the photo's
+/// own files, so a small view costs little however big the catalog is.
+fn state_sql(online_sql: &str) -> String {
     format!(
-        "SELECT f.photo_id AS pid,
-                MAX(CASE WHEN f.state = {FILE_PRESENT} AND ({online_sql}) THEN 2
-                         WHEN f.state = {FILE_PRESENT} THEN 1 ELSE 0 END) AS s
-           FROM files f JOIN folders fo ON fo.id = f.folder_id
-          WHERE f.photo_id IS NOT NULL GROUP BY f.photo_id"
+        "COALESCE((SELECT MAX(CASE WHEN f.state = {FILE_PRESENT} AND ({online_sql}) THEN 2
+                                  WHEN f.state = {FILE_PRESENT} THEN 1 ELSE 0 END)
+                     FROM files f JOIN folders fo ON fo.id = f.folder_id WHERE f.photo_id = p.id), 0)"
     )
+}
+
+/// The Status filter's value for a photo's [`state_sql`].
+fn status_sql(state: &str) -> String {
+    format!("CASE {state} WHEN 2 THEN 'online' WHEN 1 THEN 'offline' ELSE 'missing' END")
 }
 
 fn find_volume(db: &Connection, mv: &MountedVolume) -> Result<Option<i64>> {
@@ -1212,14 +1266,14 @@ impl Filters {
 
 /// A file's extension, lower case ("IMG_0001.CR3" -> "cr3"), on file alias `f`.
 const EXT_SQL: &str = "lower(replace(f.name, rtrim(f.name, replace(f.name, '.', '')), ''))";
-const STATUS_SQL: &str = "CASE COALESCE(st.s, 0) WHEN 2 THEN 'online' WHEN 1 THEN 'offline' ELSE 'missing' END";
 
-/// The filters as one SQL condition on photo `p` and state `st`, with
-/// parameters ?3 dates, ?4 cameras, ?5 lenses, ?6 types, ?7 status, ?8 people,
-/// ?9 tags (JSON arrays).
-fn filters_sql(f: &Filters) -> String {
+/// The filters as one SQL condition on photo `p` whose state is `state`
+/// ([`state_sql`]), with parameters ?3 dates, ?4 cameras, ?5 lenses, ?6 types,
+/// ?7 status, ?8 people, ?9 tags (JSON arrays).
+fn filters_sql(f: &Filters, state: &str) -> String {
     let people = has_sql(f.people_match, 8, "FROM faces fa WHERE fa.photo_id = p.id", "fa.person_id");
     let tags = has_sql(f.tags_match, 9, "FROM photo_tags pt WHERE pt.photo_id = p.id", "pt.tag_id");
+    let status = status_sql(state);
     format!(
         "(json_array_length(?3) = 0 OR EXISTS (SELECT 1 FROM json_each(?3) j WHERE
              (j.value = 'unknown' AND COALESCE(p.taken_ts, 0) <= 0)
@@ -1230,7 +1284,7 @@ fn filters_sql(f: &Filters) -> String {
      AND (json_array_length(?5) = 0 OR {LENS_SQL} IN (SELECT value FROM json_each(?5)))
      AND (json_array_length(?6) = 0 OR EXISTS (SELECT 1 FROM files f WHERE f.photo_id = p.id
              AND {EXT_SQL} IN (SELECT value FROM json_each(?6))))
-     AND (json_array_length(?7) = 0 OR {STATUS_SQL} IN (SELECT value FROM json_each(?7)))
+     AND (json_array_length(?7) = 0 OR {status} IN (SELECT value FROM json_each(?7)))
      AND (json_array_length(?8) = 0 OR {people})
      AND (json_array_length(?9) = 0 OR {tags})"
     )

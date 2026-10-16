@@ -544,7 +544,8 @@ impl FaceIndex {
     fn rebuild_centroids(&self, cat: &Catalog) -> Result<()> {
         let faces: Vec<(i64, i64)> = cat
             .db()
-            .prepare("SELECT id, person_id FROM faces WHERE person_id IS NOT NULL")?
+            // In face order: the sums come out the same to the last bit, whatever index the query uses.
+            .prepare("SELECT id, person_id FROM faces WHERE person_id IS NOT NULL ORDER BY id")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut c: HashMap<i64, (Vec<f32>, u32)> = HashMap::new();
@@ -755,7 +756,7 @@ impl FaceIndex {
 
     /// Everyone, named people first, then by how many photos they're in.
     pub fn people(&self, cat: &Catalog) -> Result<Vec<Person>> {
-        let db = cat.db();
+        let db = cat.read()?;
         let people = db
             .prepare(
                 "SELECT p.id, p.name, COUNT(f.id), COUNT(DISTINCT f.photo_id),
@@ -1153,8 +1154,8 @@ impl FaceIndex {
     /// pull it their way. Faces without a fingerprint are left out.
     pub fn person_faces(&self, cat: &Catalog, person_id: i64) -> Result<Vec<Stray>> {
         let faces: Vec<(i64, i64, bool)> = cat
-            .db()
-            .prepare("SELECT id, photo_id, by_hand FROM faces WHERE person_id = ?1")?
+            .read()?
+            .prepare("SELECT id, photo_id, by_hand FROM faces WHERE person_id = ?1 ORDER BY id")?
             .query_map([person_id], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut faces_v = Vec::new();
@@ -1194,7 +1195,7 @@ impl FaceIndex {
 
     /// The faces found in some photos, photo by photo, left to right.
     pub fn faces_in(&self, cat: &Catalog, photo_ids: &[i64]) -> Result<Vec<PhotoFace>> {
-        let db = cat.db();
+        let db = cat.read()?;
         let mut stmt = db.prepare(
             "SELECT f.id, f.photo_id, f.person_id, p.name, f.x1, f.y1, f.x2, f.y2 FROM faces f
                LEFT JOIN people p ON p.id = f.person_id WHERE f.photo_id = ?1 ORDER BY f.x1",
