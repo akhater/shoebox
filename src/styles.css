@@ -1860,6 +1860,14 @@ button {
 .check-modal {
   width: 720px;
 }
+.check-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.check-summary .btn {
+  flex: none;
+}
 .check-list {
   flex: 1 1 auto;
   min-height: 0;

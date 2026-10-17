@@ -1,6 +1,15 @@
 import { Check, RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { faceUrl, fmtNum, people as peopleApi, type CheckFace, type FaceTarget, type PeopleCheck, type Person } from "../api";
+import {
+  faceUrl,
+  fmtNum,
+  people as peopleApi,
+  type CheckFace,
+  type FaceTarget,
+  type LeftAsIs,
+  type PeopleCheck,
+  type Person,
+} from "../api";
 
 interface Props {
   /** Everyone in People, for names and pictures (reloaded after each change). */
@@ -23,6 +32,10 @@ type Card = {
   people: number[];
   head: string;
   note: string;
+  /** Its findings, for "Leave as is" (and back). */
+  findings: LeftAsIs[];
+  /** Left as is before this check: shown on demand, nothing ticked. */
+  left: boolean;
 } & (
   | {
       kind: "faces";
@@ -40,39 +53,48 @@ type Card = {
 interface Done {
   text: string;
   undo: () => Promise<unknown>;
+  /** It changed People (moves, merges), not only the check. */
+  changed: boolean;
 }
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 const faces = (n: number) => (n === 1 ? "1 face" : `${fmtNum(n)} faces`);
 
-/** The check's findings as cards, by kind: one action each. */
-function cardsOf(check: PeopleCheck, name: (id: number) => string) {
+/** The check's findings as cards, by kind: one action each. Those left as
+ *  is (`left`) or the others: left ones start with nothing ticked. */
+function cardsOf(check: PeopleCheck, name: (id: number) => string, left: boolean) {
+  const pick = <T extends { left: boolean },>(items: T[]) => items.filter((t) => t.left === left);
+  const keyed = (k: string) => (left ? `left:${k}` : k);
   const byKey = <T,>(items: T[], key: (t: T) => string) => {
     const m = new Map<string, T[]>();
     for (const t of items) m.set(key(t), [...(m.get(key(t)) ?? []), t]);
     return [...m.values()];
   };
-  const twice: Card[] = byKey(check.twice, (t) => `${t.personId}`).map((ts) => {
+  const twice: Card[] = byKey(pick(check.twice), (t) => `${t.personId}`).map((ts) => {
     const who = name(ts[0].personId);
     const all = ts.flatMap((t) => t.faces.map((f) => ({ face: f, title: `${pct(f.similarity)} like ${who}'s other faces` })));
     return {
-      key: `twice:${ts[0].personId}`,
+      key: keyed(`twice:${ts[0].personId}`),
       people: [ts[0].personId],
+      findings: ts.map((t) => ({ kind: "twice", personId: t.personId, photoId: t.photoId, faces: t.faces.map((f) => f.faceId) })),
+      left,
       head: `${who} is twice in ${ts.length === 1 ? "a photo" : `${fmtNum(ts.length)} photos`}`,
       note: `In each photo one face is someone else. The ticked ones look less like ${who}: they go to whoever they resemble.`,
       kind: "faces",
       faces: all,
       byPhoto: true,
-      ticked: ts.flatMap((t) => t.elsewhere),
+      ticked: left ? [] : ts.flatMap((t) => t.elsewhere),
       to: { kind: "elsewhere" },
       verb: (n) => `Move ${faces(n)} out`,
     };
   });
-  const ages: Card[] = byKey(check.ageJumps, (a) => `${a.personId}`).map((as) => {
+  const ages: Card[] = byKey(pick(check.ageJumps), (a) => `${a.personId}`).map((as) => {
     const who = name(as[0].personId);
     return {
-      key: `age:${as[0].personId}`,
+      key: keyed(`age:${as[0].personId}`),
       people: [as[0].personId],
+      findings: as.map((a) => ({ kind: "ageJump", personId: a.personId, faceId: a.face.faceId })),
+      left,
       head: `${faces(as.length)} in ${who} from another age`,
       note: `Unlike ${who} the year they were taken, like ${who} years apart: a brother or sister, a child or a parent?`,
       kind: "faces",
@@ -80,20 +102,22 @@ function cardsOf(check: PeopleCheck, name: (id: number) => string) {
         face: a.face,
         title: `${a.year}: ${pct(a.own)} like ${who} that year, ${pct(a.like)} like ${who} in ${a.likeYear}`,
       })),
-      ticked: as.map((a) => a.face.faceId),
+      ticked: left ? [] : as.map((a) => a.face.faceId),
       to: { kind: "elsewhere" },
       verb: (n) => `Not ${who}: move ${faces(n)} out`,
     };
   });
   const others = (near: boolean): Card[] =>
     byKey(
-      check.likeOthers.filter((l) => l.near === near),
+      pick(check.likeOthers).filter((l) => l.near === near),
       (l) => `${l.personId}:${l.otherId}`,
     ).map((ls) => {
       const [who, other] = [name(ls[0].personId), name(ls[0].otherId)];
       return {
-        key: `like:${near}:${ls[0].personId}:${ls[0].otherId}`,
+        key: keyed(`like:${near}:${ls[0].personId}:${ls[0].otherId}`),
         people: [ls[0].personId, ls[0].otherId],
+        findings: ls.map((l) => ({ kind: "likeOther", personId: l.personId, faceId: l.face.faceId, otherId: l.otherId })),
+        left,
         head: `${faces(ls.length)} in ${who} look like ${other}`,
         note: near
           ? `Much more like ${other} than like ${who}, in photos taken within a month of ${other}'s.`
@@ -103,16 +127,18 @@ function cardsOf(check: PeopleCheck, name: (id: number) => string) {
           face: l.face,
           title: `${pct(l.other)} like ${other}, ${pct(l.face.similarity)} like ${who}${l.face.byHand ? " · placed by you" : ""}`,
         })),
-        ticked: near ? ls.map((l) => l.face.faceId) : [],
+        ticked: near && !left ? ls.map((l) => l.face.faceId) : [],
         to: { kind: "person", id: ls[0].otherId },
         verb: (n) => `Move ${faces(n)} to ${other}`,
       };
     });
-  const same: Card[] = check.samePeople.map((s) => {
+  const same: Card[] = pick(check.samePeople).map((s) => {
     const [a, b] = [name(s.personId), name(s.otherId)];
     return {
-      key: `same:${s.personId}:${s.otherId}`,
+      key: keyed(`same:${s.personId}:${s.otherId}`),
       people: [s.personId, s.otherId],
+      findings: [{ kind: "samePerson", personId: s.personId, otherId: s.otherId }],
+      left,
       head: s.sameName ? `Two people called ${a}` : `${a} and ${b} look alike`,
       note:
         s.together > 0
@@ -135,7 +161,9 @@ function cardsOf(check: PeopleCheck, name: (id: number) => string) {
 
 /** "Check" in People: likely mix-ups among named people, by kind, each with
  *  its faces and one action - moves and merges as everywhere else, each with
- *  Undo on its card. Nothing changes until a button is pressed. */
+ *  Undo on its card - or "Leave as is": looked at, right as it is, left out of
+ *  the check until it changes (shown again on demand). Nothing changes until
+ *  a button is pressed. */
 export function PeopleCheckDialog({ everyone, onChanged, onClose }: Props) {
   const [check, setCheck] = useState<PeopleCheck | null>(null);
   const [run, setRun] = useState(0);
@@ -144,12 +172,15 @@ export function PeopleCheckDialog({ everyone, onChanged, onClose }: Props) {
   const [flipped, setFlipped] = useState<Set<number>>(() => new Set());
   const [done, setDone] = useState<Map<string, Done>>(() => new Map());
   const [busy, setBusy] = useState<string | null>(null);
+  // Those left as is, listed after the others.
+  const [showLeft, setShowLeft] = useState(false);
 
   useEffect(() => {
     setCheck(null);
     setError(null);
+    // All of them, those left as is flagged: shown on demand, with no second check.
     peopleApi
-      .check()
+      .check(true)
       .then((c) => {
         setCheck(c);
         setFlipped(new Set());
@@ -168,7 +199,8 @@ export function PeopleCheckDialog({ everyone, onChanged, onClose }: Props) {
 
   const known = new Map(everyone.map((p) => [p.id, p]));
   const name = (id: number) => known.get(id)?.name ?? "someone";
-  const sections = check ? cardsOf(check, name) : [];
+  const sections = check ? cardsOf(check, name, false) : [];
+  const leftCards = check ? cardsOf(check, name, true).flatMap((s) => s.cards) : [];
   const flip = (id: number) =>
     setFlipped((f) => {
       const next = new Set(f);
@@ -176,14 +208,15 @@ export function PeopleCheckDialog({ everyone, onChanged, onClose }: Props) {
       return next;
     });
 
-  /** Runs a card's action; its card then says what was done, with Undo. */
-  const act = async (key: string, work: () => Promise<Done | null>) => {
+  /** Runs a card's action; its card then says what was done, with Undo.
+   *  People is reloaded when it `changed` (not for "Leave as is"). */
+  const act = async (key: string, work: () => Promise<Done | null>, changed = true) => {
     setBusy(key);
     setError(null);
     try {
       const d = await work();
       if (d) setDone((m) => new Map(m).set(key, d));
-      onChanged();
+      if (changed) onChanged();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -191,15 +224,33 @@ export function PeopleCheckDialog({ everyone, onChanged, onClose }: Props) {
     }
   };
   const undo = (key: string, d: Done) =>
-    act(key, async () => {
-      await d.undo();
-      setDone((m) => {
-        const next = new Map(m);
-        next.delete(key);
-        return next;
-      });
-      return null;
-    });
+    act(
+      key,
+      async () => {
+        await d.undo();
+        setDone((m) => {
+          const next = new Map(m);
+          next.delete(key);
+          return next;
+        });
+        return null;
+      },
+      d.changed,
+    );
+  /** "Leave as is" on a card's findings (`left`), or back in the check. */
+  const leave = (c: Card, left: boolean) =>
+    act(
+      c.key,
+      async () => {
+        await peopleApi.leave(c.findings, left);
+        return {
+          text: left ? "Left as is: Check leaves it out until it changes." : "Back in the check.",
+          undo: () => peopleApi.leave(c.findings, !left),
+          changed: false,
+        };
+      },
+      false,
+    );
 
   const card = (c: Card) => {
     const did = done.get(c.key);
@@ -262,42 +313,74 @@ export function PeopleCheckDialog({ everyone, onChanged, onClose }: Props) {
             </>
           ) : gone ? (
             <span className="muted">Changed since the check: check again.</span>
-          ) : c.kind === "faces" ? (
-            <button
-              className="btn small primary"
-              disabled={!!busy || ticked.length === 0}
-              onClick={() => {
-                const ids = ticked.map((t) => t.face.faceId);
-                act(c.key, async () => {
-                  const moved = await peopleApi.reassign(ids, c.to);
-                  // A face already theirs in the photo made room (a person is once per photo).
-                  const room = moved.bumped.length ? `, ${faces(moved.bumped.length)} made room` : "";
-                  return { text: `${faces(moved.faces)} moved${room}.`, undo: () => peopleApi.restore(moved.undo) };
-                });
-              }}
-            >
-              {busy === c.key ? "Moving…" : c.verb(ticked.length)}
-            </button>
-          ) : c.together === 0 ? (
-            <button
-              className="btn small primary"
-              disabled={!!busy}
-              title={`${name(c.otherId)} joins ${name(c.personId)}, who keeps the name`}
-              onClick={() =>
-                act(c.key, async () => {
-                  const merged = await peopleApi.merge([c.personId, c.otherId], c.personId);
-                  return { text: `Now one person: ${name(c.personId)}.`, undo: () => peopleApi.unmerge(merged) };
-                })
-              }
-            >
-              {busy === c.key ? "Merging…" : "Same person"}
-            </button>
-          ) : null}
+          ) : (
+            <>
+              {c.left ? (
+                <button
+                  className="btn small"
+                  disabled={!!busy}
+                  title="Back among the findings: Check lists it again"
+                  onClick={() => leave(c, false)}
+                >
+                  Bring back
+                </button>
+              ) : (
+                <button
+                  className="btn small"
+                  disabled={!!busy}
+                  title="Looked at and right as it is: Check leaves it out until it changes (a new face of theirs in the photo, the face in someone else)"
+                  onClick={() => leave(c, true)}
+                >
+                  Leave as is
+                </button>
+              )}
+              {c.kind === "faces" ? (
+                <button
+                  className="btn small primary"
+                  disabled={!!busy || ticked.length === 0}
+                  onClick={() => {
+                    const ids = ticked.map((t) => t.face.faceId);
+                    act(c.key, async () => {
+                      const moved = await peopleApi.reassign(ids, c.to);
+                      // A face already theirs in the photo made room (a person is once per photo).
+                      const room = moved.bumped.length ? `, ${faces(moved.bumped.length)} made room` : "";
+                      return {
+                        text: `${faces(moved.faces)} moved${room}.`,
+                        undo: () => peopleApi.restore(moved.undo),
+                        changed: true,
+                      };
+                    });
+                  }}
+                >
+                  {busy === c.key ? "Moving…" : c.verb(ticked.length)}
+                </button>
+              ) : c.together === 0 ? (
+                <button
+                  className="btn small primary"
+                  disabled={!!busy}
+                  title={`${name(c.otherId)} joins ${name(c.personId)}, who keeps the name`}
+                  onClick={() =>
+                    act(c.key, async () => {
+                      const merged = await peopleApi.merge([c.personId, c.otherId], c.personId);
+                      return {
+                        text: `Now one person: ${name(c.personId)}.`,
+                        undo: () => peopleApi.unmerge(merged),
+                        changed: true,
+                      };
+                    })
+                  }
+                >
+                  {busy === c.key ? "Merging…" : "Same person"}
+                </button>
+              ) : null}
+            </>
+          )}
         </div>
       </div>
     );
   };
 
+  const shownLeft = showLeft && leftCards.length > 0;
   return (
     <div className="modal-back" onClick={busy ? undefined : onClose}>
       <div className="modal strays-modal check-modal" onClick={(e) => e.stopPropagation()}>
@@ -312,13 +395,20 @@ export function PeopleCheckDialog({ everyone, onChanged, onClose }: Props) {
         </div>
         {!check && !error && <p className="muted">Comparing every named person's faces…</p>}
         {check && (
-          <p className="muted">
-            {sections.length
-              ? `Likely mix-ups among ${fmtNum(check.people)} named people (${fmtNum(check.faces)} faces). Untick a face to leave it where it is; each change has Undo.`
-              : `No likely mix-ups among ${fmtNum(check.people)} named people (${fmtNum(check.faces)} faces).`}
+          <p className="muted check-summary">
+            <span>
+              {sections.length
+                ? `Likely mix-ups among ${fmtNum(check.people)} named people (${fmtNum(check.faces)} faces). Untick a face to leave it where it is, or leave a whole card as is; each change has Undo.`
+                : `No likely mix-ups among ${fmtNum(check.people)} named people (${fmtNum(check.faces)} faces).`}
+            </span>
+            {leftCards.length > 0 && (
+              <button className="btn small ghost" onClick={() => setShowLeft((s) => !s)}>
+                {showLeft ? "Hide those left as is" : `Show ${fmtNum(leftCards.length)} left as is`}
+              </button>
+            )}
           </p>
         )}
-        {sections.length > 0 && (
+        {(sections.length > 0 || shownLeft) && (
           <div className="check-list">
             {sections.map((s) => (
               <section key={s.title} className="check-section">
@@ -328,6 +418,14 @@ export function PeopleCheckDialog({ everyone, onChanged, onClose }: Props) {
                 {s.cards.map(card)}
               </section>
             ))}
+            {shownLeft && (
+              <section className="check-section left">
+                <h3>
+                  Left as is <span className="muted">{fmtNum(leftCards.length)}</span>
+                </h3>
+                {leftCards.map(card)}
+              </section>
+            )}
           </div>
         )}
         {error && <p className="note warn">{error}</p>}
