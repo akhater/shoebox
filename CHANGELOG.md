@@ -2,9 +2,38 @@
 
 Newest first. Same format and versioning as Argentum.
 
-## 26.42.3 - unreleased
+## 26.42.4 - unreleased
 
 ### Added
+
+- **Check people.** People has a Check button: it looks for likely mix-ups
+  among the people you named and lists them by kind, each with its faces
+  and one button. Someone twice in one photo: the face less like them moves
+  out. A face from another age, unlike the person the year it was taken but
+  like them years apart: a brother or sister, a child or a parent filed
+  under them. Faces much more like another named person: suggested when the
+  photo is within a month of theirs, listed as unsure otherwise (to the face
+  model newborns look alike). Two named people who may be one, alike and
+  never in the same photo or called the same: "Same person". Every change
+  has Undo on its card, merges included. Under a second on a catalog of
+  108,000 faces, 67,000 of them named.
+  `shoebox-cli people-check` gives the same list as JSON; `people-merge`
+  now prints what it changed, and `people-unmerge` undoes it.
+
+- **Undo for merges in People.** "Merge into one person" and "Same person"
+  (while naming someone in People or on their page) now say in the status
+  bar who became one ("Bee is now part of Bea"), with Undo, as moving faces
+  does. Undo makes them two people again, each under their own name with
+  their own faces; merged from a person's page, it goes back to that page.
+
+- **Leave as is, in Check.** Each card of Check has "Leave as is" for what
+  you looked at and kept: someone really twice in a photo (a reflection, a
+  collage), look-alikes who are two people. Kept in the catalog, Check
+  leaves it out from then on, until it changes: another face of theirs in
+  that photo, the face now in someone else or more like someone else.
+  "Show N left as is" lists them again, with "Bring back".
+  `shoebox-cli people-leave` does the same headless; `people-check --all`
+  lists those left as is too.
 
 - **Find more of a person.** A person's page has "Find more…": the faces in
   other people that look more like them than like the rest of the person
@@ -13,6 +42,10 @@ Newest first. Same format and versioning as Argentum.
   the others are left to check, since to the face model babies look alike.
   The ticked faces move to the person in one step, with Undo.
   `shoebox-cli more-faces <person-id> [--apply]` does the same.
+
+## 26.42.3 - 2026-10-16
+
+### Added
 
 - **Catalog memory, and a benchmark for any computer.** Settings > General >
   Catalog memory sets how much of the catalog is read straight from memory;

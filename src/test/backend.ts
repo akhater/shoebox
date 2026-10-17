@@ -1,5 +1,19 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { CandidateDay, FaceTarget, Facets, Overview, Person, PhotoDetail, PhotoList, Scope, Sort } from "../api";
+import type {
+  CandidateDay,
+  FaceTarget,
+  Facets,
+  LeftAsIs,
+  Merged,
+  Overview,
+  PeopleCheck,
+  Person,
+  PhotoDetail,
+  PhotoList,
+  Placement,
+  Scope,
+  Sort,
+} from "../api";
 
 /** A photo in the fake catalog. */
 interface Photo {
@@ -42,6 +56,44 @@ export function fakeBackend() {
     { id: 8, name: null, faces: 2, photos: 2, cover: 2, ignored: false, isNew: false, newPhotos: 0 },
   ];
   const inPerson: Record<number, number[]> = { 7: [101, 201, 301], 8: [102, 202] };
+  /** What "Check" in People finds (a test sets it). */
+  let check: PeopleCheck = { people: 0, faces: 0, left: 0, twice: [], ageJumps: [], likeOthers: [], samePeople: [] };
+  /** "Leave as is" (or back) on the check's findings: they keep it for the next check. */
+  const leaveAsIs = (findings: LeftAsIs[], left: boolean) => {
+    const about = (l: LeftAsIs) =>
+      l.kind === "twice"
+        ? `twice:${l.photoId}:${l.personId}`
+        : l.kind === "samePerson"
+          ? `same:${Math.min(l.personId, l.otherId)}:${Math.max(l.personId, l.otherId)}`
+          : `${l.kind}:${l.faceId}`;
+    const these = new Set(findings.map(about));
+    const flag = <T extends { left: boolean }>(items: T[], as: (t: T) => LeftAsIs) =>
+      items.map((t) => (these.has(about(as(t))) ? { ...t, left } : t));
+    check = {
+      ...check,
+      twice: flag(check.twice, (t) => ({ kind: "twice", personId: t.personId, photoId: t.photoId, faces: [] })),
+      ageJumps: flag(check.ageJumps, (a) => ({ kind: "ageJump", personId: a.personId, faceId: a.face.faceId })),
+      likeOthers: flag(check.likeOthers, (l) => ({ kind: "likeOther", personId: l.personId, faceId: l.face.faceId, otherId: l.otherId })),
+      samePeople: flag(check.samePeople, (p) => ({ kind: "samePerson", personId: p.personId, otherId: p.otherId })),
+    };
+    return findings.length;
+  };
+  /** The check as Shoebox answers it: those left as is counted, and listed only when `all`. */
+  const checkAnswer = (all: boolean): PeopleCheck => {
+    const keep = <T extends { left: boolean }>(items: T[]) => items.filter((t) => all || !t.left);
+    const lists = [check.twice, check.ageJumps, check.likeOthers, check.samePeople];
+    const left = lists.reduce((n, l) => n + l.filter((t) => t.left).length, 0);
+    return {
+      ...check,
+      left,
+      twice: keep(check.twice),
+      ageJumps: keep(check.ageJumps),
+      likeOthers: keep(check.likeOthers),
+      samePeople: keep(check.samePeople),
+    };
+  };
+  /** People merged into someone, as they were, for Undo. */
+  const unmerged = new Map<number, { person: Person; photos: number[] }>();
   const calls: Call[] = [];
   /** Extra time for some answers: by command, and by view (`viewName`) for the commands named. */
   const cmdDelays = new Map<string, number>();
@@ -192,6 +244,10 @@ export function fakeBackend() {
         return (a.ids as number[]).length;
       case "read_people":
         return 0;
+      case "check_people":
+        return checkAnswer(a.all === true);
+      case "leave_as_is":
+        return leaveAsIs(a.findings as LeftAsIs[], a.left as boolean);
       case "more_faces": {
         // Faces in others that look like Ana: one a day after her photos, one long before.
         if (a.personId !== 7) return [];
@@ -204,14 +260,50 @@ export function fakeBackend() {
           .filter((d) => d.faces.length);
       }
       case "reassign_faces": {
-        // Face ids here are 1000 + their photo id.
-        const to = a.to as FaceTarget;
-        if (to.kind !== "person") throw new Error("only moves to someone in People are faked");
-        const moved = (a.faceIds as number[]).map((f) => f - 1000);
-        for (const id of Object.keys(inPerson)) inPerson[+id] = inPerson[+id].filter((p) => !moved.includes(p));
-        inPerson[to.id] = [...inPerson[to.id], ...moved];
-        people = people.map((p) => ({ ...p, photos: inPerson[p.id].length, faces: inPerson[p.id].length }));
-        return { faces: moved.length, people: [to.id], bumped: [], undo: [] };
+        const ids = a.faceIds as number[];
+        // From 1000, a face id is 1000 + its photo id ("Find more"): the photos move.
+        const moved = ids.filter((f) => f >= 1000).map((f) => f - 1000);
+        if (moved.length) {
+          const to = a.to as FaceTarget;
+          if (to.kind !== "person") throw new Error("only moves to someone in People are faked");
+          for (const id of Object.keys(inPerson)) inPerson[+id] = inPerson[+id].filter((p) => !moved.includes(p));
+          inPerson[to.id] = [...inPerson[to.id], ...moved];
+          people = people.map((p) => ({ ...p, photos: inPerson[p.id].length, faces: inPerson[p.id].length }));
+          return { faces: moved.length, people: [to.id], bumped: [], undo: [] };
+        }
+        // The check's faces: every one was Ana's (7) before, seen, Shoebox's guess.
+        const undo: Placement[] = ids.map((faceId) => ({ faceId, personId: 7, byHand: false, seen: true }));
+        return { faces: ids.length, people: [], bumped: [], undo };
+      }
+      case "restore_faces":
+        return (a.placements as Placement[]).length;
+      case "merge_people": {
+        const into = a.into as number;
+        const gone = people.filter((p) => p.id !== into && (a.ids as number[]).includes(p.id));
+        people = people.filter((p) => !gone.includes(p));
+        // Their photos are the merged person's now.
+        for (const p of gone) {
+          unmerged.set(p.id, { person: p, photos: inPerson[p.id] ?? [] });
+          inPerson[into] = [...(inPerson[into] ?? []), ...(inPerson[p.id] ?? [])];
+          delete inPerson[p.id];
+        }
+        people = people.map((p) => (p.id === into ? { ...p, photos: inPerson[into].length } : p));
+        const joined = gone.map((p) => ({ id: p.id, name: p.name, ignored: p.ignored, createdAt: 0, faces: [p.cover] }));
+        return { into, name: people.find((p) => p.id === into)?.name ?? null, joined } satisfies Merged;
+      }
+      case "unmerge_people": {
+        const m = a.merged as Merged;
+        let next = Math.max(...people.map((p) => p.id)) + 1;
+        const back = m.joined.map((j) => {
+          const { person, photos } = unmerged.get(j.id)!;
+          // Their own id, unless someone new got it since.
+          const id = people.some((p) => p.id === j.id) ? next++ : j.id;
+          inPerson[m.into] = inPerson[m.into].filter((ph) => !photos.includes(ph));
+          inPerson[id] = photos;
+          return { ...person, id };
+        });
+        people = [...people.map((p) => (p.id === m.into ? { ...p, photos: inPerson[m.into].length } : p)), ...back];
+        return m.joined.reduce((n, j) => n + j.faces.length, 0);
       }
       case "scan_status":
         return { current: null, queued: [] };
@@ -256,6 +348,10 @@ export function fakeBackend() {
     addPerson: (p: Person, photoIds: number[]) => {
       people = [...people, p];
       inPerson[p.id] = photoIds;
+    },
+    /** What the next "Check" in People finds. */
+    peopleCheck: (c: PeopleCheck) => {
+      check = c;
     },
     addPhotosOf: (personId: number, photoIds: number[]) => {
       inPerson[personId] = [...inPerson[personId], ...photoIds];

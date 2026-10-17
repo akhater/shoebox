@@ -25,7 +25,10 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   photos. It runs on your own GPU, from the previews, so it works on unplugged
   drives too.
 - **People.** Faces are detected and grouped automatically. Name a person once
-  and find every photo they appear in.
+  and find every photo they appear in. **Check** finds likely mix-ups among
+  the people you named (someone twice in a photo, a sibling filed under the
+  wrong child, one person under two names) to fix in a click, with Undo, or
+  to leave as is: it stays out of the next checks until something changes.
 - **Filters** by person, tag, date, camera, lens, file type and status
   (online, offline, missing).
 - **Tags** that stay with the photo, even when the file is moved or copied.
@@ -142,6 +145,7 @@ shoebox-cli scan                 # rescan every connected folder
 shoebox-cli stats                # catalog overview
 shoebox-cli search kids on a beach
 shoebox-cli people               # everyone found, with their names
+shoebox-cli people-check         # likely mix-ups among named people
 shoebox-cli models               # which AI models are installed
 shoebox-cli bench                # how fast the main views are on this catalog and computer
 ```
