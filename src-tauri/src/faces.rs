@@ -7,13 +7,14 @@
 
 use crate::catalog::Catalog;
 use anyhow::{Result, anyhow, bail};
+use chrono::Datelike;
 use image::{DynamicImage, GenericImageView, RgbImage, imageops::FilterType};
 use ort::session::Session;
 use ort::value::Tensor;
 use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -28,6 +29,13 @@ const MIN_FACE_PX: f32 = 24.0;
 /// Two faces are the same person when their fingerprints are at least this
 /// similar (Immich: maximum distance 0.5).
 const SAME_PERSON: f32 = 0.5;
+/// A new face is compared with each person as they looked around the date of
+/// its photo: their faces from the nearest months holding at least this
+/// many...
+const AROUND_FACES: u32 = 5;
+/// ...no further than this many months either side; otherwise with their
+/// whole-life average.
+const AROUND_MONTHS: i64 = 12;
 /// Less alike than the same person, but enough to suggest who a face may be.
 const LOOKS_LIKE: f32 = 0.3;
 /// Faces smaller than this (short side, in the preview) give fingerprints too
@@ -375,6 +383,137 @@ fn dominant(vs: &[&[f32]]) -> Vec<f32> {
         c = mean(&close);
     }
     c
+}
+
+/// The month a photo was taken (camera local time read as UTC), counted from
+/// January 1970; none when its date is unknown.
+fn month_of(taken_ts: Option<i64>) -> Option<i64> {
+    let d = chrono::DateTime::from_timestamp(taken_ts.filter(|t| *t > 0)?, 0)?;
+    Some((d.year() as i64 - 1970) * 12 + d.month0() as i64)
+}
+
+/// Everyone's faces added up: over their whole life, and month by month (the
+/// month the photo was taken), so a new face is compared with how each person
+/// looked around then. To the model a child's baby and school-age faces are
+/// far apart and all newborns look alike: an average over a whole childhood
+/// draws in a newborn brother or cousin, the faces from the same months don't.
+/// Sums add, so merging people is just adding.
+///
+/// Read as a map, it holds each person's whole-life sum and how many faces.
+#[derive(Clone, Default)]
+struct Averages {
+    life: HashMap<i64, (Vec<f32>, u32)>,
+    /// Per person, per month: only months holding faces.
+    months: HashMap<i64, BTreeMap<i64, (Vec<f32>, u32)>>,
+}
+
+impl std::ops::Deref for Averages {
+    type Target = HashMap<i64, (Vec<f32>, u32)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.life
+    }
+}
+
+impl Averages {
+    fn add(&mut self, person: i64, v: &[f32], month: Option<i64>, sign: f32) {
+        let add = |e: &mut (Vec<f32>, u32)| {
+            e.0.iter_mut().zip(v).for_each(|(s, x)| *s += sign * x);
+            e.1 = if sign > 0.0 { e.1 + 1 } else { e.1.saturating_sub(1) };
+        };
+        add(self.life.entry(person).or_insert_with(|| (vec![0.0; DIM], 0)));
+        if let Some(m) = month {
+            let months = self.months.entry(person).or_default();
+            let e = months.entry(m).or_insert_with(|| (vec![0.0; DIM], 0));
+            add(e);
+            if e.1 == 0 {
+                months.remove(&m);
+            }
+        }
+    }
+
+    /// `others` become part of `into`.
+    fn merge(&mut self, into: i64, others: &[i64]) {
+        for o in others {
+            if let Some((s, n)) = self.life.remove(o) {
+                let e = self.life.entry(into).or_insert_with(|| (vec![0.0; DIM], 0));
+                e.0.iter_mut().zip(&s).for_each(|(a, b)| *a += b);
+                e.1 += n;
+            }
+            for (m, (s, n)) in self.months.remove(o).unwrap_or_default() {
+                let e = self.months.entry(into).or_default().entry(m).or_insert_with(|| (vec![0.0; DIM], 0));
+                e.0.iter_mut().zip(&s).for_each(|(a, b)| *a += b);
+                e.1 += n;
+            }
+        }
+    }
+
+    /// How a person looked over `months` (first, last): their faces from
+    /// then and the nearest months either side holding AROUND_FACES, as a
+    /// unit vector; none when there are fewer within AROUND_MONTHS.
+    fn around(&self, person: i64, (first, last): (i64, i64)) -> Option<Vec<f32>> {
+        let months = self.months.get(&person)?;
+        let faces = |k: i64| months.range(first - k..=last + k).map(|(_, (_, n))| n).sum::<u32>();
+        if faces(AROUND_MONTHS) < AROUND_FACES {
+            return None;
+        }
+        // The nearest months holding enough of them.
+        let k = (0..AROUND_MONTHS).find(|&k| faces(k) >= AROUND_FACES).unwrap_or(AROUND_MONTHS);
+        let mut sum = vec![0.0; DIM];
+        for (_, (s, _)) in months.range(first - k..=last + k) {
+            sum.iter_mut().zip(s).for_each(|(a, b)| *a += b);
+        }
+        Some(unit(sum))
+    }
+
+    /// The first and last month of a person's photos with a date.
+    fn months_of(&self, person: i64) -> Option<(i64, i64)> {
+        let m = self.months.get(&person)?;
+        Some((*m.first_key_value()?.0, *m.last_key_value()?.0))
+    }
+
+    /// The pairs of face (unit vector) and person, other than `except`, alike
+    /// enough to be them, for faces from `months` (first, last; none: date
+    /// unknown): (likeness, face, person). Each person as they looked around
+    /// then; one with too few photos from then (or a face with no date), by
+    /// their whole-life average.
+    fn alike(&self, faces: &[&[f32]], months: Option<(i64, i64)>, except: &[i64]) -> Vec<(f32, usize, i64)> {
+        let mut pairs = Vec::new();
+        for (pid, (sum, n)) in &self.life {
+            if *n == 0 || except.contains(pid) {
+                continue;
+            }
+            let then = months.and_then(|m| self.around(*pid, m));
+            let (c, norm) = match &then {
+                Some(then) => (then.as_slice(), 1.0),
+                None => (sum.as_slice(), sum.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::EPSILON)),
+            };
+            for (i, v) in faces.iter().enumerate() {
+                let s = dot(c, v) / norm;
+                if s >= SAME_PERSON {
+                    pairs.push((s, i, *pid));
+                }
+            }
+        }
+        pairs
+    }
+
+    /// Who each face of a photo taken in `month` is: the most alike pairs of
+    /// face and person first, each person once, none of `taken` (already in
+    /// the photo). None: nobody alike enough - someone new.
+    fn choose(&self, faces: &[&[f32]], month: Option<i64>, taken: &[i64]) -> Vec<Option<i64>> {
+        let mut pairs = self.alike(faces, month.map(|m| (m, m)), taken);
+        // Ties: the earlier face, then the older person, so a regroup comes out the same.
+        pairs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        let mut out = vec![None; faces.len()];
+        let mut used: HashSet<i64> = HashSet::new();
+        for (_, i, pid) in pairs {
+            if out[i].is_none() && used.insert(pid) {
+                out[i] = Some(pid);
+            }
+        }
+        out
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -752,9 +891,9 @@ pub struct FaceIndex {
     /// faces.db: one fingerprint per face.
     db: Mutex<Connection>,
     models: Mutex<Option<Models>>,
-    /// Per person: the sum of its faces' fingerprints and how many. Sums add,
-    /// so merging people is just adding.
-    centroids: RwLock<HashMap<i64, (Vec<f32>, u32)>>,
+    /// Per person: the sum of its faces' fingerprints and how many, whole
+    /// life and month by month.
+    centroids: RwLock<Averages>,
     /// Open once the averages are read (and any regrouping done): every
     /// method waits for it, so none works from half the people.
     ready: crate::Ready,
@@ -800,7 +939,7 @@ impl FaceIndex {
         Ok(Self {
             db: Mutex::new(conn),
             models: Mutex::new(None),
-            centroids: RwLock::new(HashMap::new()),
+            centroids: RwLock::new(Averages::default()),
             ready: crate::Ready::default(),
             kept_people: crate::catalog::Kept::new(1),
         })
@@ -860,19 +999,20 @@ impl FaceIndex {
 
     /// [`FaceIndex::regroup`], also while the index is being read.
     fn regroup_now(&self, cat: &Catalog) -> Result<(usize, usize)> {
-        let loose: Vec<(i64, i64, [f64; 4])> = cat
+        let loose: Vec<(i64, i64, [f64; 4], Option<i64>)> = cat
             .db()
             .prepare(
-                "SELECT f.id, f.photo_id, f.x1, f.y1, f.x2, f.y2 FROM faces f LEFT JOIN people p ON p.id = f.person_id
+                "SELECT f.id, f.photo_id, f.x1, f.y1, f.x2, f.y2, ph.taken_ts FROM faces f
+                   JOIN photos ph ON ph.id = f.photo_id LEFT JOIN people p ON p.id = f.person_id
                   WHERE f.by_hand = 0 AND (f.person_id IS NULL OR (p.name IS NULL AND p.ignored = 0))
                   ORDER BY f.photo_id, f.score DESC",
             )?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, [r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?])))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, [r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?], r.get(6)?)))?
             .collect::<rusqlite::Result<_>>()?;
         {
             let mut db = cat.db();
             let tx = db.transaction()?;
-            for (fid, _, _) in &loose {
+            for (fid, ..) in &loose {
                 tx.execute("UPDATE faces SET person_id = NULL WHERE id = ?1", [fid])?;
             }
             tx.execute(
@@ -895,20 +1035,29 @@ impl FaceIndex {
             }
             // Short side of each face in preview pixels, as when it was found.
             let (pw, ph) = image::image_dimensions(cat.data.preview_path(photo)).unwrap_or((1080, 720));
-            let mut taken: Vec<i64> = cat
+            let taken: Vec<i64> = cat
                 .db()
                 .prepare("SELECT person_id FROM faces WHERE photo_id = ?1 AND person_id IS NOT NULL")?
                 .query_map([photo], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
-            let mut db = cat.db();
-            let tx = db.transaction()?;
-            for (fid, _, b) in &loose[i..j] {
+            let month = month_of(loose[i].3);
+            let mut sort: Vec<(i64, Vec<f32>)> = Vec::new();
+            for (fid, _, b, _) in &loose[i..j] {
                 let short = ((b[2] - b[0]) * pw as f64).min((b[3] - b[1]) * ph as f64) as f32;
                 let Some(v) = self.vector(*fid)? else { continue };
-                if short < GROUP_MIN_PX {
-                    continue;
+                if short >= GROUP_MIN_PX {
+                    sort.push((*fid, v));
                 }
-                let pid = match self.closest(&v, &taken) {
+            }
+            let chosen = self.centroids.read().unwrap().choose(
+                &sort.iter().map(|(_, v)| v.as_slice()).collect::<Vec<_>>(),
+                month,
+                &taken,
+            );
+            let mut db = cat.db();
+            let tx = db.transaction()?;
+            for ((fid, v), pid) in sort.iter().zip(chosen) {
+                let pid = match pid {
                     Some(pid) => pid,
                     None => {
                         tx.execute("INSERT INTO people (name, created_at) VALUES (NULL, ?1)", [crate::db::now()])?;
@@ -917,8 +1066,7 @@ impl FaceIndex {
                     }
                 };
                 tx.execute("UPDATE faces SET person_id = ?1 WHERE id = ?2", params![pid, fid])?;
-                self.add_to(pid, &v, 1.0);
-                taken.push(pid);
+                self.centroids.write().unwrap().add(pid, v, month, 1.0);
             }
             tx.commit()?;
             i = j;
@@ -949,53 +1097,49 @@ impl FaceIndex {
     /// fingerprints read side by side in face order: one pass over each, not
     /// one look-up per face (seconds on a big catalog).
     fn rebuild_centroids(&self, cat: &Catalog) -> Result<()> {
-        let faces: Vec<(i64, i64)> = cat
+        let faces: Vec<(i64, i64, Option<i64>)> = cat
             .read()?
             // In face order: the sums come out the same to the last bit, whatever index the query uses.
-            .prepare("SELECT id, person_id FROM faces WHERE person_id IS NOT NULL ORDER BY id")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .prepare(
+                "SELECT f.id, f.person_id, p.taken_ts FROM faces f JOIN photos p ON p.id = f.photo_id
+                  WHERE f.person_id IS NOT NULL ORDER BY f.id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut faces = faces.into_iter().peekable();
-        let mut c: HashMap<i64, (Vec<f32>, u32)> = HashMap::new();
+        let mut c = Averages::default();
+        let mut v = vec![0f32; DIM];
         let db = self.db.lock().unwrap();
         let mut stmt = db.prepare("SELECT face_id, vec FROM emb ORDER BY face_id")?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
             let fid: i64 = r.get(0)?;
-            while faces.next_if(|(id, _)| *id < fid).is_some() {}
-            let Some((_, pid)) = faces.next_if(|(id, _)| *id == fid) else { continue };
+            while faces.next_if(|(id, ..)| *id < fid).is_some() {}
+            let Some((_, pid, taken)) = faces.next_if(|(id, ..)| *id == fid) else { continue };
             let blob = r.get_ref(1)?.as_blob()?;
             if blob.len() != DIM * 4 {
                 continue;
             }
-            let e = c.entry(pid).or_insert_with(|| (vec![0.0; DIM], 0));
-            e.0.iter_mut().zip(blob.as_chunks::<4>().0).for_each(|(s, x)| *s += f32::from_le_bytes(*x));
-            e.1 += 1;
+            v.iter_mut().zip(blob.as_chunks::<4>().0).for_each(|(x, b)| *x = f32::from_le_bytes(*b));
+            c.add(pid, &v, month_of(taken), 1.0);
         }
         *self.centroids.write().unwrap() = c;
         Ok(())
     }
 
-    /// The person this fingerprint most resembles, if close enough, other than
-    /// `taken` (people already in this photo: nobody appears twice in one photo).
-    fn closest(&self, v: &[f32], taken: &[i64]) -> Option<i64> {
-        let c = self.centroids.read().unwrap();
-        c.iter()
-            .filter(|(pid, (_, n))| *n > 0 && !taken.contains(pid))
-            .map(|(pid, (sum, _))| {
-                let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::EPSILON);
-                (*pid, dot(sum, v) / norm)
-            })
-            .filter(|(_, s)| *s >= SAME_PERSON)
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(pid, _)| pid)
-    }
-
-    fn add_to(&self, pid: i64, v: &[f32], sign: f32) {
-        let mut c = self.centroids.write().unwrap();
-        let e = c.entry(pid).or_insert_with(|| (vec![0.0; DIM], 0));
-        e.0.iter_mut().zip(v).for_each(|(s, x)| *s += sign * x);
-        e.1 = if sign > 0.0 { e.1 + 1 } else { e.1.saturating_sub(1) };
+    /// A face's fingerprint and the month its photo was taken.
+    fn vector_and_month(&self, cat: &Catalog, face_id: i64) -> Result<Option<(Vec<f32>, Option<i64>)>> {
+        let Some(v) = self.vector(face_id)? else { return Ok(None) };
+        let taken: Option<i64> = cat
+            .db()
+            .query_row(
+                "SELECT p.taken_ts FROM faces f JOIN photos p ON p.id = f.photo_id WHERE f.id = ?1",
+                [face_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(Some((v, month_of(taken))))
     }
 
     /// Finds and groups the faces of every photo not looked at yet.
@@ -1102,16 +1246,28 @@ impl FaceIndex {
         let thumbs: Vec<Option<Vec<u8>>> = faces.iter().map(|(d, _)| face_thumb(img, &d.bbox).ok()).collect();
         let mut written = Vec::new();
         let mut joined = Vec::new();
-        let mut taken: Vec<i64> = Vec::new();
+        let taken_ts: Option<i64> = cat
+            .db()
+            .query_row("SELECT taken_ts FROM photos WHERE id = ?1", [photo_id], |r| r.get(0))
+            .optional()?
+            .flatten();
+        let month = month_of(taken_ts);
+        // Faces too small to group stay with nobody.
+        let groupable: Vec<bool> =
+            faces.iter().map(|(d, _)| (d.bbox[2] - d.bbox[0]).min(d.bbox[3] - d.bbox[1]) >= GROUP_MIN_PX).collect();
+        let mut chosen = {
+            let sort: Vec<&[f32]> =
+                faces.iter().zip(&groupable).filter(|(_, g)| **g).map(|((_, v), _)| v.as_slice()).collect();
+            self.centroids.read().unwrap().choose(&sort, month, &[]).into_iter()
+        };
         {
             let mut db = cat.db();
             let tx = db.transaction()?;
-            for (d, v) in &faces {
-                let short = (d.bbox[2] - d.bbox[0]).min(d.bbox[3] - d.bbox[1]);
-                let pid: Option<i64> = if short < GROUP_MIN_PX {
+            for ((d, v), groupable) in faces.iter().zip(groupable) {
+                let pid: Option<i64> = if !groupable {
                     None
                 } else {
-                    Some(match self.closest(v, &taken) {
+                    Some(match chosen.next().flatten() {
                         Some(pid) => pid,
                         None => {
                             tx.execute("INSERT INTO people (name, created_at) VALUES (NULL, ?1)", [crate::db::now()])?;
@@ -1119,7 +1275,6 @@ impl FaceIndex {
                         }
                     })
                 };
-                taken.extend(pid);
                 let kps: Vec<String> = d
                     .kps
                     .iter()
@@ -1166,8 +1321,9 @@ impl FaceIndex {
             tx.commit()?;
         }
         // Only now that they're saved do these faces count for their person.
+        let mut c = self.centroids.write().unwrap();
         for (pid, v) in joined {
-            self.add_to(pid, v, 1.0);
+            c.add(pid, v, month, 1.0);
         }
         Ok(())
     }
@@ -1329,29 +1485,34 @@ impl FaceIndex {
             }
             (everyone, movable, photos)
         };
-        // Everyone's average face as a unit vector, and how many faces it holds.
-        let average: Vec<(i64, Vec<f32>, u32)> = {
-            let c = self.centroids.read().unwrap();
-            c.iter()
-                .filter(|(id, (_, n))| *n > 0 && everyone.contains(id))
-                .map(|(id, (sum, n))| (*id, unit(sum.clone()), *n))
-                .collect()
-        };
         // Every join alike enough, best first: (similarity, who moves, to whom).
-        let bigger = |a: (u32, i64), b: (u32, i64)| a.0 > b.0 || (a.0 == b.0 && a.1 < b.1);
+        // Who may move is compared, as a whole, with each person as they
+        // looked over the months of their photos.
         let mut joins: Vec<(f32, i64, i64)> = Vec::new();
-        for (l, lv, ln) in average.iter().filter(|(id, _, _)| movable.contains(id)) {
-            for (t, tv, tn) in &average {
-                if t == l || (movable.contains(t) && !bigger((*tn, *t), (*ln, *l))) {
-                    continue;
+        {
+            // A copy: a face moved meanwhile ("who is this") doesn't wait for the comparing.
+            let c = self.centroids.read().unwrap().clone();
+            let size = |id: &i64| c.life.get(id).map_or(0, |(_, n)| *n);
+            let bigger = |a: i64, b: i64| size(&a) > size(&b) || (size(&a) == size(&b) && a < b);
+            // Grouped by their months, so each person's look then is worked out once.
+            let mut by_months: BTreeMap<Option<(i64, i64)>, Vec<i64>> = BTreeMap::new();
+            for (l, (_, n)) in &c.life {
+                if *n > 0 && movable.contains(l) {
+                    by_months.entry(c.months_of(*l)).or_default().push(*l);
                 }
-                let s = dot(lv, tv);
-                if s >= SAME_PERSON {
-                    joins.push((s, *l, *t));
+            }
+            for (months, ls) in by_months {
+                let averages: Vec<Vec<f32>> = ls.iter().map(|l| unit(c.life[l].0.clone())).collect();
+                let faces: Vec<&[f32]> = averages.iter().map(Vec::as_slice).collect();
+                for (s, i, t) in c.alike(&faces, months, &[]) {
+                    let l = ls[i];
+                    if t != l && everyone.contains(&t) && (!movable.contains(&t) || bigger(t, l)) {
+                        joins.push((s, l, t));
+                    }
                 }
             }
         }
-        joins.sort_by(|a, b| b.0.total_cmp(&a.0));
+        joins.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
         // One step per pass: nobody joins someone who moves, nobody moves who
         // was joined.
         let mut joining: HashMap<i64, Vec<i64>> = HashMap::new();
@@ -1425,15 +1586,7 @@ impl FaceIndex {
             }
             tx.commit()?;
         }
-        let mut c = self.centroids.write().unwrap();
-        let mut sum = c.remove(&into).unwrap_or_else(|| (vec![0.0; DIM], 0));
-        for o in &others {
-            if let Some((s, n)) = c.remove(o) {
-                sum.0.iter_mut().zip(&s).for_each(|(a, b)| *a += b);
-                sum.1 += n;
-            }
-        }
-        c.insert(into, sum);
+        self.centroids.write().unwrap().merge(into, &others);
         Ok(merged)
     }
 
@@ -1482,9 +1635,10 @@ impl FaceIndex {
             tx.commit()?;
         }
         for &(fid, to) in &back {
-            if let Some(v) = self.vector(fid)? {
-                self.add_to(merged.into, &v, -1.0);
-                self.add_to(to, &v, 1.0);
+            if let Some((v, month)) = self.vector_and_month(cat, fid)? {
+                let mut c = self.centroids.write().unwrap();
+                c.add(merged.into, &v, month, -1.0);
+                c.add(to, &v, month, 1.0);
             }
         }
         Ok(back.len())
@@ -1575,11 +1729,12 @@ impl FaceIndex {
             tx.commit()?;
         }
         for (fid, from, to) in changes {
-            if let Some(v) = self.vector(fid)? {
+            if let Some((v, month)) = self.vector_and_month(cat, fid)? {
+                let mut c = self.centroids.write().unwrap();
                 if let Some(from) = from {
-                    self.add_to(from, &v, -1.0);
+                    c.add(from, &v, month, -1.0);
                 }
-                self.add_to(to, &v, 1.0);
+                c.add(to, &v, month, 1.0);
             }
         }
         Ok(moved)
@@ -1609,22 +1764,34 @@ impl FaceIndex {
             if from == to {
                 continue;
             }
-            if let Some(v) = self.vector(fid)? {
+            if let Some((v, month)) = self.vector_and_month(cat, fid)? {
+                let mut c = self.centroids.write().unwrap();
                 if let Some(from) = from {
-                    self.add_to(from, &v, -1.0);
+                    c.add(from, &v, month, -1.0);
                 }
                 if let Some(to) = to {
-                    self.add_to(to, &v, 1.0);
+                    c.add(to, &v, month, 1.0);
                 }
             }
         }
         Ok(changes.len())
     }
 
-    /// Who a face goes to when the user doesn't say: whoever it resembles most,
-    /// other than `taken`, or someone new.
+    /// Who a face goes to when the user doesn't say: whoever it resembles most
+    /// around when its photo was taken, other than `taken`, or someone new.
     fn place(&self, tx: &rusqlite::Transaction, face_id: i64, taken: &[i64]) -> Result<i64> {
-        if let Some(p) = self.vector(face_id)?.and_then(|v| self.closest(&v, taken)) {
+        let when: Option<i64> = tx
+            .query_row(
+                "SELECT p.taken_ts FROM faces f JOIN photos p ON p.id = f.photo_id WHERE f.id = ?1",
+                [face_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let found = self
+            .vector(face_id)?
+            .and_then(|v| self.centroids.read().unwrap().choose(&[v.as_slice()], month_of(when), taken)[0]);
+        if let Some(p) = found {
             return Ok(p);
         }
         tx.execute("INSERT INTO people (name, created_at) VALUES (NULL, ?1)", [crate::db::now()])?;
