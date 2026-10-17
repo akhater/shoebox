@@ -3,6 +3,7 @@ import type {
   CandidateDay,
   FaceTarget,
   Facets,
+  LeftAsIs,
   Merged,
   Overview,
   PeopleCheck,
@@ -56,7 +57,41 @@ export function fakeBackend() {
   ];
   const inPerson: Record<number, number[]> = { 7: [101, 201, 301], 8: [102, 202] };
   /** What "Check" in People finds (a test sets it). */
-  let check: PeopleCheck = { people: 0, faces: 0, twice: [], ageJumps: [], likeOthers: [], samePeople: [] };
+  let check: PeopleCheck = { people: 0, faces: 0, left: 0, twice: [], ageJumps: [], likeOthers: [], samePeople: [] };
+  /** "Leave as is" (or back) on the check's findings: they keep it for the next check. */
+  const leaveAsIs = (findings: LeftAsIs[], left: boolean) => {
+    const about = (l: LeftAsIs) =>
+      l.kind === "twice"
+        ? `twice:${l.photoId}:${l.personId}`
+        : l.kind === "samePerson"
+          ? `same:${Math.min(l.personId, l.otherId)}:${Math.max(l.personId, l.otherId)}`
+          : `${l.kind}:${l.faceId}`;
+    const these = new Set(findings.map(about));
+    const flag = <T extends { left: boolean }>(items: T[], as: (t: T) => LeftAsIs) =>
+      items.map((t) => (these.has(about(as(t))) ? { ...t, left } : t));
+    check = {
+      ...check,
+      twice: flag(check.twice, (t) => ({ kind: "twice", personId: t.personId, photoId: t.photoId, faces: [] })),
+      ageJumps: flag(check.ageJumps, (a) => ({ kind: "ageJump", personId: a.personId, faceId: a.face.faceId })),
+      likeOthers: flag(check.likeOthers, (l) => ({ kind: "likeOther", personId: l.personId, faceId: l.face.faceId, otherId: l.otherId })),
+      samePeople: flag(check.samePeople, (p) => ({ kind: "samePerson", personId: p.personId, otherId: p.otherId })),
+    };
+    return findings.length;
+  };
+  /** The check as Shoebox answers it: those left as is counted, and listed only when `all`. */
+  const checkAnswer = (all: boolean): PeopleCheck => {
+    const keep = <T extends { left: boolean }>(items: T[]) => items.filter((t) => all || !t.left);
+    const lists = [check.twice, check.ageJumps, check.likeOthers, check.samePeople];
+    const left = lists.reduce((n, l) => n + l.filter((t) => t.left).length, 0);
+    return {
+      ...check,
+      left,
+      twice: keep(check.twice),
+      ageJumps: keep(check.ageJumps),
+      likeOthers: keep(check.likeOthers),
+      samePeople: keep(check.samePeople),
+    };
+  };
   /** People merged into someone, as they were, for Undo. */
   const unmerged = new Map<number, { person: Person; photos: number[] }>();
   const calls: Call[] = [];
@@ -210,7 +245,9 @@ export function fakeBackend() {
       case "read_people":
         return 0;
       case "check_people":
-        return check;
+        return checkAnswer(a.all === true);
+      case "leave_as_is":
+        return leaveAsIs(a.findings as LeftAsIs[], a.left as boolean);
       case "more_faces": {
         // Faces in others that look like Ana: one a day after her photos, one long before.
         if (a.personId !== 7) return [];

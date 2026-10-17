@@ -290,11 +290,19 @@ pub async fn unmerge_people(state: State<'_, AppState>, merged: crate::faces::Me
     in_order(move || faces.unmerge(&cat, &merged)).await
 }
 
-/// "Check" in People: likely mix-ups among named people.
+/// "Check" in People: likely mix-ups among named people (`all`: those left
+/// as is too, flagged).
 #[tauri::command]
-pub async fn check_people(state: State<'_, AppState>) -> Res<crate::faces::PeopleCheck> {
+pub async fn check_people(state: State<'_, AppState>, all: bool) -> Res<crate::faces::PeopleCheck> {
     let (cat, faces) = (state.cat.clone(), state.faces.clone());
-    blocking(move || faces.check_people(&cat)).await
+    blocking(move || faces.check_people(&cat, all)).await
+}
+
+/// "Leave as is" on findings of the check (not `left`: back in it).
+#[tauri::command]
+pub async fn leave_as_is(state: State<'_, AppState>, findings: Vec<crate::faces::LeftAsIs>, left: bool) -> Res<usize> {
+    let cat = state.cat.clone();
+    in_order(move || crate::faces::leave_as_is(&cat, &findings, left)).await
 }
 
 /// "Who is this?": faces go to someone, someone new, or (not them, don't

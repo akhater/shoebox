@@ -27,6 +27,19 @@ import {
   wait,
 } from "./ui";
 
+/** Someone in People, and a face in a check finding. */
+const checkPerson = (id: number, name: string, cover: number) => ({
+  id,
+  name,
+  faces: 1,
+  photos: 1,
+  cover,
+  ignored: false,
+  isNew: false,
+  newPhotos: 0,
+});
+const checkFace = (faceId: number, photoId: number, similarity: number) => ({ faceId, photoId, similarity, byHand: false });
+
 const banner = (host: HTMLElement) =>
   [...host.querySelectorAll(".main > .banner")].map((b) => b.textContent?.trim() ?? "").find((t) => t.startsWith("Showing"));
 
@@ -178,30 +191,20 @@ describe("People", () => {
 
   test("Check: findings by kind, each fixed in one click through the usual moves and merges, each with Undo", async () => {
     const be = fakeBackend();
-    const person = (id: number, name: string, cover: number) => ({
-      id,
-      name,
-      faces: 1,
-      photos: 1,
-      cover,
-      ignored: false,
-      isNew: false,
-      newPhotos: 0,
-    });
-    be.addPerson(person(9, "Bea", 90), [103]);
-    be.addPerson(person(10, "Bee", 91), [203]);
-    const face = (faceId: number, photoId: number, similarity: number) => ({ faceId, photoId, similarity, byHand: false });
+    be.addPerson(checkPerson(9, "Bea", 90), [103]);
+    be.addPerson(checkPerson(10, "Bee", 91), [203]);
     be.peopleCheck({
       people: 3,
       faces: 40,
+      left: 0,
       // Ana twice in photo 101: face 2 is someone else.
-      twice: [{ personId: 7, photoId: 101, faces: [face(1, 101, 0.9), face(2, 101, 0.1)], elsewhere: [2] }],
+      twice: [{ personId: 7, photoId: 101, faces: [checkFace(1, 101, 0.9), checkFace(2, 101, 0.1)], elsewhere: [2], left: false }],
       ageJumps: [],
       likeOthers: [
-        { personId: 7, face: face(3, 201, 0.2), otherId: 9, other: 0.8, near: true },
-        { personId: 7, face: face(4, 301, 0.3), otherId: 10, other: 0.7, near: false },
+        { personId: 7, face: checkFace(3, 201, 0.2), otherId: 9, other: 0.8, near: true, left: false },
+        { personId: 7, face: checkFace(4, 301, 0.3), otherId: 10, other: 0.7, near: false, left: false },
       ],
-      samePeople: [{ personId: 9, otherId: 10, similarity: 0.7, sameName: false, together: 0 }],
+      samePeople: [{ personId: 9, otherId: 10, similarity: 0.7, sameName: false, together: 0, left: false }],
     });
     const host = await renderApp();
     await click(sidebarItem(host, "People"));
@@ -217,7 +220,7 @@ describe("People", () => {
     ]);
     const cards = () => [...dialog.querySelectorAll<HTMLElement>(".check-card")];
     const ticks = (c: HTMLElement) => [...c.querySelectorAll(".stray")].map((s) => s.classList.contains("on"));
-    const action = (c: HTMLElement) => c.querySelector<HTMLButtonElement>(".check-card-foot button")!;
+    const action = (c: HTMLElement) => c.querySelector<HTMLButtonElement>(".check-card-foot button.primary")!;
     // Suggested faces come ticked; the unsure ones don't.
     expect(cards().map(ticks)).toEqual([[false, true], [true], [false], []]);
     expect(cards().map((c) => action(c).textContent)).toEqual([
@@ -421,6 +424,83 @@ describe("People", () => {
       expect(title(host)).toBe("Bee");
       expect(gridIds(host)).toEqual([203]);
     });
+  });
+
+  test("Check: Leave as is keeps a finding out of the next check; those left are shown on demand and brought back", async () => {
+    const be = fakeBackend();
+    be.addPerson(checkPerson(9, "Bea", 90), [103]);
+    be.addPerson(checkPerson(10, "Bea", 91), [203]);
+    be.peopleCheck({
+      people: 3,
+      faces: 40,
+      left: 0,
+      // Ana twice in photo 101: a reflection.
+      twice: [{ personId: 7, photoId: 101, faces: [checkFace(1, 101, 0.9), checkFace(2, 101, 0.8)], elsewhere: [2], left: false }],
+      ageJumps: [],
+      // A face of Ana much like Bea, left as is before.
+      likeOthers: [{ personId: 7, face: checkFace(3, 201, 0.2), otherId: 9, other: 0.8, near: true, left: true }],
+      // Two people called Bea, in a photo together.
+      samePeople: [{ personId: 9, otherId: 10, similarity: 0.6, sameName: true, together: 1, left: false }],
+    });
+    const host = await renderApp();
+    await click(sidebarItem(host, "People"));
+    await click(byText(host, ".people-bar button", "Check"));
+    await wait(100);
+    // One check, those left as is included: shown only when asked.
+    expect(be.calls.filter((c) => c.cmd === "check_people").map((c) => c.args)).toEqual([{ all: true }]);
+    const dialog = host.querySelector(".check-modal")!;
+    const sections = () => [...dialog.querySelectorAll(".check-section h3")].map((h) => h.textContent);
+    expect(sections()).toEqual(["Twice in one photo 1", "One person under two names? 1"]);
+    const cards = () => [...dialog.querySelectorAll<HTMLElement>(".check-card")];
+    const buttons = (c: HTMLElement) => [...c.querySelectorAll(".check-card-foot button")].map((b) => b.textContent);
+    const foot = (c: HTMLElement) => c.querySelector(".check-card-foot")!.textContent;
+    // Together in a photo, the two are not one: nothing to merge, only to leave as is.
+    expect(cards().map(buttons)).toEqual([["Leave as is", "Move 1 face out"], ["Leave as is"]]);
+
+    // Leave as is: kept by the catalog, People untouched, Undo on the card.
+    const twice = [{ kind: "twice", personId: 7, photoId: 101, faces: [1, 2] }];
+    let from = be.calls.length;
+    await click(byText(cards()[0], "button", "Leave as is"));
+    await wait(100);
+    expect(be.calls.slice(from).find((c) => c.cmd === "leave_as_is")!.args).toEqual({ findings: twice, left: true });
+    expect(be.cmdsSince(from)).not.toContain("people");
+    expect(foot(cards()[0])).toBe("Left as is: Check leaves it out until it changes.Undo");
+    from = be.calls.length;
+    await click(byText(cards()[0], "button", "Undo"));
+    await wait(100);
+    expect(be.calls.slice(from).find((c) => c.cmd === "leave_as_is")!.args).toEqual({ findings: twice, left: false });
+    expect(buttons(cards()[0])).toEqual(["Leave as is", "Move 1 face out"]);
+    from = be.calls.length;
+    await click(byText(cards()[1], "button", "Leave as is"));
+    await wait(100);
+    expect(be.calls.slice(from).find((c) => c.cmd === "leave_as_is")!.args).toEqual({
+      findings: [{ kind: "samePerson", personId: 9, otherId: 10 }],
+      left: true,
+    });
+
+    // Left before: listed on demand with nothing ticked; Bring back puts it in the check again.
+    await click(byText(dialog, ".check-summary button", "Show 1 left as is"));
+    expect(sections()).toEqual(["Twice in one photo 1", "One person under two names? 1", "Left as is 1"]);
+    const left = cards()[2];
+    expect([...left.querySelectorAll(".stray")].map((s) => s.classList.contains("on"))).toEqual([false]);
+    expect(buttons(left)).toEqual(["Bring back", "Move 0 faces to Bea"]);
+    from = be.calls.length;
+    await click(byText(left, "button", "Bring back"));
+    await wait(100);
+    expect(be.calls.slice(from).find((c) => c.cmd === "leave_as_is")!.args).toEqual({
+      findings: [{ kind: "likeOther", personId: 7, faceId: 3, otherId: 9 }],
+      left: false,
+    });
+    expect(foot(cards()[2])).toBe("Back in the check.Undo");
+    await click(byText(dialog, ".check-summary button", "Hide those left as is"));
+    expect(sections()).toEqual(["Twice in one photo 1", "One person under two names? 1"]);
+
+    // Checked again: the face is among the findings, the two people left as is.
+    await click(byText(dialog, ".modal-head button", "Check again"));
+    await wait(100);
+    expect(sections()).toEqual(["Twice in one photo 1", "More like someone else 1"]);
+    await click(byText(dialog, ".check-summary button", "Show 1 left as is"));
+    expect(cards().map(buttons).at(-1)).toEqual(["Bring back"]);
   });
 
   test("Find more: the faces near their photos come ticked, and Move puts them in the person", async () => {

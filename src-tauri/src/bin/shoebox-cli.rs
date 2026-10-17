@@ -63,7 +63,7 @@
 //!       one, keeping --into's name (or the first name among them); its output goes to
 //!       people-unmerge to undo it
 //!   shoebox-cli people-unmerge '<merge JSON>'   undo a people-merge: they are apart again
-//!   shoebox-cli people-check      Check: likely mix-ups among named people (nothing changes).
+//!   shoebox-cli people-check [--all]   Check: likely mix-ups among named people (nothing changes).
 //!       "twice": someone twice in one photo ("elsewhere": the faces to move out with
 //!       move-faces --elsewhere); "ageJumps": faces unlike the person that year but like them
 //!       3+ years apart (a sibling, child or parent filed under them: --elsewhere);
@@ -71,7 +71,16 @@
 //!       photo is within 31 days of one of theirs (move-faces --to them; the others are unsure:
 //!       newborns look alike); "samePeople": two named people alike and never in the same
 //!       photo, or called the same (people-merge <otherId> --into <personId> when "together"
-//!       is 0). A face is in one finding at most
+//!       is 0). A face is in one finding at most. Findings left as is (people-leave) are left
+//!       out, "left" says how many; --all lists them too, with "left": true
+//!   shoebox-cli people-leave '<finding JSON>'... [--back]   "Leave as is": looked at, and right
+//!       as it is (a reflection, a collage, two look-alikes): people-check leaves it out until
+//!       what it is about changes (another face of theirs in that photo; the face in someone
+//!       else, or more like someone else). --back: in the check again. Each finding is one of
+//!       {"kind":"twice","personId":..,"photoId":..,"faces":[<its faceIds>]}
+//!       {"kind":"ageJump","personId":..,"faceId":..}
+//!       {"kind":"likeOther","personId":..,"faceId":..,"otherId":..}
+//!       {"kind":"samePerson","personId":..,"otherId":..}   (or a JSON list of them)
 //!   shoebox-cli people-ignore <person-id>... [--show]   strangers: hidden from People, their
 //!       future faces still joining them (--show: shown again)
 //!
@@ -311,7 +320,9 @@ fn main() -> anyhow::Result<()> {
             {
                 let db = cat.db();
                 let tx = db.unchecked_transaction()?;
-                tx.execute_batch("DELETE FROM faces; DELETE FROM people; DELETE FROM face_scan;")?;
+                tx.execute_batch(
+                    "DELETE FROM faces; DELETE FROM people; DELETE FROM face_scan; DELETE FROM check_left;",
+                )?;
                 tx.commit()?;
             }
             rusqlite::Connection::open(cat.data.root.join("faces.db"))?.execute_batch("DELETE FROM emb;")?;
@@ -397,9 +408,26 @@ fn main() -> anyhow::Result<()> {
         Some("people-check") => {
             let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
             let t = std::time::Instant::now();
-            let check = faces.check_people(&cat)?;
+            let check = faces.check_people(&cat, args[1..].iter().any(|a| a == "--all"))?;
             eprintln!("checked {} faces of {} people in {} ms", check.faces, check.people, t.elapsed().as_millis());
             println!("{}", serde_json::to_string_pretty(&check)?);
+        }
+        Some("people-leave") => {
+            // shoebox-cli people-leave '<finding JSON>'... [--back]
+            let back = args[1..].iter().any(|a| a == "--back");
+            let mut findings: Vec<shoebox_lib::faces::LeftAsIs> = Vec::new();
+            for a in args[1..].iter().filter(|a| *a != "--back") {
+                match serde_json::from_str::<serde_json::Value>(a)? {
+                    list @ serde_json::Value::Array(_) => findings.extend(serde_json::from_value::<Vec<_>>(list)?),
+                    one => findings.push(serde_json::from_value(one)?),
+                }
+            }
+            if findings.is_empty() {
+                anyhow::bail!("people-leave '<finding JSON>'... [--back]");
+            }
+            let n = shoebox_lib::faces::leave_as_is(&cat, &findings, !back)?;
+            let said = if back { "back" } else { "left" };
+            println!("{}", serde_json::json!({ said: n }));
         }
         Some("people-ignore") => {
             let show = args[1..].iter().any(|a| a == "--show");

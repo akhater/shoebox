@@ -724,6 +724,7 @@ pub fn run() {
             commands::merge_people,
             commands::unmerge_people,
             commands::check_people,
+            commands::leave_as_is,
             commands::ignore_people,
             commands::regroup_faces,
             commands::reassign_faces,

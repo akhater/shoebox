@@ -2,13 +2,14 @@
 //! faces and the dates of their photos - someone twice in one photo, a face
 //! from another age (a baby filed under an older child), faces much more like
 //! someone else, one person under two names. Nothing moves until the user
-//! acts on a finding, through the moves and merges Undo knows.
+//! acts on a finding, through the moves and merges Undo knows, or leaves it
+//! as is: out of the check until it changes.
 //!
 //! Lives here, not in src/, because it writes sample photos (promise 1).
 #![cfg(windows)]
 
 use shoebox_lib::catalog::Catalog;
-use shoebox_lib::faces::{FaceIndex, FaceTarget};
+use shoebox_lib::faces::{FaceIndex, FaceTarget, LeftAsIs, PeopleCheck, leave_as_is};
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::scan_root;
 use std::sync::atomic::AtomicBool;
@@ -41,6 +42,14 @@ fn face(
     let blob: Vec<u8> = v.iter().flat_map(|x| (x / norm).to_le_bytes()).collect();
     emb.execute("INSERT INTO emb (face_id, vec) VALUES (?1, ?2)", rusqlite::params![id, blob]).unwrap();
     id
+}
+
+/// Every finding of a check, as "Leave as is" takes it.
+fn findings(check: &PeopleCheck) -> Vec<LeftAsIs> {
+    let twice = check.twice.iter().map(LeftAsIs::from);
+    let ages = check.age_jumps.iter().map(LeftAsIs::from);
+    let others = check.like_others.iter().map(LeftAsIs::from);
+    twice.chain(ages).chain(others).chain(check.same_people.iter().map(LeftAsIs::from)).collect()
 }
 
 fn person_of(cat: &Catalog, face: i64) -> i64 {
@@ -147,7 +156,7 @@ fn likely_mix_ups_among_named_people_are_found_and_fixed() {
     drop(emb);
     let faces = FaceIndex::open(&cat).unwrap();
 
-    let check = faces.check_people(&cat).unwrap();
+    let check = faces.check_people(&cat, false).unwrap();
     assert_eq!((check.people, check.faces), (7, 32));
 
     // Cy twice in one photo: the face unlike Cy is the one to move out.
@@ -175,6 +184,22 @@ fn likely_mix_ups_among_named_people_are_found_and_fixed() {
         check.same_people.iter().map(|s| (s.person_id, s.other_id, s.same_name, s.together)).collect();
     assert_eq!(same, [(5, 6, false, 0), (1, 4, true, 0)]);
     assert!(check.same_people[0].similarity > 0.85);
+    assert_eq!(check.left, 0);
+
+    // Everything left as is: out of the next check, counted. Asked for all,
+    // it is all there, flagged; back in the check, as it was.
+    let all = findings(&check);
+    assert_eq!(leave_as_is(&cat, &all, true).unwrap(), 6);
+    let quiet = faces.check_people(&cat, false).unwrap();
+    assert_eq!((quiet.left, findings(&quiet)), (6, vec![]));
+    let listed = faces.check_people(&cat, true).unwrap();
+    assert_eq!((listed.left, findings(&listed)), (6, all.clone()));
+    assert!(listed.twice.iter().all(|t| t.left) && listed.age_jumps.iter().all(|a| a.left));
+    assert!(listed.like_others.iter().all(|l| l.left) && listed.same_people.iter().all(|s| s.left));
+    assert_eq!(leave_as_is(&cat, &all, false).unwrap(), 6);
+    let back = faces.check_people(&cat, false).unwrap();
+    assert_eq!((back.left, findings(&back)), (0, all));
+    assert!(back.twice.iter().all(|t| !t.left));
 
     // Each suggestion, as the window and the CLI make it.
     faces.reassign(&cat, &t.elsewhere, &FaceTarget::Elsewhere).unwrap();
@@ -191,7 +216,7 @@ fn likely_mix_ups_among_named_people_are_found_and_fixed() {
     );
 
     // Checked again: only what was left alone is still there.
-    let again = faces.check_people(&cat).unwrap();
+    let again = faces.check_people(&cat, false).unwrap();
     assert!(again.twice.is_empty() && again.age_jumps.is_empty(), "{again:?}");
     assert_eq!(again.like_others.iter().map(|l| l.face.face_id).collect::<Vec<_>>(), [like_cy]);
     assert_eq!(again.same_people.iter().map(|s| (s.person_id, s.other_id)).collect::<Vec<_>>(), [(5, 6)]);
@@ -199,11 +224,84 @@ fn likely_mix_ups_among_named_people_are_found_and_fixed() {
     // Undo of the move and of the merge: as they were, and found again.
     faces.restore(&cat, &moved.undo).unwrap();
     assert_eq!(faces.unmerge(&cat, &merged).unwrap(), 2);
-    let undone = faces.check_people(&cat).unwrap();
+    let undone = faces.check_people(&cat, false).unwrap();
     assert_eq!(undone.like_others.iter().map(|l| l.face.face_id).collect::<Vec<_>>(), [cy_in_bea, like_cy]);
     assert_eq!(undone.same_people.iter().map(|s| (s.person_id, s.other_id)).collect::<Vec<_>>(), [(5, 6), (1, 4)]);
     let ana: Option<String> = cat.db().query_row("SELECT name FROM people WHERE id = 4", [], |r| r.get(0)).unwrap();
     assert_eq!(ana.as_deref(), Some("ANA"));
+}
+
+#[test]
+fn a_finding_left_as_is_stays_out_until_it_changes() {
+    let (cat, p) = catalog("shoebox-people-check-left", &[None; 14]);
+    cat.db()
+        .execute(
+            "INSERT INTO people (id, name, created_at) VALUES (2, 'Bea', 0), (3, 'Cy', 0), (4, 'Dee', 0),
+               (5, 'Eve', 0), (6, 'Evie', 0)",
+            [],
+        )
+        .unwrap();
+    let emb = fingerprints(&cat);
+    for &ph in &p[0..3] {
+        face(&cat, &emb, ph, 2, false, &[(2, 1.0)]);
+    }
+    for &ph in &p[3..6] {
+        face(&cat, &emb, ph, 3, false, &[(3, 1.0)]);
+    }
+    // Cy twice in photo 6 (a reflection, say); the face least like Cy looks like Dee.
+    let cy = face(&cat, &emb, p[6], 3, false, &[(3, 1.0)]);
+    let not_cy = face(&cat, &emb, p[6], 3, false, &[(7, 1.0)]);
+    let like_cy = face(&cat, &emb, p[7], 2, false, &[(3, 1.0), (2, 0.3)]);
+    for &ph in &p[8..10] {
+        face(&cat, &emb, ph, 4, false, &[(7, 1.0)]);
+    }
+    for &ph in &p[10..12] {
+        face(&cat, &emb, ph, 5, false, &[(8, 1.0)]);
+    }
+    for &ph in &p[12..14] {
+        face(&cat, &emb, ph, 6, false, &[(8, 1.0), (9, 0.5)]);
+    }
+    let faces = FaceIndex::open(&cat).unwrap();
+    let check = faces.check_people(&cat, false).unwrap();
+    assert_eq!(check.twice.iter().map(|t| (t.person_id, t.photo_id)).collect::<Vec<_>>(), [(3, p[6])]);
+    assert_eq!(check.like_others.iter().map(|l| (l.person_id, l.face.face_id)).collect::<Vec<_>>(), [(2, like_cy)]);
+    assert_eq!(check.same_people.iter().map(|s| (s.person_id, s.other_id)).collect::<Vec<_>>(), [(5, 6)]);
+
+    // Left as is - the two people named in either order. Cy's faces in the
+    // photo stay theirs: the one like Dee isn't suggested for her instead.
+    let pair = LeftAsIs::SamePerson { person_id: 6, other_id: 5 };
+    let left = [LeftAsIs::from(&check.twice[0]), LeftAsIs::from(&check.like_others[0]), pair];
+    assert_eq!(leave_as_is(&cat, &left, true).unwrap(), 3);
+    let quiet = faces.check_people(&cat, false).unwrap();
+    assert_eq!((quiet.left, findings(&quiet)), (3, vec![]));
+    assert_eq!(faces.check_people(&cat, true).unwrap().like_others.len(), 1);
+
+    // Another face of Cy found in that photo: the photo is back in the check.
+    face(&cat, &emb, p[6], 3, false, &[(3, 1.0), (4, 0.2)]);
+    drop((emb, faces));
+    let faces = FaceIndex::open(&cat).unwrap();
+    let again = faces.check_people(&cat, false).unwrap();
+    assert_eq!(again.left, 2);
+    assert_eq!(again.twice.iter().map(|t| (t.photo_id, t.faces.len(), t.left)).collect::<Vec<_>>(), [(p[6], 3, false)]);
+    // Left as is again; a face moved out since brings nothing new.
+    leave_as_is(&cat, &[LeftAsIs::from(&again.twice[0])], true).unwrap();
+    faces.reassign(&cat, &[not_cy], &FaceTarget::Elsewhere).unwrap();
+    assert_eq!(person_of(&cat, not_cy), 4);
+    let fewer = faces.check_people(&cat, true).unwrap();
+    assert_eq!(fewer.twice.iter().map(|t| (t.faces.len(), t.left)).collect::<Vec<_>>(), [(2, true)]);
+    assert!(fewer.twice[0].faces.iter().any(|f| f.face_id == cy));
+
+    // The face like Cy now in Dee: about someone else, so back in the check.
+    faces.reassign(&cat, &[like_cy], &FaceTarget::Person { id: 4 }).unwrap();
+    let moved = faces.check_people(&cat, false).unwrap();
+    let others: Vec<(i64, i64, i64, bool)> =
+        moved.like_others.iter().map(|l| (l.person_id, l.face.face_id, l.other_id, l.left)).collect();
+    assert_eq!(others, [(4, like_cy, 3, false)]);
+    assert_eq!((moved.left, moved.twice.len(), moved.same_people.len()), (2, 0, 0));
+
+    // Back in the check, whichever way the pair is named.
+    assert_eq!(leave_as_is(&cat, &[LeftAsIs::SamePerson { person_id: 5, other_id: 6 }], false).unwrap(), 1);
+    assert_eq!(faces.check_people(&cat, false).unwrap().same_people.len(), 1);
 }
 
 #[test]
@@ -250,7 +348,7 @@ fn an_unnamed_person_merged_into_gets_its_name_back_on_undo() {
 }
 
 #[test]
-fn the_check_and_undoing_a_merge_work_headless() {
+fn the_check_leaving_as_is_and_undoing_a_merge_work_headless() {
     let (cat, p) = catalog("shoebox-people-check-cli", &[None, None, None]);
     cat.db().execute("INSERT INTO people (id, name, created_at) VALUES (1, 'Jo', 0), (2, 'jo', 0)", []).unwrap();
     let emb = fingerprints(&cat);
@@ -288,5 +386,16 @@ fn the_check_and_undoing_a_merge_work_headless() {
     assert!(same(&cli(&["people-check"])).is_empty());
     let back = cli(&["people-unmerge", &merged.to_string()]);
     assert_eq!(back["facesBack"], 1);
+    assert_eq!(same(&cli(&["people-check"])), [(1, 2, true)]);
+
+    // Two people, one name, left as is: out of the check and counted; --all
+    // lists them, flagged; --back brings them back.
+    let pair = r#"{"kind":"samePerson","personId":2,"otherId":1}"#;
+    assert_eq!(cli(&["people-leave", pair])["left"], 1);
+    let check = cli(&["people-check"]);
+    assert_eq!((same(&check), check["left"].as_i64()), (vec![], Some(1)));
+    let all = cli(&["people-check", "--all"]);
+    assert_eq!((same(&all), &all["samePeople"][0]["left"]), (vec![(1, 2, true)], &serde_json::json!(true)));
+    assert_eq!(cli(&["people-leave", &format!("[{pair}]"), "--back"])["back"], 1);
     assert_eq!(same(&cli(&["people-check"])), [(1, 2, true)]);
 }
