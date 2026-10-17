@@ -2,10 +2,10 @@
 //! focus, too dark, blown out, nothing in it), which frames are the same shot
 //! (a burst), and which one of them to keep.
 //!
-//! It only suggests. A reject is a photo marked for deletion, as Cull does by
-//! hand: nothing is deleted until the user confirms. A pick is a flag in the
-//! catalog. Both are the user's decisions; suggestions are worked out again
-//! whenever they are asked for.
+//! It only suggests, keep or reject. A reject is a photo marked for deletion,
+//! as Cull does by hand: nothing is deleted until the user confirms. Marks
+//! are the user's decisions; suggestions are worked out again whenever they
+//! are asked for.
 //!
 //! Every photo is measured from Shoebox's own preview, in the background, so
 //! photos on unplugged disks are measured too. A preview is small (~1080 px):
@@ -921,7 +921,6 @@ impl QualityIndex {
                         w: list.w[i],
                         h: list.h[i],
                         rev: list.rev[i],
-                        picked: info.picked,
                         marked: list.marked[i] == 1,
                         focus: faces.get(id).and_then(|f| focus_of(f)),
                         ..Default::default()
@@ -1045,7 +1044,7 @@ pub struct Stack {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Suggest {
-    Pick,
+    Keep,
     Reject,
     /// Left to the user.
     #[default]
@@ -1064,7 +1063,7 @@ pub struct FrameRow {
     pub w: i64,
     pub h: i64,
     pub rev: i64,
-    pub picked: bool,
+    /// Marked for deletion.
     pub marked: bool,
     pub suggest: Suggest,
     /// Why, in words, the first one the main reason.
@@ -1102,13 +1101,12 @@ struct FrameIn {
     row: FrameRow,
 }
 
-/// A photo's camera, exposure and decisions, for Cull.
+/// A photo's camera, exposure and file name, for Cull.
 #[derive(Clone, Debug, Default)]
 pub struct ShotInfo {
     pub camera: Option<String>,
     pub exposure: Option<String>,
     pub focal: Option<f64>,
-    pub picked: bool,
     pub name: Option<String>,
 }
 
@@ -1215,11 +1213,11 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
                 } else if keeper_minor {
                     Suggest::None
                 } else {
-                    Suggest::Pick
+                    Suggest::Keep
                 };
                 row.reasons = version.into_iter().chain(own).collect();
             } else if capture[i] == kept && keeper_ok {
-                row.suggest = Suggest::Pick;
+                row.suggest = Suggest::Keep;
                 let best = (i == keeper).then(|| format!("The best of these {n} frames"));
                 row.reasons = best.into_iter().chain(version).chain(own).collect();
             } else if capture[i] == kept {
@@ -1241,51 +1239,16 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
 }
 
 impl Shoot {
-    /// What Cull suggests for the frames not decided yet (neither picked nor
-    /// marked): (picks, rejects).
-    pub fn suggested(&self) -> (Vec<i64>, Vec<i64>) {
-        let open = self.stacks.iter().flat_map(|s| &s.frames).filter(|f| !f.picked && !f.marked);
-        let (mut picks, mut rejects) = (Vec::new(), Vec::new());
-        for f in open {
-            match f.suggest {
-                Suggest::Pick => picks.push(f.id),
-                Suggest::Reject => rejects.push(f.id),
-                Suggest::None => {}
-            }
-        }
-        (picks, rejects)
+    /// The frames Cull suggests rejecting that aren't marked for deletion yet:
+    /// what accepting its suggestions marks.
+    pub fn suggested(&self) -> Vec<i64> {
+        self.stacks
+            .iter()
+            .flat_map(|s| &s.frames)
+            .filter(|f| !f.marked && f.suggest == Suggest::Reject)
+            .map(|f| f.id)
+            .collect()
     }
-}
-
-/// No longer picked (a photo marked for deletion stays marked).
-pub fn unpick(cat: &Catalog, ids: &[i64]) -> Result<usize> {
-    let db = cat.db();
-    let tx = db.unchecked_transaction()?;
-    let mut n = 0;
-    for id in ids {
-        n += tx.execute("UPDATE photos SET picked = 0 WHERE id = ?1", [id])?;
-    }
-    tx.commit()?;
-    Ok(n)
-}
-
-/// The user's decisions on photos: `picks` kept, `rejects` marked for
-/// deletion, `undecided` neither. A pick is never also marked.
-pub fn decide(cat: &Catalog, picks: &[i64], rejects: &[i64], undecided: &[i64]) -> Result<usize> {
-    let db = cat.db();
-    let tx = db.unchecked_transaction()?;
-    let mut n = 0;
-    for id in picks {
-        n += tx.execute("UPDATE photos SET picked = 1, marked = 0 WHERE id = ?1", [id])?;
-    }
-    for id in rejects {
-        n += tx.execute("UPDATE photos SET picked = 0, marked = 1 WHERE id = ?1", [id])?;
-    }
-    for id in undecided {
-        n += tx.execute("UPDATE photos SET picked = 0, marked = 0 WHERE id = ?1", [id])?;
-    }
-    tx.commit()?;
-    Ok(n)
 }
 
 /// One photo's measures and problems, for `shoebox-cli measure`.
@@ -1461,9 +1424,9 @@ mod tests {
         let burst = &stacks[0];
         assert_eq!(burst.keeper, 1);
         let s: Vec<Suggest> = burst.frames.iter().map(|f| f.suggest).collect();
-        assert_eq!(s, [Suggest::Reject, Suggest::Pick, Suggest::Reject]);
+        assert_eq!(s, [Suggest::Reject, Suggest::Keep, Suggest::Reject]);
         assert_eq!(burst.frames[0].reasons[0], "Same shot: frame 2 is better");
-        assert_eq!(stacks[1].frames[0].suggest, Suggest::Pick);
+        assert_eq!(stacks[1].frames[0].suggest, Suggest::Keep);
 
         // Without descriptions, only frames a second apart are one burst.
         let stacks = suggest(vec![frame(1, 100, None, 0.5), frame(2, 101, None, 0.2), frame(3, 110, None, 0.2)]);
@@ -1485,12 +1448,12 @@ mod tests {
         ]);
         assert_eq!(stacks.len(), 1);
         let s: Vec<Suggest> = stacks[0].frames.iter().map(|f| f.suggest).collect();
-        assert_eq!(s, [Suggest::Pick, Suggest::Pick, Suggest::Reject]);
+        assert_eq!(s, [Suggest::Keep, Suggest::Keep, Suggest::Reject]);
         assert_eq!(stacks[0].frames[1].reasons[0], "The best of these 2 frames");
         assert_eq!(stacks[0].frames[0].reasons[0], "Another version of the same frame");
         // A lone RAW and its JPEG: both kept, neither "the same shot".
         let stacks = suggest(vec![named(1, 100, 0.4, "IMG_0001.CR2"), named(2, 100, 0.3, "IMG_0001.JPG")]);
-        assert!(stacks[0].frames.iter().all(|f| f.suggest == Suggest::Pick), "{:?}", stacks[0].frames);
+        assert!(stacks[0].frames.iter().all(|f| f.suggest == Suggest::Keep), "{:?}", stacks[0].frames);
     }
 
     #[test]

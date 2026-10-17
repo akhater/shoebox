@@ -314,11 +314,9 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V15} PRAGMA user_version = 15; COMMIT;"))?;
     }
     if version < 16 {
-        // Culling: picked as a keeper. Never also marked for deletion.
-        // Safe to run again on a catalog that already has it.
-        let has_picked = conn.prepare("SELECT 1 FROM pragma_table_info('photos') WHERE name = 'picked'")?.exists([])?;
-        let picked = if has_picked { "" } else { "ALTER TABLE photos ADD COLUMN picked INTEGER NOT NULL DEFAULT 0;" };
-        conn.execute_batch(&format!("BEGIN; {picked} PRAGMA user_version = 16; COMMIT;"))?;
+        // Nothing: a "picked" column tried while Cull was built, then dropped.
+        // Catalogs that got it keep it, unused; the version stays in step.
+        conn.execute_batch("PRAGMA user_version = 16;")?;
     }
     Ok(())
 }

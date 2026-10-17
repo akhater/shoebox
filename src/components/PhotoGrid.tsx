@@ -22,8 +22,6 @@ interface Props {
   onOpen: (index: number) => void;
   /** Delete: mark (or unmark) these photos for deletion. */
   onMark: (ids: number[], marked: boolean) => void;
-  /** P: keep these photos (decided: not to delete), or undo that. */
-  onPick: (ids: number[], picked: boolean) => void;
   /** T: tag these photos. */
   onTag: (ids: number[]) => void;
   /** False while something covers the grid (viewer, dialog): keys are theirs. */
@@ -241,17 +239,6 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
         p.onMark(ids, !allMarked);
         break;
       }
-      case "p":
-      case "P": {
-        if (ctrl) return;
-        const ids = list.ids.filter((id) => selected.has(id));
-        if (!ids.length && cur >= 0) ids.push(list.ids[cur]);
-        if (!ids.length) return;
-        const pos = new Map(list.ids.map((id, i) => [id, i]));
-        const allPicked = ids.every((id) => list.picked[pos.get(id)!] === 1);
-        p.onPick(ids, !allPicked);
-        break;
-      }
       default:
         return;
     }
@@ -292,7 +279,6 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                 const state = list.state[t.index];
                 const preview = list.preview[t.index];
                 const marked = list.marked[t.index] === 1;
-                const picked = list.picked[t.index] === 1;
                 const problems = problemsOf(list.flags[t.index] ?? 0);
                 return (
                   <button
@@ -310,9 +296,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                     title={
                       marked
                         ? "Marked for deletion (Delete to unmark)"
-                        : picked
-                          ? "Kept: not to be deleted (P to undo)"
-                          : state === 1
+                        : state === 1
                           ? "Not reachable now: disk unplugged or folder not found"
                           : state === 0
                             ? "Missing: not found where it was"

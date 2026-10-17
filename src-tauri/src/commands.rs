@@ -754,18 +754,6 @@ pub async fn cull_shoot(state: State<'_, AppState>, scope: Scope, filters: Optio
     blocking(move || quality.shoot(&cat, &search, &scope, &filters.unwrap_or_default())).await
 }
 
-/// Cull's decisions: photos picked, rejected (marked for deletion), or neither.
-#[tauri::command]
-pub async fn cull_decide(
-    state: State<'_, AppState>,
-    picks: Vec<i64>,
-    rejects: Vec<i64>,
-    undecided: Vec<i64>,
-) -> Res<usize> {
-    let cat = state.cat.clone();
-    in_order(move || cull::decide(&cat, &picks, &rejects, &undecided)).await
-}
-
 /// Looks closer at these photos' originals (those plugged in) in the
 /// background: `cull-progress` events, and `cull-changed` as measures come in.
 #[tauri::command]

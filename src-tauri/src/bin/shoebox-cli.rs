@@ -128,8 +128,8 @@
 //!                                              delete it (Recycle Bin; removable media for good),
 //!                                              on the listed disks or every disk in the plan
 //!
-//! Cull's assistant (JSON out). It only suggests: a pick is a flag, a reject is a
-//! mark for deletion as above, and neither touches a file:
+//! Cull's assistant (JSON out). It only suggests, keep or reject; a reject is a mark
+//! for deletion as above (`mark` / `unmark`), and nothing touches a file:
 //!   shoebox-cli quality                   measure the photos not measured yet, from their
 //!                                         previews (the window does it in the background)
 //!   shoebox-cli measure <photo-id>...     a photo's measures and what's wrong with it. Blur is
@@ -138,13 +138,12 @@
 //!   shoebox-cli cull [filters] [scope] [--closer]   a view as a shoot, as Cull shows it (up to
 //!                                         5,000 photos: a folder or a day): bursts gathered in
 //!                                         stacks, each frame's problems, and Cull's suggestion
-//!                                         (pick, reject, none) with the reasons. --closer first
+//!                                         (keep, reject, none) with the reasons. --closer first
 //!                                         looks closer at the originals plugged in (read at half
 //!                                         size, read-only), which shows a photo only soft at 100%;
 //!                                         originals it couldn't read are listed under "unreadable", with why
-//!   shoebox-cli cull-accept [filters] [scope]   do what Cull suggests for the frames not decided
-//!                                         yet: picks picked, rejects marked for deletion
-//!   shoebox-cli pick <photo-id>... | unpick <photo-id>...   a pick is never also marked
+//!   shoebox-cli cull-accept [filters] [scope]   mark for deletion what Cull suggests rejecting
+//!                                         (frames not marked yet)
 
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::paths::DataDir;
@@ -538,7 +537,6 @@ fn main() -> anyhow::Result<()> {
                     "name": d.files.first().map(|f| f.name.clone()),
                     "state": state,
                     "marked": list.marked[i] == 1,
-                    "picked": list.picked[i] == 1,
                     // On a person: found in it since the user last looked at them.
                     "new": list.fresh[i] == 1,
                 }));
@@ -739,18 +737,9 @@ fn main() -> anyhow::Result<()> {
             if cmd == "cull" {
                 println!("{}", serde_json::to_string_pretty(&shoot)?);
             } else {
-                let (picks, rejects) = shoot.suggested();
-                let n = cull::decide(&cat, &picks, &rejects, &[])?;
-                println!("{}", serde_json::json!({ "picked": picks.len(), "rejected": rejects.len(), "changed": n }));
+                let rejects = shoot.suggested();
+                println!("{}", serde_json::json!({ "marked": organize::mark(&cat, &rejects, true)? }));
             }
-        }
-        Some(cmd @ ("pick" | "unpick")) => {
-            let ids = args[1..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
-            if ids.is_empty() {
-                anyhow::bail!("{cmd} <photo-id>...");
-            }
-            let n = if cmd == "pick" { cull::decide(&cat, &ids, &[], &[])? } else { cull::unpick(&cat, &ids)? };
-            println!("{}", serde_json::json!({ cmd: n }));
         }
         Some("delete-marked") => {
             let token = args.get(1).ok_or_else(|| anyhow::anyhow!("delete-marked <token> [volume-id...]"))?;
@@ -761,7 +750,7 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&organize::delete_confirmed(&cat, token, &disks)?)?);
         }
         _ => eprintln!(
-            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope] | pick <id>... | unpick <id>..."
+            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope]"
         ),
     }
     Ok(())

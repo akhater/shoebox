@@ -14,11 +14,12 @@ Newest first. Same format and versioning as Argentum.
   as one frame. Each frame says what's wrong with it - blurry everywhere
   (with the shutter speed when it was slow for the lens), a face out of focus
   while something else is sharp, very dark, highlights blown, nothing in it
-  (a lens cap, a pocket) - and what Cull suggests: keep or reject. P keeps,
-  X rejects, U undecides, Enter does what Cull suggests for the shot and
-  moves on, and **Accept all suggestions** does it for the whole shoot. Ctrl or
-  Shift click selects several frames, or several shots in the list on the
-  left, and P, X or U then applies to all of them. Z or a click shows the
+  (a lens cap, a pocket) - and what Cull suggests: keep or reject. Culling is trash or not: X
+  rejects, P or K takes a frame back out, Enter rejects what Cull suggests
+  rejecting in the shot and moves on, and **Accept all suggestions** does it
+  for the whole shoot. Ctrl or Shift click selects several frames, or
+  several shots in the list on the left, and X or P then applies to all of
+  them. Z or a click shows the
   frame at 100% from its original, centred on the face or where you
   clicked; drag to move, and the burst's other frames open at the same
   spot, to compare their sharpness. A reject is a mark for deletion, as
@@ -28,16 +29,13 @@ Newest first. Same format and versioning as Argentum.
   (read-only) and finds the frames that are only soft at 100%; an original
   it can't read is named, with why, and not offered again. The measures
   live in `quality.db` beside the catalog: they can always be made again.
-- **Keep.** P in the grid keeps the selected photos (decided: not to be
-  deleted) or undoes it; a kept photo is never also marked for deletion,
-  and carries no mark (its hover text says so). The filter bar has a
-  **Cull** filter: kept, rejected, not decided. A toolbar toggle, off by
-  default and remembered like the file type's, shows what Cull found wrong
-  on each thumbnail, the reasons on hover.
+- **What Cull found, on thumbnails.** A toolbar toggle, off by default and
+  remembered like the file type's, shows on each thumbnail what Cull found
+  wrong, the reasons on hover.
 - `shoebox-cli quality` measures the photos not measured yet, `measure`
   shows a photo's measures and problems, `cull` gives a view as Cull shows
-  it (`--closer` looks at the originals first), `cull-accept` does what it
-  suggests, and `pick` / `unpick` set the flag.
+  it (`--closer` looks at the originals first), and `cull-accept` marks the
+  rejects it suggests.
 
 ## 26.42.4 - 2026-10-17
 

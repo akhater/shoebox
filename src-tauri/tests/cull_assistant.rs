@@ -1,9 +1,9 @@
 //! Cull's assistant on a scanned folder: photos are measured from their
 //! previews, the blurry and the empty frame are found, frames a second apart
 //! make one stack whose sharpest frame is kept, a closer look at the
-//! originals finds the frame only soft at 100%, and the user's decisions are
-//! picks or marks - a pick is never also marked. Measures are kept apart
-//! from the catalog and read again when it opens.
+//! originals finds the frame only soft at 100%, and accepting its
+//! suggestions marks the rejects for deletion. Measures are kept apart from
+//! the catalog and read again when it opens.
 //!
 //! Lives here, not in src/, because it writes sample photos: no file under
 //! src/ outside paths.rs may hold file-writing code (promise 1).
@@ -11,7 +11,7 @@
 
 use image::{Rgb, RgbImage};
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
-use shoebox_lib::cull::{self, Problem, QualityIndex, Suggest};
+use shoebox_lib::cull::{Problem, QualityIndex, Suggest};
 use shoebox_lib::organize;
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::scan_root;
@@ -41,7 +41,7 @@ fn id_of(cat: &Catalog, name: &str) -> i64 {
 }
 
 #[test]
-fn a_shoot_is_measured_stacked_and_decided() {
+fn a_shoot_is_measured_stacked_and_its_rejects_marked() {
     let base = std::env::temp_dir().join("shoebox-cull-assistant");
     let _ = std::fs::remove_dir_all(&base);
     let photos = base.join("photos");
@@ -78,7 +78,7 @@ fn a_shoot_is_measured_stacked_and_decided() {
         shoot.stacks.iter().map(|s| s.frames.iter().map(|f| f.suggest).collect()).collect();
     assert_eq!(
         suggested,
-        [vec![Suggest::Reject, Suggest::Pick], vec![Suggest::Reject], vec![Suggest::Reject], vec![Suggest::Pick]],
+        [vec![Suggest::Reject, Suggest::Keep], vec![Suggest::Reject], vec![Suggest::Reject], vec![Suggest::Keep]],
         "{:#?}",
         shoot.stacks
     );
@@ -105,32 +105,18 @@ fn a_shoot_is_measured_stacked_and_decided() {
     assert_eq!(burst.frames[0].problems, [Problem::Soft], "{:?}", quality.report(&cat, ids[0]).unwrap().quality);
     assert!(burst.frames[1].problems.is_empty(), "{:?}", quality.report(&cat, ids[1]).unwrap().quality);
 
-    // What Cull suggests, done: the keepers picked, the rest marked.
-    let (picks, rejects) = shoot.suggested();
-    assert_eq!((picks.as_slice(), rejects.as_slice()), (&[ids[1], ids[4]][..], &[ids[0], ids[2], ids[3]][..]));
-    cull::decide(&cat, &picks, &rejects, &[]).unwrap();
-    let picked = |f: &[&str]| {
-        let filters = Filters { cull: f.iter().map(|s| s.to_string()).collect(), ..Default::default() };
-        cat.list_photos(&scope, Sort::Oldest, &filters).unwrap().ids
-    };
-    assert_eq!(picked(&["picked"]), [ids[1], ids[4]]);
-    assert_eq!(picked(&["rejected"]), [ids[0], ids[2], ids[3]]);
-    assert!(picked(&["undecided"]).is_empty());
-    // Decided frames get no new suggestion to accept.
+    // What Cull suggests, done: the rejects marked for deletion, nothing else.
+    let rejects = shoot.suggested();
+    assert_eq!(rejects, [ids[0], ids[2], ids[3]]);
+    organize::mark(&cat, &rejects, true).unwrap();
+    let marked = cat.list_photos(&Scope::Marked, Sort::Oldest, &Filters::default()).unwrap().ids;
+    assert_eq!(marked, [ids[0], ids[2], ids[3]]);
+    // Marked frames get no new suggestion to accept; one taken back is suggested again.
     let shoot = quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap();
-    assert_eq!(shoot.suggested(), (vec![], vec![]));
-    let facets = cat.facets(&scope, &Filters::default()).unwrap();
-    let counts: Vec<(String, i64)> = facets.cull.iter().map(|v| (v.value.clone(), v.count)).collect();
-    assert_eq!(counts, [("picked".to_string(), 2), ("rejected".to_string(), 3)]);
-
-    // A mark takes the pick away; a pick takes the mark away.
-    organize::mark(&cat, &[ids[1]], true).unwrap();
-    assert_eq!(picked(&["picked"]), [ids[4]]);
-    cull::decide(&cat, &[ids[0]], &[], &[]).unwrap();
-    assert_eq!(picked(&["picked"]), [ids[0], ids[4]]);
-    assert_eq!(picked(&["rejected"]), [ids[1], ids[2], ids[3]]);
-    cull::unpick(&cat, &[ids[0]]).unwrap();
-    assert_eq!(picked(&["undecided"]), [ids[0]]);
+    assert!(shoot.suggested().is_empty());
+    organize::mark(&cat, &[ids[2]], false).unwrap();
+    let shoot = quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap();
+    assert_eq!(shoot.suggested(), [ids[2]]);
 
     // The measures are kept: opened again, nothing to measure, closer looks still there.
     drop(quality);

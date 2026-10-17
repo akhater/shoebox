@@ -830,7 +830,6 @@ pub fn run() {
             commands::mark_photos,
             commands::unmark_all,
             commands::cull_shoot,
-            commands::cull_decide,
             commands::cull_look_closer,
             commands::cull_stop,
             commands::cull_progress,

@@ -2742,9 +2742,6 @@ button {
   align-items: center;
   gap: 5px;
 }
-.cull-count.picked {
-  color: var(--on);
-}
 .cull-count.rejected {
   color: var(--warn);
 }
@@ -2784,9 +2781,6 @@ button {
 .cull-shot.current {
   border-color: var(--accent);
 }
-.cull-shot.done img {
-  opacity: 0.45;
-}
 .cull-shot-count {
   position: absolute;
   right: 4px;
@@ -2807,9 +2801,6 @@ button {
   padding: 3px;
   border-radius: 50%;
   background: rgba(10, 10, 12, 0.75);
-}
-.cull-shot-done.picked {
-  color: var(--on);
 }
 .cull-shot-done.rejected {
   color: var(--warn);
@@ -2854,9 +2845,6 @@ button {
   font-size: 13px;
   font-weight: 600;
 }
-.cull-stamp.picked {
-  color: var(--on);
-}
 .cull-stamp.rejected {
   color: var(--warn);
 }
@@ -2874,7 +2862,7 @@ button {
 .cull-suggest {
   font-weight: 600;
 }
-.cull-suggest.pick {
+.cull-suggest.keep {
   color: var(--on);
 }
 .cull-suggest.reject {
@@ -2916,9 +2904,6 @@ button {
 .cull-frame.rejected img {
   filter: grayscale(0.7) brightness(0.45);
 }
-.cull-frame.picked {
-  box-shadow: inset 0 0 0 2px var(--on);
-}
 .cull-keeper {
   position: absolute;
   left: 4px;
@@ -2936,13 +2921,12 @@ button {
   background: rgba(10, 10, 12, 0.75);
   color: var(--muted);
 }
-.cull-mark.picked,
-.cull-mark.pick {
-  color: var(--on);
-}
-.cull-mark.rejected,
-.cull-mark.reject {
+.cull-mark.rejected {
   color: var(--warn);
+}
+/* Cull would reject it; not marked yet. */
+.cull-mark.suggested {
+  color: var(--muted);
 }
 .cull-keys {
   flex: none;

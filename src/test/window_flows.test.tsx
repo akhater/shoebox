@@ -126,16 +126,21 @@ describe("marking for deletion", () => {
 describe("Cull", () => {
   /** The frame shown big in Cull, by its preview. */
   const cullPhoto = (host: HTMLElement) => Number(/preview\/(\d+)/.exec(host.querySelector<HTMLImageElement>(".cull-photo img")!.src)![1]);
-  const decisions = (be: ReturnType<typeof fakeBackend>, from: number) =>
-    be.calls.slice(from).filter((c) => c.cmd === "cull_decide").map((c) => c.args);
+  const marks = (be: ReturnType<typeof fakeBackend>, from: number) =>
+    be.calls.slice(from).filter((c) => c.cmd === "mark_photos").map((c) => c.args);
 
-  test("a folder as shots: Enter does what Cull suggests for a shot, P and X decide a frame, Esc goes back to the grid", async () => {
-    const be = fakeBackend();
-    const host = await renderApp();
-    await click(sidebarItem(host, "Trip"));
+  /** Opens Cull on a source. */
+  const openCull = async (host: HTMLElement, source: string) => {
+    await click(sidebarItem(host, source));
     await wait(100);
     await click(byText(host, ".toolbar button", "Cull"));
     await wait(100);
+  };
+
+  test("a folder as shots: Enter rejects what Cull suggests in a shot, X rejects a frame, P keeps it, Esc goes back", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await openCull(host, "Trip");
     expect(title(host)).toBe("Cull · Trip");
     // The burst (301, 302), then 303 and the blurry 304: three shots, from the burst's keeper.
     expect(host.querySelectorAll(".cull-shot")).toHaveLength(3);
@@ -145,8 +150,8 @@ describe("Cull", () => {
     let from = be.calls.length;
     await key(document.body, "Enter");
     await wait(50);
-    expect(decisions(be, from)).toEqual([{ picks: [302], rejects: [301], undecided: [] }]);
-    // On to the next shot. X rejects it (and moves on), P picks the blurry one anyway.
+    expect(marks(be, from)).toEqual([{ ids: [301], marked: true }]);
+    // On to the next shot. X rejects it (and moves on); P keeps the blurry one anyway.
     expect(cullPhoto(host)).toBe(303);
     from = be.calls.length;
     await key(document.body, "x");
@@ -155,45 +160,34 @@ describe("Cull", () => {
     expect(host.querySelector(".cull-says")!.textContent).toMatch(/Cull suggests: reject.*Blurry everywhere/);
     await key(document.body, "p");
     await wait(50);
-    expect(decisions(be, from)).toEqual([
-      { picks: [], rejects: [303], undecided: [] },
-      { picks: [304], rejects: [], undecided: [] },
+    expect(marks(be, from)).toEqual([
+      { ids: [303], marked: true },
+      { ids: [304], marked: false },
     ]);
-    expect(be.picked).toEqual(new Set([302, 304]));
     expect(be.marked).toEqual(new Set([301, 303]));
 
     await key(document.body, "Escape");
     await wait(100);
     expect(title(host)).toBe("Trip");
-    // Kept means only "not to delete": no mark on the tile, said on hover.
-    expect(tile(host, 302).querySelector(".badge")).toBeNull();
-    expect(tile(host, 302).title).toBe("Kept: not to be deleted (P to undo)");
     expect(tile(host, 301).classList).toContain("is-marked");
+    // Kept is nothing: no mark, no word.
+    expect(tile(host, 302).querySelector(".badge")).toBeNull();
+    expect(tile(host, 302).title).toBe("");
   });
 
-  test("Accept all suggestions decides every frame not decided yet", async () => {
+  test("Accept all suggestions rejects what Cull suggests rejecting, where not marked yet", async () => {
     const be = fakeBackend();
     const host = await renderApp();
-    await click(sidebarItem(host, "Fast"));
-    await wait(100);
-    await click(byText(host, ".toolbar button", "Cull"));
-    await wait(100);
-    await key(document.body, "p"); // 202, the keeper, picked by hand
+    await openCull(host, "Fast");
+    await key(document.body, "x"); // 202, the keeper, rejected by hand
     await wait(30);
     const from = be.calls.length;
     await click(byText(host, ".cull-head button", /Accept all suggestions/));
     await wait(50);
-    expect(decisions(be, from)).toEqual([{ picks: [203], rejects: [201, 204], undecided: [] }]);
+    expect(marks(be, from)).toEqual([{ ids: [201, 204], marked: true }]);
+    expect(be.marked).toEqual(new Set([201, 202, 204]));
     expect(byText(host, ".cull-head button", /Accept all suggestions/).hasAttribute("disabled")).toBe(true);
   });
-
-  /** Opens Cull on a source. */
-  const openCull = async (host: HTMLElement, source: string) => {
-    await click(sidebarItem(host, source));
-    await wait(100);
-    await click(byText(host, ".toolbar button", "Cull"));
-    await wait(100);
-  };
 
   test("the Cull button says what it will cull", async () => {
     fakeBackend();
@@ -224,7 +218,7 @@ describe("Cull", () => {
     expect(title(host)).toBe("Trip");
   });
 
-  test("Ctrl or Shift click selects several frames or shots: P and X act on them all", async () => {
+  test("Ctrl or Shift click selects several frames or shots: X and P act on them all", async () => {
     const be = fakeBackend();
     const host = await renderApp();
     await openCull(host, "Trip");
@@ -234,15 +228,23 @@ describe("Cull", () => {
     let from = be.calls.length;
     await key(document.body, "x");
     await wait(30);
-    expect(decisions(be, from)).toEqual([{ picks: [], rejects: [301, 302], undecided: [] }]);
+    expect(marks(be, from)).toEqual([{ ids: [301, 302], marked: true }]);
     expect(host.querySelector(".cull-selected")).toBeNull();
     // The second and third shots.
     await click(host.querySelectorAll(".cull-shot")[1]);
     await click(host.querySelectorAll(".cull-shot")[2], { shiftKey: true });
     from = be.calls.length;
-    await key(document.body, "p");
+    await key(document.body, "x");
     await wait(30);
-    expect(decisions(be, from)).toEqual([{ picks: [303, 304], rejects: [], undecided: [] }]);
+    expect(marks(be, from)).toEqual([{ ids: [303, 304], marked: true }]);
+    // Then K takes them all back out.
+    await click(host.querySelectorAll(".cull-shot")[1]);
+    await click(host.querySelectorAll(".cull-shot")[2], { shiftKey: true });
+    from = be.calls.length;
+    await key(document.body, "k");
+    await wait(30);
+    expect(marks(be, from)).toEqual([{ ids: [303, 304], marked: false }]);
+    expect(be.marked).toEqual(new Set([301, 302]));
   });
 
   test("originals Look closer couldn't read are named, with why", async () => {
@@ -268,8 +270,8 @@ describe("Cull", () => {
     expect(shoots()).toBe(before);
   });
 
-  test("in the grid, P keeps the selected photo; what Cull found shows on thumbnails only when asked", async () => {
-    const be = fakeBackend();
+  test("what Cull found shows on thumbnails only when asked", async () => {
+    fakeBackend();
     const host = await renderApp();
     const toggle = () => host.querySelector<HTMLElement>('.toolbar [aria-pressed][title*="what Cull found"]')!;
     expect(tile(host, 204).querySelector(".badge.problem")).toBeNull();
@@ -278,14 +280,6 @@ describe("Cull", () => {
     expect(tile(host, 204).querySelector(".badge.problem")!.getAttribute("title")).toBe("Blurry");
     expect(tile(host, 203).querySelector(".badge.problem")).toBeNull();
     expect(localStorage.getItem("shoebox.showProblems")).toBe("1");
-    await click(tile(host, 203));
-    await key(scroller(host), "p");
-    expect(tile(host, 203).title).toBe("Kept: not to be deleted (P to undo)"); // before the backend answers
-    await wait(50);
-    expect(be.picked).toEqual(new Set([203]));
-    await key(scroller(host), "p");
-    await wait(50);
-    expect(be.picked.size).toBe(0);
     localStorage.removeItem("shoebox.showProblems");
   });
 });

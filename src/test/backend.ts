@@ -55,7 +55,6 @@ export interface Call {
 export function fakeBackend() {
   const photos: Photo[] = ROOTS.flatMap((r) => photosOf(r.id).map((id) => ({ id, root: r.id, taken: JAN_2026 + id * 3600 })));
   const marked = new Set<number>();
-  const picked = new Set<number>();
   /** Originals Cull couldn't read for a closer look (a test sets them). */
   let unreadable: Shoot["unreadable"] = [];
   let people: Person[] = [
@@ -167,7 +166,6 @@ export function fakeBackend() {
     ext: ps.map(() => "jpg"),
     raw: ps.map(() => 0),
     fresh: ps.map(() => 0),
-    picked: ps.map((p) => +picked.has(p.id)),
     // The fourth photo of each source is blurry.
     flags: ps.map((p) => (p.id % 10 === 4 ? 4 : 0)),
   });
@@ -185,7 +183,6 @@ export function fakeBackend() {
       w: 150,
       h: 100,
       rev: 1,
-      picked: picked.has(p.id),
       marked: marked.has(p.id),
       suggest,
       reasons,
@@ -202,12 +199,12 @@ export function fakeBackend() {
       const prev = stacks[stacks.length - 1];
       if (n === 2 && prev?.frames[0].id === p.id - 1) {
         prev.frames[0] = { ...prev.frames[0], suggest: "reject", reasons: ["Same shot: frame 2 is better"] };
-        prev.frames.push(frame(p, "pick", ["The best of these 2 frames"]));
+        prev.frames.push(frame(p, "keep", ["The best of these 2 frames"]));
         prev.keeper = 1;
       } else if (n === 4) {
         stacks.push({ frames: [frame(p, "reject", ["Blurry everywhere: shake, motion or focus missed"], ["blurry"])], keeper: 0 });
       } else {
-        stacks.push({ frames: [frame(p, "pick", [])], keeper: 0 });
+        stacks.push({ frames: [frame(p, "keep", [])], keeper: 0 });
       }
     }
     return { photos: ps.length, measured: ps.length, closer: 0, described: ps.length, canLookCloser: ps.map((p) => p.id), unreadable, stacks };
@@ -216,7 +213,7 @@ export function fakeBackend() {
   const sorted = (ps: Photo[], sort: Sort) =>
     sort === "newest" ? [...ps].sort((a, b) => b.taken - a.taken) : [...ps].sort((a, b) => a.taken - b.taken);
 
-  const facets = (): Facets => ({ dates: [], cameras: [], lenses: [], types: [], status: [], people: [], tags: [], cull: [] });
+  const facets = (): Facets => ({ dates: [], cameras: [], lenses: [], types: [], status: [], people: [], tags: [] });
 
   const detail = (id: number): PhotoDetail => {
     const root = ROOTS.find((r) => r.id === photos.find((p) => p.id === id)?.root)!;
@@ -291,22 +288,10 @@ export function fakeBackend() {
       case "tags_all":
         return [];
       case "mark_photos":
-        for (const id of a.ids as number[]) {
-          if (a.marked) {
-            marked.add(id);
-            picked.delete(id);
-          } else marked.delete(id);
-        }
+        for (const id of a.ids as number[]) (a.marked ? marked.add(id) : marked.delete(id));
         return (a.ids as number[]).length;
       case "cull_shoot":
         return shootOf(sorted(inScope(a.scope as Scope), "oldest"));
-      case "cull_decide": {
-        const [picks, rejects, undecided] = [a.picks, a.rejects, a.undecided] as number[][];
-        for (const id of picks) (picked.add(id), marked.delete(id));
-        for (const id of rejects) (marked.add(id), picked.delete(id));
-        for (const id of undecided) (marked.delete(id), picked.delete(id));
-        return picks.length + rejects.length + undecided.length;
-      }
       case "cull_progress":
       case "cull_look_closer":
       case "cull_stop":
@@ -413,7 +398,6 @@ export function fakeBackend() {
     /** Makes every answer to `cmd` take `ms` longer. */
     delay: (cmd: string, ms: number) => cmdDelays.set(cmd, ms),
     marked,
-    picked,
     /** What Cull says it couldn't read. */
     unreadableOriginals: (u: Shoot["unreadable"]) => {
       unreadable = u;

@@ -88,7 +88,6 @@ const EMPTY: PhotoList = {
   ext: [],
   raw: [],
   fresh: [],
-  picked: [],
   flags: [],
 };
 
@@ -586,14 +585,9 @@ export default function App() {
   const setMarked = useCallback(
     (ids: number[], marked: boolean) => {
       const set = new Set(ids);
-      // A photo marked is no longer picked.
       setLoaded((v) => ({
         ...v,
-        list: {
-          ...v.list,
-          marked: v.list.marked.map((m, i) => (set.has(v.list.ids[i]) ? +marked : m)),
-          picked: v.list.picked.map((p, i) => (marked && set.has(v.list.ids[i]) ? 0 : p)),
-        },
+        list: { ...v.list, marked: v.list.marked.map((m, i) => (set.has(v.list.ids[i]) ? +marked : m)) },
       }));
       cull
         .mark(ids, marked)
@@ -606,29 +600,6 @@ export default function App() {
     [refresh],
   );
 
-  // Cull's pick, from the grid (P): shown at once, never also marked.
-  const setPicked = useCallback(
-    (ids: number[], picked: boolean) => {
-      const set = new Set(ids);
-      setLoaded((v) => ({
-        ...v,
-        list: {
-          ...v.list,
-          picked: v.list.picked.map((p, i) => (set.has(v.list.ids[i]) ? +picked : p)),
-          marked: v.list.marked.map((m, i) => (picked && set.has(v.list.ids[i]) ? 0 : m)),
-        },
-      }));
-      cull
-        // Unpicked: picked photos are never marked, so they become undecided.
-        .decide(picked ? { picks: ids } : { undecided: ids })
-        .then(() => api.overview().then(setOverview))
-        .catch((e) => {
-          setMessage({ text: String(e), warn: true });
-          refresh();
-        });
-    },
-    [refresh],
-  );
   // Cull's decisions change what the sidebar counts (marked for deletion).
   const cullChanged = useLatest(() => {
     api
@@ -1086,7 +1057,7 @@ export default function App() {
     const filtered = filtersOn(filters) ? ", as the filters narrow them" : "";
     if (current && n > CULL_MAX)
       return `Cull works on up to ${fmtNum(CULL_MAX)} photos at once; this view has ${fmtNum(n)}: pick a folder or a day, or narrow it with the filters`;
-    return `Cull the ${current ? `${fmtNum(n)} ` : ""}photos ${what}${filtered}: bursts gathered, what's blurry or badly exposed, what to keep. Keep (P) and reject (Delete) in the grid too.`;
+    return `Cull the ${current ? `${fmtNum(n)} ` : ""}photos ${what}${filtered}: bursts gathered, what's blurry or badly exposed, what to keep. Delete marks a photo for deletion in the grid too.`;
   }, [query, shown, scope, scopeInfo.title, filters, current]);
   // The people People shows without asking: not ignored, not seen only once.
   const shownPeople = useMemo(() => peopleList.filter((p) => !p.ignored && (p.name || p.photos >= 2)), [peopleList]);
@@ -1509,7 +1480,6 @@ export default function App() {
               onOpen={openPhoto}
               onSelect={selectPhotos}
               onMark={setMarked}
-              onPick={setPicked}
               onTag={setTagging}
               selected={selected}
               keyboard={
