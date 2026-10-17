@@ -1015,7 +1015,7 @@ impl Catalog {
         let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
 
         // files() leaves out the databases (snapshotted, not copied): count them here.
-        let dbs = ["faces.db", "search.db"].map(|n| self.data.root.join(n));
+        let dbs = paths::SIDE_DATABASES.map(|n| self.data.root.join(n));
         let bytes: u64 = self
             .data
             .files()
@@ -1074,7 +1074,7 @@ impl Catalog {
         }
         let lock = self.data.begin_move(&to)?;
         let steps = || -> Result<()> {
-            for db in ["faces.db", "search.db"] {
+            for db in paths::SIDE_DATABASES {
                 let src = self.data.root.join(db);
                 if src.is_file() {
                     paths::snapshot_sqlite(&src, &to)?;
@@ -1118,7 +1118,7 @@ impl Catalog {
             self.data.snapshot_into(&db, &dir.join("catalog.db"))?;
         }
         files.push("catalog.db".to_string());
-        for name in ["faces.db", "search.db"] {
+        for name in paths::SIDE_DATABASES {
             let src = self.data.root.join(name);
             if src.is_file() {
                 let conn = Connection::open_with_flags(&src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -1180,6 +1180,34 @@ impl Catalog {
             }
         }
         bail!("No copy of this photo is plugged in")
+    }
+
+    /// The photo's long edge at full size, px, when its files say.
+    pub fn full_size(&self, photo_id: i64) -> Option<u32> {
+        let db = self.read().ok()?;
+        let (w, h): (Option<u32>, Option<u32>) = db
+            .query_row("SELECT width, height FROM photos WHERE id = ?1", [photo_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .ok()?;
+        w.max(h).filter(|&l| l > 0)
+    }
+
+    /// Camera, exposure and a file name of each photo, by id (each found
+    /// through its own row, whatever the catalog's size).
+    pub fn shot_info(&self, ids: &[i64]) -> Result<HashMap<i64, crate::cull::ShotInfo>> {
+        let db = self.read()?;
+        let mut stmt = db.prepare(
+            "SELECT p.id, p.camera_shown, p.exposure, p.focal, (SELECT MIN(f.name) FROM files f WHERE f.photo_id = p.id)
+               FROM photos p WHERE p.id IN (SELECT value FROM json_each(?1))",
+        )?;
+        let out = stmt
+            .query_map([serde_json::to_string(ids)?], |r| {
+                Ok((
+                    r.get(0)?,
+                    crate::cull::ShotInfo { camera: r.get(1)?, exposure: r.get(2)?, focal: r.get(3)?, name: r.get(4)? },
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(out)
     }
 
     /// Full path of a catalog folder that is there now (disk plugged in, folder found).
@@ -1832,6 +1860,9 @@ pub struct PhotoList {
     pub raw: Vec<i64>,
     /// On a person's page: 1 = they were found in it since the user last looked at them.
     pub fresh: Vec<i64>,
+    /// What Cull found wrong with each photo, as bits of [`crate::cull::Problem`]
+    /// (0: nothing, or not measured yet). Filled by whoever asks with Cull's measures at hand.
+    pub flags: Vec<u32>,
 }
 
 /// Photos per day, for the calendar.

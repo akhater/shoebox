@@ -78,12 +78,18 @@ export function StatusBar({ photo, selected, overview, progress, aiProgress, que
       <footer className="statusbar busy">
         <LoaderCircle size={14} className="spinning" />
         <span>
-          <b>{aiProgress.task === "faces" ? "Finding faces" : "Preparing word search"}</b> · {fmtNum(aiProgress.done)} of{" "}
-          {fmtNum(aiProgress.total)} photos
+          <b>
+            {aiProgress.task === "faces"
+              ? "Finding faces"
+              : aiProgress.task === "quality"
+                ? "Checking sharpness and exposure"
+                : "Preparing word search"}
+          </b>{" "}
+          · {fmtNum(aiProgress.done)} of {fmtNum(aiProgress.total)} photos
           <span className="muted">
-            {" "}
-            · on the {aiProgress.gpu ? "GPU" : "CPU"} ·{" "}
-            {aiProgress.task === "faces" ? "People fills in as it goes" : "search works on the ones done"}
+            {aiProgress.task === "quality"
+              ? " · for Cull's suggestions"
+              : ` · on the ${aiProgress.gpu ? "GPU" : "CPU"} · ${aiProgress.task === "faces" ? "People fills in as it goes" : "search works on the ones done"}`}
           </span>
         </span>
         <span className="grow" />

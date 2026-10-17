@@ -17,6 +17,10 @@ pub struct DataDir {
     pub root: PathBuf,
 }
 
+/// The databases kept beside `catalog.db`: face fingerprints, word search's
+/// descriptions, Cull's measures. They move and are backed up with it.
+pub const SIDE_DATABASES: [&str; 3] = ["faces.db", "search.db", "quality.db"];
+
 /// The Shoebox folder, holding `shoebox.json`: the app's own folder when it
 /// runs portable, otherwise (installed) `~/.shoebox`. An installed app's
 /// folder belongs to its installer (replaced on update, removed on
@@ -311,7 +315,7 @@ impl DataDir {
     /// [`snapshot_db`]) in their place, the catalog's last: only then does the
     /// folder hold a catalog.
     pub fn place_databases(&self) -> io::Result<()> {
-        for name in ["faces.db", "search.db", "catalog.db"] {
+        for name in SIDE_DATABASES.iter().chain(&["catalog.db"]) {
             let staged = staged(&self.root, name);
             if staged.is_file() {
                 std::fs::rename(&staged, self.root.join(name))?;
@@ -588,8 +592,8 @@ fn is_catalog_entry(name: &str, is_dir: bool) -> bool {
     if is_dir {
         return ["previews", "thumbs", "faces", "logs", "backup", OPS_DIR].contains(&n.as_str());
     }
-    let db_file = ["catalog.db", "faces.db", "search.db"]
-        .iter()
+    let db_file = std::iter::once(&"catalog.db")
+        .chain(&SIDE_DATABASES)
         .any(|db| n.strip_prefix(db).is_some_and(|rest| ["", "-wal", "-shm", "-journal", ".tmp"].contains(&rest)));
     db_file || ["settings.json", "moved.txt", ".kopiaignore", MOVE_JOURNAL, MOVE_LOCK].contains(&n.as_str())
 }

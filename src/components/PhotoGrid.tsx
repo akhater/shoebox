@@ -1,6 +1,6 @@
-import { ImageOff, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
+import { Focus, ImageOff, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { BIN, fmtDeleted, fmtNum, thumbUrl, type MissingPhoto, type PhotoList } from "../api";
+import { BIN, fmtDeleted, fmtNum, problemsOf, thumbUrl, type MissingPhoto, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
 import { TimelineRail } from "./TimelineRail";
 
@@ -34,6 +34,8 @@ interface Props {
   flatLabel?: string;
   /** The file type (CR3, JPG...) in a corner of each thumbnail. */
   showType: boolean;
+  /** What Cull found wrong (blurry, dark...) in a corner of each thumbnail. */
+  showProblems: boolean;
   /** Brings this photo to the top of the grid (a day picked in the calendar); a new `seq` each time. */
   jump?: { index: number; seq: number } | null;
   /** The first photo on screen changed (where the calendar opens). */
@@ -280,6 +282,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                 const preview = list.preview[t.index];
                 const marked = list.marked[t.index] === 1;
                 const inBin = state === 0 ? p.binned?.get(id) : undefined;
+                const problems = problemsOf(list.flags[t.index] ?? 0);
                 return (
                   <button
                     key={id}
@@ -332,6 +335,14 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                     {marked && (
                       <span className="badge marked">
                         <Trash2 size={13} />
+                      </span>
+                    )}
+                    {p.showProblems && problems.length > 0 && !marked && (
+                      <span
+                        className={`badge problem ${list.fresh[t.index] === 1 ? "after-new" : ""}`}
+                        title={problems.map((x) => x.label).join(" · ")}
+                      >
+                        <Focus size={13} />
                       </span>
                     )}
                     {p.showType && list.ext[t.index] && (

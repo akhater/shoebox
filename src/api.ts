@@ -207,6 +207,8 @@ export interface PhotoList {
   raw: number[];
   /** On a person's page: 1 = they were found in it since you last looked at them. */
   fresh: number[];
+  /** What Cull found wrong with each photo: bits of PROBLEMS (0 = nothing, or not measured yet). */
+  flags: number[];
 }
 
 export interface FileLoc {
@@ -442,12 +444,80 @@ const deletedFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", tim
 /** When a file went to the bin (seconds since 1970), in this computer's time. */
 export const fmtDeleted = (ts: number) => deletedFmt.format(new Date(ts * 1000));
 
+/** What Cull can find wrong with a photo; `bit` is its bit in PhotoList.flags. */
+export type Problem = "empty" | "dark" | "blurry" | "soft" | "faceSoft" | "blown" | "bright";
+export const PROBLEMS: { problem: Problem; bit: number; label: string }[] = [
+  { problem: "empty", bit: 1, label: "Nothing in it" },
+  { problem: "dark", bit: 2, label: "Very dark" },
+  { problem: "blurry", bit: 4, label: "Blurry" },
+  { problem: "soft", bit: 8, label: "Soft at 100%" },
+  { problem: "faceSoft", bit: 16, label: "Face out of focus" },
+  { problem: "blown", bit: 32, label: "Highlights blown" },
+  { problem: "bright", bit: 64, label: "Very bright" },
+];
+export const problemsOf = (flags: number) => PROBLEMS.filter((p) => flags & p.bit);
+
+/** A frame of a shoot in Cull, with what Cull suggests for it and why. */
+export interface CullFrame {
+  id: number;
+  name: string | null;
+  taken: number;
+  /** 2 = on a plugged-in disk, 1 = unplugged, 0 = missing. */
+  state: number;
+  w: number;
+  h: number;
+  rev: number;
+  /** Marked for deletion. */
+  marked: boolean;
+  suggest: "keep" | "reject" | "none";
+  /** Why, the first one the main reason. */
+  reasons: string[];
+  problems: Problem[];
+  /** Edge blur compared between frames, thousandths of the long edge (lower is sharper). */
+  blur: number | null;
+  /** Measured from the original, not only the preview. */
+  closer: boolean;
+  /** How alike CLIP finds it and the frame before (0..1). */
+  alike: number | null;
+  /** How alike its layout and the frame before's are (-1..1). */
+  framing: number | null;
+  /** Where to look at 100% first: the middle of its largest face (0..1 of the picture). */
+  focus: [number, number] | null;
+}
+/** Frames of the same shot; `keeper` = the one Cull would keep. */
+export interface CullStack {
+  frames: CullFrame[];
+  keeper: number;
+}
+export interface Shoot {
+  photos: number;
+  measured: number;
+  closer: number;
+  described: number;
+  /** Photos whose original is reachable now and not looked at closer yet. */
+  canLookCloser: number[];
+  /** Originals a closer look couldn't read, and why. */
+  unreadable: { id: number; name: string | null; reason: string }[];
+  stacks: CullStack[];
+}
+export interface CloserProgress {
+  done: number;
+  total: number;
+  finished: boolean;
+}
+
 /** Culling: marking is catalog-only; files go only after a confirmed plan. */
 export const cull = {
   mark: (ids: number[], marked: boolean) => invoke<number>("mark_photos", { ids, marked }),
   unmarkAll: () => invoke<number>("unmark_all"),
   plan: () => invoke<DeletePlan>("delete_plan"),
   delete: (token: string, volumeIds: number[]) => invoke<DeleteReport>("delete_marked", { token, volumeIds }),
+  /** A view as a shoot: bursts in stacks, problems, suggestions. */
+  shoot: (scope: Scope, filters: Filters) => invoke<Shoot>("cull_shoot", { scope, filters }),
+  /** Measure these photos again from their originals (those plugged in), in the background. */
+  lookCloser: (ids: number[]) => invoke<void>("cull_look_closer", { ids }),
+  stop: () => invoke<void>("cull_stop"),
+  progress: () => invoke<CloserProgress | null>("cull_progress"),
 };
 
 export const thumbUrl = (id: number, rev: number) => `http://shoebox.localhost/thumb/${id}?r=${rev}`;
@@ -511,7 +581,7 @@ export function fmtAgo(ts: number | null) {
 }
 
 export interface AiProgress {
-  task: "search" | "faces";
+  task: "search" | "faces" | "quality";
   done: number;
   total: number;
   gpu: boolean;
@@ -540,6 +610,7 @@ export function headOf(l: PhotoList, n: number): PhotoList {
     ext: l.ext.slice(0, n),
     raw: l.raw.slice(0, n),
     fresh: l.fresh.slice(0, n),
+    flags: l.flags.slice(0, n),
   };
 }
 
