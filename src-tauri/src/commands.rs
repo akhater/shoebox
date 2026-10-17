@@ -9,6 +9,7 @@ use crate::AppState;
 use crate::catalog::{
     Browse, Facets, Filters, FolderCheck, Overview, PhotoDetail, PhotoList, RemoveReport, Scope, Sort, Stats,
 };
+use crate::cull;
 use crate::gear;
 use crate::models;
 use crate::organize::{self, DeletePlan, DeleteReport};
@@ -76,8 +77,13 @@ pub async fn list_photos(
     sort: Option<Sort>,
     filters: Option<Filters>,
 ) -> Res<PhotoList> {
-    let cat = state.cat.clone();
-    blocking(move || cat.list_photos(&scope, sort.unwrap_or_default(), &filters.unwrap_or_default())).await
+    let (cat, quality) = (state.cat.clone(), state.quality.clone());
+    blocking(move || {
+        let mut list = cat.list_photos(&scope, sort.unwrap_or_default(), &filters.unwrap_or_default())?;
+        list.flags = quality.flags(&list.ids);
+        Ok(list)
+    })
+    .await
 }
 
 /// What each filter offers in a scope, with counts.
@@ -210,13 +216,14 @@ pub async fn search_photos(
     filters: Option<Filters>,
 ) -> Res<SearchResult> {
     let filters = filters.unwrap_or_default();
-    let (cat, index) = (state.cat.clone(), state.search.clone());
+    let (cat, index, quality) = (state.cat.clone(), state.search.clone(), state.quality.clone());
     blocking(move || {
         let started = std::time::Instant::now();
         let (hits, cutoff) = index.search(query.trim(), 1000)?;
         let clear_ids: std::collections::HashSet<i64> = hits.iter().filter(|h| h.1 >= cutoff).map(|h| h.0).collect();
         let ranked: Vec<i64> = hits.iter().map(|h| h.0).collect();
-        let list = cat.ranked_in_scope(&ranked, &scope, &filters)?;
+        let mut list = cat.ranked_in_scope(&ranked, &scope, &filters)?;
+        list.flags = quality.flags(&list.ids);
         let clear = list.ids.iter().take_while(|id| clear_ids.contains(id)).count();
         log::info!(
             "search {:?}: {clear} clear + {} possible in {} ms",
@@ -737,6 +744,32 @@ pub async fn mark_photos(state: State<'_, AppState>, ids: Vec<i64>, marked: bool
 pub async fn unmark_all(state: State<'_, AppState>) -> Res<usize> {
     let cat = state.cat.clone();
     in_order(move || organize::unmark_all(&cat)).await
+}
+
+/// Cull: the photos of a view as a shoot - bursts gathered into stacks, what's
+/// wrong with each frame, and what to keep.
+#[tauri::command]
+pub async fn cull_shoot(state: State<'_, AppState>, scope: Scope, filters: Option<Filters>) -> Res<cull::Shoot> {
+    let (cat, quality, search) = (state.cat.clone(), state.quality.clone(), state.search.clone());
+    blocking(move || quality.shoot(&cat, &search, &scope, &filters.unwrap_or_default())).await
+}
+
+/// Looks closer at these photos' originals (those plugged in) in the
+/// background: `cull-progress` events, and `cull-changed` as measures come in.
+#[tauri::command]
+pub fn cull_look_closer(state: State<'_, AppState>, ids: Vec<i64>) {
+    state.closer.push(&ids);
+}
+
+#[tauri::command]
+pub fn cull_stop(state: State<'_, AppState>) {
+    state.closer.stop();
+}
+
+/// The closer look under way, for a Cull view opened midway.
+#[tauri::command]
+pub fn cull_progress(state: State<'_, AppState>) -> Option<cull::CloserProgress> {
+    state.closer.current.lock().unwrap().clone()
 }
 
 /// What "Delete marked files" would remove now, by disk.

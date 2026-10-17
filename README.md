@@ -38,6 +38,13 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   day you took photos.
 - **Culling.** Mark photos as you review them, then send them all to the
   Recycle Bin in one step. A RAW's camera JPEG goes with it.
+- **Cull's assistant.** A shoot one shot at a time: the frames of a burst
+  gathered, the sharpest first in line, and what's wrong with each frame -
+  blurry, a face out of focus, too dark, blown out, nothing in it (lens cap).
+  It only suggests: you reject, take back, or accept its suggestions in one
+  key. Measured from the previews, so unplugged drives too; with the drive
+  connected it looks closer at the originals and finds what is only soft at
+  100%.
 - **Organize folders.** Rename, create and move folders by drag and drop. The
   catalog updates in the same step, with no rescan.
 - **Full-screen viewer**, sharp from the original when its drive is connected,
@@ -146,6 +153,7 @@ shoebox-cli stats                # catalog overview
 shoebox-cli search kids on a beach
 shoebox-cli people               # everyone found, with their names
 shoebox-cli people-check         # likely mix-ups among named people
+shoebox-cli cull '{}' '{"kind":"root","id":1}'   # a folder as Cull shows it: bursts, problems, suggestions
 shoebox-cli models               # which AI models are installed
 shoebox-cli bench                # how fast the main views are on this catalog and computer
 ```

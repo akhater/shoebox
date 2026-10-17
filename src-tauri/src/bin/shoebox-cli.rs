@@ -127,11 +127,28 @@
 //!   shoebox-cli delete-marked <token> [volume-id...]
 //!                                              delete it (Recycle Bin; removable media for good),
 //!                                              on the listed disks or every disk in the plan
+//!
+//! Cull's assistant (JSON out). It only suggests, keep or reject; a reject is a mark
+//! for deletion as above (`mark` / `unmark`), and nothing touches a file:
+//!   shoebox-cli quality                   measure the photos not measured yet, from their
+//!                                         previews (the window does it in the background)
+//!   shoebox-cli measure <photo-id>...     a photo's measures and what's wrong with it. Blur is
+//!                                         a Gaussian sigma in px of the picture measured
+//!                                         ("long" px wide); "close" = measured from the original
+//!   shoebox-cli cull [filters] [scope] [--closer]   a view as a shoot, as Cull shows it (up to
+//!                                         5,000 photos: a folder or a day): bursts gathered in
+//!                                         stacks, each frame's problems, and Cull's suggestion
+//!                                         (keep, reject, none) with the reasons. --closer first
+//!                                         looks closer at the originals plugged in (read at half
+//!                                         size, read-only), which shows a photo only soft at 100%;
+//!                                         originals it couldn't read are listed under "unreadable", with why
+//!   shoebox-cli cull-accept [filters] [scope]   mark for deletion what Cull suggests rejecting
+//!                                         (frames not marked yet)
 
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::{self, Progress};
-use shoebox_lib::{gear, organize, tags};
+use shoebox_lib::{cull, gear, organize, tags};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -686,6 +703,44 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::json!({ "created": organize::create_folder(&cat, vid, parent, name)? }));
         }
         Some("marked") => println!("{}", serde_json::to_string_pretty(&organize::plan(&cat)?)?),
+        Some("quality") => {
+            let quality = cull::QualityIndex::open(&cat)?;
+            let t = std::time::Instant::now();
+            quality.index_pending(&cat, &cancel, &|p| eprint!("\r  measured {}/{}", p.done, p.total))?;
+            eprintln!();
+            println!("{}", serde_json::json!({ "measured": quality.measured(), "seconds": t.elapsed().as_secs_f64() }));
+        }
+        Some("measure") => {
+            let ids = args[1..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+            if ids.is_empty() {
+                anyhow::bail!("measure <photo-id>...");
+            }
+            let quality = cull::QualityIndex::open(&cat)?;
+            let reports = ids.iter().map(|id| quality.report(&cat, *id)).collect::<anyhow::Result<Vec<_>>>()?;
+            println!("{}", serde_json::to_string_pretty(&reports)?);
+        }
+        Some(cmd @ ("cull" | "cull-accept")) => {
+            // shoebox-cli cull [filters JSON] [scope JSON] [--closer]
+            let closer = args[1..].iter().any(|a| a == "--closer");
+            let rest: Vec<&String> = args[1..].iter().filter(|a| *a != "--closer").collect();
+            let filters: Filters = rest.first().map(|f| serde_json::from_str(f)).transpose()?.unwrap_or_default();
+            let scope: Scope = rest.get(1).map(|s| serde_json::from_str(s)).transpose()?.unwrap_or(Scope::All);
+            let quality = cull::QualityIndex::open(&cat)?;
+            let search = shoebox_lib::search::SearchIndex::open(&cat)?;
+            let mut shoot = quality.shoot(&cat, &search, &scope, &filters)?;
+            if closer && !shoot.can_look_closer.is_empty() {
+                quality
+                    .look_closer(&cat, &shoot.can_look_closer, &cancel, &|d, t| eprint!("\r  looked closer {d}/{t}"))?;
+                eprintln!();
+                shoot = quality.shoot(&cat, &search, &scope, &filters)?;
+            }
+            if cmd == "cull" {
+                println!("{}", serde_json::to_string_pretty(&shoot)?);
+            } else {
+                let rejects = shoot.suggested();
+                println!("{}", serde_json::json!({ "marked": organize::mark(&cat, &rejects, true)? }));
+            }
+        }
         Some("delete-marked") => {
             let token = args.get(1).ok_or_else(|| anyhow::anyhow!("delete-marked <token> [volume-id...]"))?;
             let mut disks = args[2..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
@@ -695,7 +750,7 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&organize::delete_confirmed(&cat, token, &disks)?)?);
         }
         _ => eprintln!(
-            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...]"
+            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope]"
         ),
     }
     Ok(())

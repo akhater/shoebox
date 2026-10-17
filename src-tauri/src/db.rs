@@ -313,6 +313,11 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version < 15 {
         conn.execute_batch(&format!("BEGIN; {SCHEMA_V15} PRAGMA user_version = 15; COMMIT;"))?;
     }
+    if version < 16 {
+        // Nothing: a "picked" column tried while Cull was built, then dropped.
+        // Catalogs that got it keep it, unused; the version stays in step.
+        conn.execute_batch("PRAGMA user_version = 16;")?;
+    }
     Ok(())
 }
 

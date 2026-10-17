@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod catalog;
+pub mod cull;
 pub mod db;
 pub mod embedded;
 pub mod faces;
@@ -120,6 +121,8 @@ pub struct AppState {
     pub scans: Arc<ScanQueue>,
     pub search: Arc<search::SearchIndex>,
     pub faces: Arc<faces::FaceIndex>,
+    pub quality: Arc<cull::QualityIndex>,
+    pub closer: Arc<CloserQueue>,
     pub ai: Arc<AiQueue>,
     /// A folder being moved to another disk (one at a time), and its Stop.
     pub moving: Arc<AtomicBool>,
@@ -149,6 +152,65 @@ impl AiQueue {
             k = self.wake.wait(k).unwrap();
         }
         *k = false;
+    }
+}
+
+/// Photos Cull asked to look closer at (their originals), in batches.
+#[derive(Default)]
+pub struct CloserQueue {
+    queue: Mutex<Vec<i64>>,
+    wake: Condvar,
+    cancel: AtomicBool,
+    pub current: Mutex<Option<cull::CloserProgress>>,
+}
+
+impl CloserQueue {
+    pub fn push(&self, ids: &[i64]) {
+        let mut q = self.queue.lock().unwrap();
+        let queued: HashSet<i64> = q.iter().copied().collect();
+        q.extend(ids.iter().filter(|id| !queued.contains(id)));
+        self.wake.notify_one();
+    }
+
+    /// Stops the batch under way and forgets the queued ones.
+    pub fn stop(&self) {
+        self.queue.lock().unwrap().clear();
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    fn take(&self) -> Vec<i64> {
+        let mut q = self.queue.lock().unwrap();
+        while q.is_empty() {
+            q = self.wake.wait(q).unwrap();
+        }
+        std::mem::take(&mut *q)
+    }
+}
+
+/// Looks closer at the photos Cull asks for: their originals, read at half
+/// size from the disks plugged in. Reports `cull-progress`, and `cull-changed`
+/// as the measures come in.
+fn closer_worker(app: AppHandle, cat: Arc<Catalog>, quality: Arc<cull::QualityIndex>, q: Arc<CloserQueue>) {
+    loop {
+        let ids = q.take();
+        q.cancel.store(false, Ordering::Relaxed);
+        let changed = Mutex::new(Instant::now());
+        let progress = |done: u64, total: u64| {
+            let p = cull::CloserProgress { done, total, finished: false };
+            *q.current.lock().unwrap() = Some(p.clone());
+            let _ = app.emit("cull-progress", p);
+            let mut last = changed.lock().unwrap();
+            if last.elapsed() > Duration::from_secs(2) {
+                *last = Instant::now();
+                let _ = app.emit("cull-changed", ());
+            }
+        };
+        if let Err(e) = quality.look_closer(&cat, &ids, &q.cancel, &progress) {
+            log::warn!("cull: looking closer failed: {e:#}");
+        }
+        let last = q.current.lock().unwrap().take().unwrap_or_default();
+        let _ = app.emit("cull-progress", cull::CloserProgress { finished: true, ..last });
+        let _ = app.emit("cull-changed", ());
     }
 }
 
@@ -314,13 +376,15 @@ fn model_worker(app: AppHandle, q: Arc<ModelQueue>, ai: Arc<AiQueue>) {
 }
 
 /// Describes new photos for word search, then finds and groups their faces,
-/// on the GPU, from Shoebox's previews. A feature whose model isn't here
-/// (Settings > AI models) is skipped.
+/// on the GPU, from Shoebox's previews; then measures them for Cull (no
+/// model needed). A feature whose model isn't here (Settings > AI models) is
+/// skipped.
 fn ai_worker(
     app: AppHandle,
     cat: Arc<Catalog>,
     index: Arc<search::SearchIndex>,
     faces: Arc<faces::FaceIndex>,
+    quality: Arc<cull::QualityIndex>,
     q: Arc<AiQueue>,
 ) {
     loop {
@@ -333,7 +397,9 @@ fn ai_worker(
         let usable = |id| models::ready(id) && models::runtime_ready();
         let searched = if usable(models::CLIP) { index.index_pending(&cat, &q.cancel, &report) } else { Ok(()) };
         let found = if usable(models::FACES) { faces.index_pending(&cat, &q.cancel, &report) } else { Ok(()) };
-        let result = searched.and(found);
+        // After faces: a face's sharpness is measured where it was found.
+        let measured = quality.index_pending(&cat, &q.cancel, &report);
+        let result = searched.and(found).and(measured);
         let last = q.current.lock().unwrap().take();
         let mut done = last.unwrap_or_else(|| search::AiProgress { task: "search".into(), ..Default::default() });
         done.finished = true;
@@ -621,6 +687,8 @@ pub fn run() {
     // waits until theirs are read.
     let index = search::SearchIndex::open_in_background(&cat).expect("open search index");
     let face_index = faces::FaceIndex::open_in_background(cat.clone()).expect("open face index");
+    let quality = cull::QualityIndex::open_in_background(&cat).expect("open Cull's measures");
+    let closer = Arc::new(CloserQueue::default());
     let ai = Arc::new(AiQueue::default());
     let model_queue = Arc::new(ModelQueue::default());
     let lens_kick = Arc::new(Kick::default());
@@ -663,6 +731,8 @@ pub fn run() {
             scans: scans.clone(),
             search: index.clone(),
             faces: face_index.clone(),
+            quality: quality.clone(),
+            closer: closer.clone(),
             ai: ai.clone(),
             moving: Arc::default(),
             move_cancel: Arc::default(),
@@ -674,10 +744,13 @@ pub fn run() {
             let (c, q, a, l) = (cat.clone(), scans.clone(), ai.clone(), lens_kick.clone());
             std::thread::Builder::new().name("scan".into()).spawn(move || scan_worker(handle, c, q, a, l))?;
             let handle = app.handle().clone();
-            let (c, i, f, a) = (cat.clone(), index.clone(), face_index.clone(), ai.clone());
-            std::thread::Builder::new().name("ai".into()).spawn(move || ai_worker(handle, c, i, f, a))?;
+            let (c, i, f, qi, a) = (cat.clone(), index.clone(), face_index.clone(), quality.clone(), ai.clone());
+            std::thread::Builder::new().name("ai".into()).spawn(move || ai_worker(handle, c, i, f, qi, a))?;
             // Describe whatever isn't yet, from the start.
             ai.kick();
+            let handle = app.handle().clone();
+            let (c, qi, cq) = (cat.clone(), quality.clone(), closer.clone());
+            std::thread::Builder::new().name("closer".into()).spawn(move || closer_worker(handle, c, qi, cq))?;
             let handle = app.handle().clone();
             let (c, q, l) = (cat.clone(), scans.clone(), lens_kick.clone());
             std::thread::Builder::new().name("volumes".into()).spawn(move || volume_watcher(handle, c, q, l))?;
@@ -756,6 +829,10 @@ pub fn run() {
             commands::gear_split,
             commands::mark_photos,
             commands::unmark_all,
+            commands::cull_shoot,
+            commands::cull_look_closer,
+            commands::cull_stop,
+            commands::cull_progress,
             commands::delete_plan,
             commands::delete_marked,
             commands::models_list,

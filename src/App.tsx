@@ -5,8 +5,10 @@ import {
   ArrowLeft,
   CalendarDays,
   Eye,
+  ListChecks,
   EyeOff,
   FileType,
+  Focus,
   Pencil,
   FolderPlus,
   FolderX,
@@ -60,6 +62,7 @@ import {
   updatesApi,
 } from "./api";
 import { CalendarView } from "./components/CalendarView";
+import { CullView } from "./components/CullView";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
 import { StraysDialog } from "./components/StraysDialog";
@@ -85,6 +88,7 @@ const EMPTY: PhotoList = {
   ext: [],
   raw: [],
   fresh: [],
+  flags: [],
 };
 
 /** A per-viewer on/off remembered between sessions (convenience only). */
@@ -115,9 +119,15 @@ function useLatest<A extends unknown[], R>(f: (...args: A) => R) {
   return useCallback((...args: A) => latest.current(...args), []);
 }
 
+/** Cull works on a shoot: up to this many photos at once (as the backend). */
+const CULL_MAX = 5000;
+
+/** What the main area shows: the photo grid, People, or Cull on the photos of the grid. */
+type View = "photos" | "people" | "cull";
+
 /** A place to come back to: the view, what it showed, and the photo looked at. */
 interface Place {
-  view: "photos" | "people";
+  view: View;
   scope: Scope;
   focusId: number | null;
   viewerId: number | null;
@@ -286,6 +296,8 @@ export default function App() {
   const [sort, setSort] = useState<Sort>(loadSort);
   // File type (CR3, JPG...) on each thumbnail.
   const [showType, setShowType] = useRemembered("shoebox.showType", false);
+  // What Cull found wrong (blurry, dark...) on each thumbnail.
+  const [showProblems, setShowProblems] = useRemembered("shoebox.showProblems", false);
   // The sidebar folded to a rail of icons.
   const [folded, setFolded] = useRemembered("shoebox.sidebarFolded", false);
   const sortRef = useRef(sort);
@@ -295,8 +307,8 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [aiProgress, setAiProgress] = useState<AiProgress | null>(null);
   const [showPossible, setShowPossible] = useState(false);
-  // "people" shows the People view instead of the photo grid.
-  const [view, setView] = useState<"photos" | "people">("photos");
+  // "people" shows the People view instead of the photo grid; "cull", Cull on the grid's photos.
+  const [view, setView] = useState<View>("photos");
   const [peopleList, setPeopleList] = useState<Person[]>([]);
   // People's search box: what's typed, and whoever it finds (null: nothing typed).
   const [personTyped, setPersonTyped] = useState("");
@@ -588,6 +600,20 @@ export default function App() {
     [refresh],
   );
 
+  // Cull's decisions change what the sidebar counts (marked for deletion).
+  const cullChanged = useLatest(() => {
+    api
+      .overview()
+      .then(setOverview)
+      .catch(() => {});
+  });
+  const cullError = useLatest((text: string) => setMessage({ text, warn: true }));
+  const closeCull = useLatest(() => {
+    setView("photos");
+    setGridFocus((n) => n + 1);
+    refresh();
+  });
+
   // Drill-downs (People -> a person, a face in the viewer -> their photos)
   // remember where they came from; Back or Escape returns there.
   const drill = (to: Scope) => {
@@ -738,8 +764,10 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning]);
 
+  // (Cull has its own Escape: Done.)
   useEffect(() => {
-    if (!trail.length || calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning) return;
+    if (!trail.length || view === "cull" || calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning)
+      return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const t = e.target as HTMLElement | null;
@@ -748,7 +776,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [trail, calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning, goBack]);
+  }, [trail, view, calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning, goBack]);
 
   // Drag and drop of a folder. Same disk: done at once, with Undo. Another
   // disk: asked first, then copied, checked and the original removed in the
@@ -1006,6 +1034,31 @@ export default function App() {
   }, [scope, overview, peopleList, browse]);
 
   const empty = overview && overview.volumes.length === 0;
+  // What Cull would work on: the photos shown, as filtered.
+  const cullTitle = useMemo(() => {
+    if (query) return "Cull works on a folder or a day, not on search results: clear the search first";
+    const n = shown.ids.length;
+    const what =
+      scope.kind === "folder" || scope.kind === "root"
+        ? "of this folder and its subfolders"
+        : scope.kind === "volume"
+          ? "of this disk"
+          : scope.kind === "date"
+            ? `of ${fmtDateKey(scope.key)}`
+            : scope.kind === "camera" || scope.kind === "lens"
+              ? `taken with ${scope.name}`
+              : scope.kind === "person"
+                ? `of ${scopeInfo.title}`
+                : scope.kind === "marked"
+                  ? "marked for deletion"
+                  : scope.kind === "missing"
+                    ? "missing"
+                    : "in the catalog";
+    const filtered = filtersOn(filters) ? ", as the filters narrow them" : "";
+    if (current && n > CULL_MAX)
+      return `Cull works on up to ${fmtNum(CULL_MAX)} photos at once; this view has ${fmtNum(n)}: pick a folder or a day, or narrow it with the filters`;
+    return `Cull the ${current ? `${fmtNum(n)} ` : ""}photos ${what}${filtered}: bursts gathered, what's blurry or badly exposed, what to keep. Delete marks a photo for deletion in the grid too.`;
+  }, [query, shown, scope, scopeInfo.title, filters, current]);
   // The people People shows without asking: not ignored, not seen only once.
   const shownPeople = useMemo(() => peopleList.filter((p) => !p.ignored && (p.name || p.photos >= 2)), [peopleList]);
   const peopleNew = useMemo(() => shownPeople.filter((p) => p.isNew || p.newPhotos > 0).length, [shownPeople]);
@@ -1149,10 +1202,12 @@ export default function App() {
                 </>
               )
             ) : (
-              <h1>{view === "people" ? "People" : scopeInfo.title}</h1>
+              <h1>{view === "people" ? "People" : view === "cull" ? `Cull · ${scopeInfo.title}` : scopeInfo.title}</h1>
             )}
             <span className="muted">
-              {view === "people"
+              {view === "cull"
+                ? ""
+                : view === "people"
                 ? personFound
                   ? `${fmtNum(personFound.length)} found`
                   : `${fmtNum(shownPeople.length)} people`
@@ -1174,6 +1229,8 @@ export default function App() {
               onChange={setPersonTyped}
               onOpen={(p) => drill({ kind: "person", id: p.id })}
             />
+          ) : view === "cull" ? (
+            <span className="grow" />
           ) : (
             <div className="search">
               <Search size={15} />
@@ -1260,6 +1317,20 @@ export default function App() {
                 <UserX size={15} /> Not {personHere.name?.split(" ")[0] ?? "them"}…
               </button>
             )}
+            {view === "photos" && !empty && (
+              <button
+                className="btn ghost"
+                onClick={() => {
+                  setViewerId(null);
+                  setCalendar(false);
+                  setView("cull");
+                }}
+                disabled={!!query || (current && shown.ids.length > CULL_MAX)}
+                title={cullTitle}
+              >
+                <ListChecks size={15} /> Cull
+              </button>
+            )}
             {view === "photos" && (
               <button
                 className={`icon-btn type-toggle ${calendar ? "on" : ""}`}
@@ -1281,6 +1352,20 @@ export default function App() {
                 aria-pressed={showType}
               >
                 <FileType size={16} />
+              </button>
+            )}
+            {view === "photos" && (
+              <button
+                className={`icon-btn type-toggle ${showProblems ? "on" : ""}`}
+                onClick={() => setShowProblems(!showProblems)}
+                title={
+                  showProblems
+                    ? "Hide what Cull found on thumbnails"
+                    : "Show what Cull found (blurry, face out of focus, dark...) on thumbnails"
+                }
+                aria-pressed={showProblems}
+              >
+                <Focus size={16} />
               </button>
             )}
             <input
@@ -1349,7 +1434,16 @@ export default function App() {
           </div>
         )}
 
-        {view === "people" ? (
+        {view === "cull" ? (
+          <CullView
+            scope={scope}
+            filters={filters}
+            title={scopeInfo.title}
+            onClose={closeCull}
+            onChanged={cullChanged}
+            onError={cullError}
+          />
+        ) : view === "people" ? (
           <PeopleView
             people={peopleList}
             found={personFound}
@@ -1394,6 +1488,7 @@ export default function App() {
               focusRequest={gridFocus}
               focusIndex={focusIndex}
               showType={showType}
+              showProblems={showProblems}
               flatLabel={flatLabel}
               jump={jump}
               onTopPhoto={topPhoto}

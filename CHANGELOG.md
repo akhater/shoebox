@@ -4,6 +4,39 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.42.5 - unreleased
 
+### Added
+
+- **Cull's assistant.** A **Cull** button above the photos opens the folder
+  or day shown as a shoot, one shot at a time (its hover text says how many
+  photos, and that a folder includes its subfolders). The frames of a burst (taken
+  within seconds, framed the same and alike to word search) come as one
+  stack, the frame to keep first in line; a RAW and its JPEG or export count
+  as one frame. Each frame says what's wrong with it - blurry everywhere
+  (with the shutter speed when it was slow for the lens), a face out of focus
+  while something else is sharp, very dark, highlights blown, nothing in it
+  (a lens cap, a pocket) - and what Cull suggests: keep or reject. Culling is trash or not: X
+  rejects, P or K takes a frame back out, Enter rejects what Cull suggests
+  rejecting in the shot and moves on, and **Accept all suggestions** does it
+  for the whole shoot. Ctrl or Shift click selects several frames, or
+  several shots in the list on the left, and X or P then applies to all of
+  them. Z or a click shows the
+  frame at 100% from its original, centred on the face or where you
+  clicked; drag to move, and the burst's other frames open at the same
+  spot, to compare their sharpness. A reject is a mark for deletion, as
+  before: nothing is deleted until you confirm. Every photo is measured in
+  the background from its preview, so photos on unplugged drives too; with
+  the drive connected, **Look closer** reads the originals at half size
+  (read-only) and finds the frames that are only soft at 100%; an original
+  it can't read is named, with why, and not offered again. The measures
+  live in `quality.db` beside the catalog: they can always be made again.
+- **What Cull found, on thumbnails.** A toolbar toggle, off by default and
+  remembered like the file type's, shows on each thumbnail what Cull found
+  wrong, the reasons on hover.
+- `shoebox-cli quality` measures the photos not measured yet, `measure`
+  shows a photo's measures and problems, `cull` gives a view as Cull shows
+  it (`--closer` looks at the originals first), and `cull-accept` marks the
+  rejects it suggests.
+
 ## 26.42.4 - 2026-10-17
 
 ### Added
