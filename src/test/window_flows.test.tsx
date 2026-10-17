@@ -1,6 +1,8 @@
 // What a user does in the window, against the fake backend: each step lands
 // on the right view, asks the backend for the right thing and draws the
 // right photos (and keeps doing so as the window gets faster).
+import { emit } from "@tauri-apps/api/event";
+import { act } from "react";
 import { describe, expect, test } from "vitest";
 import { ALL, fakeBackend, photosOf, SEARCH } from "./backend";
 import {
@@ -281,6 +283,147 @@ describe("People", () => {
     expect(be.calls.filter((c) => c.cmd === "check_people")).toHaveLength(2);
     await key(document.body, "Escape");
     expect(host.querySelector(".check-modal")).toBeNull();
+  });
+
+  describe("merges, each with Undo in the status bar", () => {
+    const someone = (id: number, name: string, cover: number) => ({
+      id,
+      name,
+      faces: 1,
+      photos: 1,
+      cover,
+      ignored: false,
+      isNew: false,
+      newPhotos: 0,
+    });
+    const names = (host: HTMLElement) => [...host.querySelectorAll(".person-name")].map((e) => e.textContent?.trim());
+    const status = (host: HTMLElement) => host.querySelector(".statusbar .status-left")?.textContent;
+    const undo = (host: HTMLElement) => byText(host, ".statusbar button", "Undo");
+    const lastArgs = (be: ReturnType<typeof fakeBackend>, cmd: string) => be.calls.filter((c) => c.cmd === cmd).at(-1)!.args;
+
+    test("Merge into one person: the named one stays; Undo makes them two again", async () => {
+      const be = fakeBackend();
+      const host = await renderApp();
+      await click(sidebarItem(host, "People"));
+      for (const tick of [...host.querySelectorAll(".person-face .tick")]) await click(tick);
+      await click(byText(host, ".people-bar button", "Merge into one person"));
+      await wait(100);
+      expect(lastArgs(be, "merge_people")).toEqual({ ids: [7, 8], into: 7 });
+      expect(names(host)).toEqual(["Ana"]);
+      expect(status(host)).toBe("An unnamed person is now part of Ana.");
+
+      await click(undo(host));
+      await wait(100);
+      expect(lastArgs(be, "unmerge_people")).toEqual({
+        merged: { into: 7, name: "Ana", joined: [{ id: 8, name: null, ignored: false, createdAt: 0, faces: [2] }] },
+      });
+      expect(names(host)).toEqual(["Ana", "Add a name"]);
+      expect(status(host)).toBe("Ana and an unnamed person are apart again.");
+      expect(host.querySelector(".statusbar button")).toBeNull();
+    });
+
+    test("Same person while naming someone: Undo brings them back under their name", async () => {
+      const be = fakeBackend();
+      be.addPerson(someone(9, "Bea", 90), [103]);
+      be.addPerson(someone(10, "Bee", 91), [203]);
+      const host = await renderApp();
+      await click(sidebarItem(host, "People"));
+      await click(byText(host, ".person-name", "Bee"));
+      await type(host.querySelector<HTMLInputElement>(".person-name-input")!, "Bea");
+      await click(byText(host, ".name-suggest .same-person", "Same person"));
+      await wait(100);
+      expect(lastArgs(be, "merge_people")).toEqual({ ids: [10, 9], into: 9 });
+      expect(names(host)).toEqual(["Ana", "Bea", "Add a name"]);
+      expect(status(host)).toBe("Bee is now part of Bea.");
+
+      await click(undo(host));
+      await wait(100);
+      expect(lastArgs(be, "unmerge_people")).toEqual({
+        merged: { into: 9, name: "Bea", joined: [{ id: 10, name: "Bee", ignored: false, createdAt: 0, faces: [91] }] },
+      });
+      expect(names(host)).toEqual(["Ana", "Bea", "Bee", "Add a name"]);
+      expect(status(host)).toBe("Bea and Bee are apart again.");
+    });
+
+    test("a name ending in a full stop ends the sentence once", async () => {
+      fakeBackend().addPerson(someone(9, "Bea Jr.", 90), [103]);
+      const host = await renderApp();
+      await click(sidebarItem(host, "People"));
+      await click(byText(host, ".person-name", "Add a name"));
+      await type(host.querySelector<HTMLInputElement>(".person-name-input")!, "Bea");
+      await click(byText(host, ".name-suggest .same-person", "Same person"));
+      await wait(100);
+      expect(status(host)).toBe("An unnamed person is now part of Bea Jr.");
+    });
+
+    /** People > Bee's page > her name box: "Same person" as Bea. */
+    const mergeOnPage = async (be: ReturnType<typeof fakeBackend>, host: HTMLElement) => {
+      await click(sidebarItem(host, "People"));
+      await click(card(host, "Bee").querySelector(".person-face")!);
+      await wait(100);
+      expect(title(host)).toBe("Bee");
+      expect(gridIds(host)).toEqual([203]);
+
+      await click(host.querySelector(".title-name")!);
+      await type(host.querySelector<HTMLInputElement>(".title-name-input")!, "Bea");
+      await click(byText(host, ".name-suggest .same-person", "Same person"));
+      await wait(100);
+      expect(lastArgs(be, "merge_people")).toEqual({ ids: [10, 9], into: 9 });
+      expect(title(host)).toBe("Bea");
+      expect(gridIds(host)).toEqual([103, 203]);
+      expect(status(host)).toBe("Bee is now part of Bea.");
+    };
+    const card = (host: HTMLElement, name: string) =>
+      [...host.querySelectorAll(".person")].find((c) => c.querySelector(".person-name")?.textContent?.trim() === name)!;
+
+    test("from a person's page: their photos join the other's page; Undo goes back to theirs", async () => {
+      const be = fakeBackend();
+      be.addPerson(someone(9, "Bea", 90), [103]);
+      be.addPerson(someone(10, "Bee", 91), [203]);
+      const host = await renderApp();
+      await mergeOnPage(be, host);
+
+      await click(undo(host));
+      await wait(100);
+      expect(lastArgs(be, "unmerge_people")).toEqual({
+        merged: { into: 9, name: "Bea", joined: [{ id: 10, name: "Bee", ignored: false, createdAt: 0, faces: [91] }] },
+      });
+      expect(title(host)).toBe("Bee");
+      expect(gridIds(host)).toEqual([203]);
+      expect(status(host)).toBe("Bea and Bee are apart again.");
+
+      // Back still goes to People, where they are two again.
+      await click(backButton(host)!);
+      expect(title(host)).toBe("People");
+      expect(names(host)).toEqual(["Ana", "Bea", "Bee", "Add a name"]);
+    });
+
+    test("from a person's page, when someone new got their id meanwhile: Undo goes to People, where they are back", async () => {
+      const be = fakeBackend();
+      be.addPerson(someone(9, "Bea", 90), [103]);
+      be.addPerson(someone(10, "Bee", 91), [203]);
+      const host = await renderApp();
+      await mergeOnPage(be, host);
+      // Faces found in the background: someone new under Bee's old id.
+      be.addPerson(someone(10, "Cy", 92), [303]);
+      await act(async () => {
+        await emit("catalog-changed", null);
+      });
+      await wait(600);
+
+      await click(undo(host));
+      await wait(100);
+      expect(be.calls.filter((c) => c.cmd === "unmerge_people")).toHaveLength(1);
+      expect(title(host)).toBe("People");
+      expect(names(host)).toEqual(["Ana", "Bea", "Cy", "Bee", "Add a name"]);
+      expect(status(host)).toBe("Bea and Bee are apart again.");
+
+      // Under another id, with her own photos.
+      await click(card(host, "Bee").querySelector(".person-face")!);
+      await wait(100);
+      expect(title(host)).toBe("Bee");
+      expect(gridIds(host)).toEqual([203]);
+    });
   });
 
   test("Check: Leave as is keeps a finding out of the next check; those left are shown on demand and brought back", async () => {

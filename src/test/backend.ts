@@ -93,7 +93,7 @@ export function fakeBackend() {
     };
   };
   /** People merged into someone, as they were, for Undo. */
-  const unmerged = new Map<number, Person>();
+  const unmerged = new Map<number, { person: Person; photos: number[] }>();
   const calls: Call[] = [];
   /** Extra time for some answers: by command, and by view (`viewName`) for the commands named. */
   const cmdDelays = new Map<string, number>();
@@ -281,13 +281,28 @@ export function fakeBackend() {
         const into = a.into as number;
         const gone = people.filter((p) => p.id !== into && (a.ids as number[]).includes(p.id));
         people = people.filter((p) => !gone.includes(p));
-        for (const p of gone) unmerged.set(p.id, p);
+        // Their photos are the merged person's now.
+        for (const p of gone) {
+          unmerged.set(p.id, { person: p, photos: inPerson[p.id] ?? [] });
+          inPerson[into] = [...(inPerson[into] ?? []), ...(inPerson[p.id] ?? [])];
+          delete inPerson[p.id];
+        }
+        people = people.map((p) => (p.id === into ? { ...p, photos: inPerson[into].length } : p));
         const joined = gone.map((p) => ({ id: p.id, name: p.name, ignored: p.ignored, createdAt: 0, faces: [p.cover] }));
         return { into, name: people.find((p) => p.id === into)?.name ?? null, joined } satisfies Merged;
       }
       case "unmerge_people": {
         const m = a.merged as Merged;
-        people = [...people, ...m.joined.map((j) => unmerged.get(j.id)!)];
+        let next = Math.max(...people.map((p) => p.id)) + 1;
+        const back = m.joined.map((j) => {
+          const { person, photos } = unmerged.get(j.id)!;
+          // Their own id, unless someone new got it since.
+          const id = people.some((p) => p.id === j.id) ? next++ : j.id;
+          inPerson[m.into] = inPerson[m.into].filter((ph) => !photos.includes(ph));
+          inPerson[id] = photos;
+          return { ...person, id };
+        });
+        people = [...people.map((p) => (p.id === m.into ? { ...p, photos: inPerson[m.into].length } : p)), ...back];
         return m.joined.reduce((n, j) => n + j.faces.length, 0);
       }
       case "scan_status":

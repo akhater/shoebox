@@ -1,6 +1,6 @@
 import { Check, CheckCheck, ChevronRight, Eye, EyeOff, Merge, Pencil, Search, Sparkles, Square, UserCheck, X } from "lucide-react";
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import { faceUrl, fmtNum, modelsApi, people as peopleApi, sameName, type Person } from "../api";
+import { faceUrl, fmtNum, modelsApi, people as peopleApi, sameName, type Merged, type Person } from "../api";
 import { PeopleCheckDialog } from "./PeopleCheckDialog";
 
 interface Props {
@@ -14,6 +14,8 @@ interface Props {
   onNewOnly: (on: boolean) => void;
   onOpen: (p: Person) => void;
   onChanged: () => void;
+  /** People made one (the selection bar, "Same person"): the status bar says who, with Undo. */
+  onMerged: (merged: Merged) => void;
   onError: (e: string) => void;
   /** Opens Settings > AI models (the face model isn't here). */
   onOpenModels: () => void;
@@ -81,6 +83,7 @@ export const PeopleView = memo(function PeopleView({
   onNewOnly,
   onOpen,
   onChanged,
+  onMerged,
   onError,
   onOpenModels,
 }: Props) {
@@ -144,14 +147,14 @@ export const PeopleView = memo(function PeopleView({
   /** "Same person": this one joins `into`, which keeps its name. */
   const mergeInto = (p: Person, into: Person) => {
     setEditing(null);
-    act(() => peopleApi.merge([p.id, into.id], into.id).then(() => {}));
+    act(() => peopleApi.merge([p.id, into.id], into.id).then(onMerged));
   };
 
   const merge = () => {
     // Keep a named person if there is one, else the one with most photos.
     const chosen = people.filter((p) => selected.includes(p.id));
     const into = (chosen.find((p) => p.name) ?? [...chosen].sort((a, b) => b.photos - a.photos)[0]).id;
-    act(() => peopleApi.merge(selected, into).then(() => {}));
+    act(() => peopleApi.merge(selected, into).then(onMerged));
   };
 
   if (!people.length) {
