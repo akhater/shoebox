@@ -1,4 +1,4 @@
-import { Aperture, Calendar, Camera, ChevronDown, ChevronRight, FileImage, HardDrive, Tag as TagIcon, Users, X } from "lucide-react";
+import { Aperture, Calendar, Camera, ChevronDown, ChevronRight, FileImage, HardDrive, ListChecks, Tag as TagIcon, Users, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   faceUrl,
@@ -27,6 +27,7 @@ interface Props {
 }
 
 const STATUS_LABEL: Record<string, string> = { online: "Plugged in", offline: "Unplugged", missing: "Missing" };
+const CULL_LABEL: Record<string, string> = { picked: "Picked", rejected: "Rejected", undecided: "Not decided" };
 
 /** Ticked values first stay listed even when nothing matches them any more. */
 function withPicked(values: FacetValue[], picked: string[]): FacetValue[] {
@@ -36,7 +37,7 @@ function withPicked(values: FacetValue[], picked: string[]): FacetValue[] {
 
 const toggled = (list: string[], v: string) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
 
-/** One bar above the grid: People, Date, Camera, Lens, File type, Status. Each opens a list to tick. */
+/** One bar above the grid: People, Date, Camera, Lens, File type, Status, Cull. Each opens a list to tick. */
 export function FilterBar({ facets, filters, onChange, people }: Props) {
   const [open, setOpen] = useState<ListKey | null>(null);
   const bar = useRef<HTMLDivElement>(null);
@@ -97,6 +98,7 @@ export function FilterBar({ facets, filters, onChange, people }: Props) {
             ? v.map((x) => x.toUpperCase()).join(", ")
             : `${v.length} types`,
     status: (v: string[]) => v.map((x) => STATUS_LABEL[x] ?? x).join(", "),
+    cull: (v: string[]) => v.map((x) => CULL_LABEL[x] ?? x).join(", "),
   };
 
   const chip = (id: ListKey, label: string, icon: ReactNode, panel: ReactNode) => {
@@ -221,6 +223,17 @@ export function FilterBar({ facets, filters, onChange, people }: Props) {
           picked={filters.status}
           label={(v) => STATUS_LABEL[v] ?? v}
           onPick={(v) => set("status", v as Filters["status"])}
+        />,
+      )}
+      {chip(
+        "cull",
+        "Cull",
+        <ListChecks size={14} />,
+        <Checklist
+          values={withPicked(facets?.cull ?? [], filters.cull)}
+          picked={filters.cull}
+          label={(v) => CULL_LABEL[v] ?? v}
+          onPick={(v) => set("cull", v as Filters["cull"])}
         />,
       )}
       {filtersOn(filters) && (

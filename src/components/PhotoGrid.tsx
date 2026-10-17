@@ -1,6 +1,6 @@
-import { ImageOff, Trash2, TriangleAlert, Unplug } from "lucide-react";
+import { Check, Focus, ImageOff, Trash2, TriangleAlert, Unplug } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { fmtNum, thumbUrl, type PhotoList } from "../api";
+import { fmtNum, problemsOf, thumbUrl, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
 import { TimelineRail } from "./TimelineRail";
 
@@ -22,6 +22,8 @@ interface Props {
   onOpen: (index: number) => void;
   /** Delete: mark (or unmark) these photos for deletion. */
   onMark: (ids: number[], marked: boolean) => void;
+  /** P: pick (or unpick) these photos as keepers. */
+  onPick: (ids: number[], picked: boolean) => void;
   /** T: tag these photos. */
   onTag: (ids: number[]) => void;
   /** False while something covers the grid (viewer, dialog): keys are theirs. */
@@ -237,6 +239,17 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
         p.onMark(ids, !allMarked);
         break;
       }
+      case "p":
+      case "P": {
+        if (ctrl) return;
+        const ids = list.ids.filter((id) => selected.has(id));
+        if (!ids.length && cur >= 0) ids.push(list.ids[cur]);
+        if (!ids.length) return;
+        const pos = new Map(list.ids.map((id, i) => [id, i]));
+        const allPicked = ids.every((id) => list.picked[pos.get(id)!] === 1);
+        p.onPick(ids, !allPicked);
+        break;
+      }
       default:
         return;
     }
@@ -277,6 +290,8 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                 const state = list.state[t.index];
                 const preview = list.preview[t.index];
                 const marked = list.marked[t.index] === 1;
+                const picked = list.picked[t.index] === 1;
+                const problems = problemsOf(list.flags[t.index] ?? 0);
                 return (
                   <button
                     key={id}
@@ -293,7 +308,9 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                     title={
                       marked
                         ? "Marked for deletion (Delete to unmark)"
-                        : state === 1
+                        : picked
+                          ? "Picked (P to unpick)"
+                          : state === 1
                           ? "Not reachable now: disk unplugged or folder not found"
                           : state === 0
                             ? "Missing: not found where it was"
@@ -327,6 +344,19 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                     {marked && (
                       <span className="badge marked">
                         <Trash2 size={13} />
+                      </span>
+                    )}
+                    {picked && (
+                      <span className="badge picked">
+                        <Check size={13} />
+                      </span>
+                    )}
+                    {problems.length > 0 && !marked && (
+                      <span
+                        className={`badge problem ${list.fresh[t.index] === 1 ? "after-new" : ""}`}
+                        title={problems.map((x) => x.label).join(" · ")}
+                      >
+                        <Focus size={13} />
                       </span>
                     )}
                     {p.showType && list.ext[t.index] && (

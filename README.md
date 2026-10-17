@@ -29,15 +29,23 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   the people you named (someone twice in a photo, a sibling filed under the
   wrong child, one person under two names) to fix in a click, with Undo, or
   to leave as is: it stays out of the next checks until something changes.
-- **Filters** by person, tag, date, camera, lens, file type and status
-  (online, offline, missing).
+- **Filters** by person, tag, date, camera, lens, file type, status
+  (online, offline, missing) and Cull's decisions (picked, rejected).
 - **Tags** that stay with the photo, even when the file is moved or copied.
 - **Gear.** Each camera and lens is listed under one name, however each file
   spells it; rename or merge them from the sidebar.
 - **Navigate by date** with a date rail on the grid and a calendar of every
   day you took photos.
-- **Culling.** Mark photos as you review them, then send them all to the
-  Recycle Bin in one step. A RAW's camera JPEG goes with it.
+- **Culling.** Pick the keepers and mark the rest as you review them, then
+  send the marked ones to the Recycle Bin in one step. A RAW's camera JPEG
+  goes with it.
+- **Cull's assistant.** A shoot one shot at a time: the frames of a burst
+  gathered, the sharpest first in line, and what's wrong with each frame -
+  blurry, a face out of focus, too dark, blown out, nothing in it (lens cap).
+  It only suggests: you pick, reject, or accept its suggestions in one key.
+  Measured from the previews, so unplugged drives too; with the drive
+  connected it looks closer at the originals and finds what is only soft at
+  100%.
 - **Organize folders.** Rename, create and move folders by drag and drop. The
   catalog updates in the same step, with no rescan.
 - **Full-screen viewer**, sharp from the original when its drive is connected,
@@ -146,6 +154,7 @@ shoebox-cli stats                # catalog overview
 shoebox-cli search kids on a beach
 shoebox-cli people               # everyone found, with their names
 shoebox-cli people-check         # likely mix-ups among named people
+shoebox-cli cull '{}' '{"kind":"root","id":1}'   # a folder as Cull shows it: bursts, problems, suggestions
 shoebox-cli models               # which AI models are installed
 shoebox-cli bench                # how fast the main views are on this catalog and computer
 ```

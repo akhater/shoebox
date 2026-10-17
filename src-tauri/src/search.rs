@@ -27,7 +27,7 @@ pub struct SearchIndex {
 #[derive(Clone, Default, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AiProgress {
-    /// "search" for now; "faces" later.
+    /// "search", "faces", or "quality" (Cull measuring photos).
     pub task: String,
     pub done: u64,
     pub total: u64,
@@ -126,6 +126,22 @@ impl SearchIndex {
 
     pub fn indexed(&self) -> usize {
         self.ids.read().unwrap().len()
+    }
+
+    /// The descriptions of these photos (those that have one), by id: what
+    /// tells the frames of a burst from other shots (Cull).
+    pub fn vectors(&self, of: &[i64]) -> HashMap<i64, Vec<f32>> {
+        if self.ready.wait().is_err() {
+            return HashMap::new();
+        }
+        let wanted: HashSet<i64> = of.iter().copied().collect();
+        let ids = self.ids.read().unwrap();
+        let vecs = self.vecs.read().unwrap();
+        ids.iter()
+            .enumerate()
+            .filter(|(_, id)| wanted.contains(id))
+            .map(|(i, id)| (*id, vecs[i * CLIP_DIM..(i + 1) * CLIP_DIM].to_vec()))
+            .collect()
     }
 
     /// Describes every photo that has a preview and no description yet, after
