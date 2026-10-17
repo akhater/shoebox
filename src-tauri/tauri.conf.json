@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Shoebox",
   "identifier": "co.shoebox.catalog",
-  "version": "26.42.3",
+  "version": "26.42.4",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1430",
