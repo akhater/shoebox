@@ -699,3 +699,51 @@ describe("People", () => {
     expect(gridIds(host)).toEqual([101, 102, 201, 301]);
   });
 });
+
+describe("missing photos", () => {
+  test("the Missing view says which are in the bin, and Remove takes them out of the catalog", async () => {
+    const be = fakeBackend();
+    for (const id of [101, 102, 103]) be.missing.add(id);
+    be.inBin.add(101);
+    be.inBin.add(102);
+    const host = await renderApp();
+
+    await click(sidebarItem(host, "Missing"));
+    await wait(100);
+    expect(gridIds(host)).toEqual([101, 102, 103]);
+    const missingBanner = () => byText(host, ".main > .banner", /weren't where/);
+    expect(missingBanner().textContent).toContain("2 of them are in the Trash: deleted, not moved");
+    expect(tile(host, 101).querySelector(".badge.in-bin")).not.toBeNull();
+    expect(tile(host, 103).querySelector(".badge.in-bin")).toBeNull();
+    expect(tile(host, 103).querySelector(".badge.missing")).not.toBeNull();
+
+    // Only those in the bin: asked first, then they leave the grid.
+    await click(byText(missingBanner(), "button", /Remove the 2 in the Trash/));
+    await wait(100);
+    expect(be.calls.filter((c) => c.cmd === "plugin:dialog|message")).toHaveLength(1);
+    expect(be.calls.filter((c) => c.cmd === "forget_missing").map((c) => c.args.ids)).toEqual([[101, 102]]);
+    expect(gridIds(host)).toEqual([103]);
+    expect(missingBanner().textContent).not.toContain("Trash");
+
+    await click(byText(missingBanner(), "button", /Remove it from catalog/));
+    await wait(100);
+    expect(be.calls.filter((c) => c.cmd === "forget_missing").map((c) => c.args.ids)).toEqual([[101, 102], [103]]);
+    expect(gridIds(host)).toEqual([]);
+  });
+
+  test("selected missing photos can be removed from the toolbar; photos still on a disk can't", async () => {
+    const be = fakeBackend();
+    be.missing.add(102);
+    const host = await renderApp();
+    const remove = () => [...host.querySelectorAll(".toolbar button")].find((b) => /from\s*catalog/.test(b.textContent ?? ""));
+
+    await click(tile(host, 101));
+    expect(remove()).toBeUndefined();
+    await click(tile(host, 102), { ctrlKey: true });
+    expect(remove()?.textContent?.trim()).toMatch(/^Remove from\s*catalog…$/);
+    await click(remove()!);
+    await wait(100);
+    expect(be.calls.filter((c) => c.cmd === "forget_missing").map((c) => c.args.ids)).toEqual([[102]]);
+    expect(gridIds(host)).not.toContain(102);
+  });
+});

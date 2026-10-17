@@ -909,7 +909,8 @@ mod tests {
     /// "Shoebox never writes to a photo file" (README), enforced: file-writing
     /// code may only appear in this file, and photo-file changes only in
     /// `organize.rs` (deleting what the user marked and confirmed; moves later),
-    /// which has its own rules.
+    /// which has its own rules. Looking into the system's bin (`trash_bin.rs`)
+    /// is reading; sending to it, emptying it or restoring from it is not.
     #[test]
     fn no_other_file_writes_anywhere() {
         const FORBIDDEN: &[&str] = &[
@@ -926,7 +927,10 @@ mod tests {
             "write_all(",
             "VACUUM INTO",
             "create_dir",
-            "trash::",
+            "trash::delete",
+            "trash::{",
+            "purge_all",
+            "restore_all",
         ];
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut bad = Vec::new();

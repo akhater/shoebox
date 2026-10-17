@@ -1,6 +1,6 @@
 import { HardDrive, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { cull, fmtBytes, fmtNum, type DeletePlan, type DeleteReport } from "../api";
+import { BIN, cull, fmtBytes, fmtNum, type DeletePlan, type DeleteReport } from "../api";
 
 interface Props {
   onDone: (report: DeleteReport) => void;
@@ -57,7 +57,9 @@ export function DeleteDialog({ onDone, onClose }: Props) {
     }
   };
 
-  const nothing = plan && plan.files.length === 0;
+  const gone = plan?.gone.length ?? 0;
+  const nothing = plan && plan.files.length === 0 && gone === 0;
+  const files = plan && plan.files.length > 0;
 
   return (
     <div className="modal-back" onClick={busy ? undefined : onClose}>
@@ -73,7 +75,7 @@ export function DeleteDialog({ onDone, onClose }: Props) {
 
         {nothing && <p>Nothing to delete right now: none of the marked photos is on a plugged-in disk.</p>}
 
-        {plan && !nothing && (
+        {plan && files && (
           <>
             <p className="muted">
               {fmtNum(plan.photos)} marked {plan.photos === 1 ? "photo is" : "photos are"} here now. Untick a disk to keep
@@ -92,14 +94,14 @@ export function DeleteDialog({ onDone, onClose }: Props) {
                       </span>
                     </span>
                     {d.recycle ? (
-                      <span className="pill online">To the Recycle Bin</span>
+                      <span className="pill online">To the {BIN}</span>
                     ) : (
                       <span className="pill missing">Deleted for good</span>
                     )}
                   </label>
                   {!d.recycle && (
                     <p className="note warn">
-                      This disk is removable media (a memory card or USB stick) and has no Recycle Bin: its files can't be
+                      This disk is removable media (a memory card or USB stick) and has no {BIN}: its files can't be
                       brought back.
                     </p>
                   )}
@@ -140,6 +142,13 @@ export function DeleteDialog({ onDone, onClose }: Props) {
           </>
         )}
 
+        {plan && gone > 0 && (
+          <p className="note">
+            {fmtNum(gone)} marked {gone === 1 ? "photo is" : "photos are"} already gone from {gone === 1 ? "its disk" : "their disks"}{" "}
+            (missing): {gone === 1 ? "it leaves" : "they leave"} the catalog, no file to delete.
+          </p>
+        )}
+
         {plan && plan.waiting > 0 && (
           <p className="note">
             {fmtNum(plan.waiting)} marked {plan.waiting === 1 ? "photo is" : "photos are"} on an unplugged disk or in a
@@ -161,9 +170,13 @@ export function DeleteDialog({ onDone, onClose }: Props) {
             {nothing ? "Close" : "Cancel"}
           </button>
           {plan && !nothing && (
-            <button className="btn danger" disabled={busy || chosenFiles.length === 0} onClick={confirm}>
+            <button className="btn danger" disabled={busy || (chosenFiles.length === 0 && gone === 0)} onClick={confirm}>
               <Trash2 size={15} />
-              {busy ? "Deleting…" : `Delete ${fmtNum(chosenFiles.length)} files (${fmtBytes(bytes)})`}
+              {busy
+                ? "Deleting…"
+                : chosenFiles.length > 0
+                  ? `Delete ${fmtNum(chosenFiles.length)} files (${fmtBytes(bytes)})`
+                  : `Remove ${fmtNum(gone)} from the catalog`}
             </button>
           )}
         </div>

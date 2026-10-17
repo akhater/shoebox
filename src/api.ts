@@ -345,6 +345,10 @@ export const api = {
   stats: () => invoke<Stats>("catalog_stats"),
   regenerate: (rootId: number | null) => invoke<number>("regenerate", { rootId }),
   removeFolder: (rootId: number) => invoke<{ files: number; photos: number }>("remove_folder", { rootId }),
+  /** Which of these photos are missing everywhere, and which of those are in the bin. */
+  missingPhotos: (ids: number[]) => invoke<MissingReport>("missing_photos", { ids }),
+  /** Takes the missing photos among these out of the catalog. No file is touched. */
+  forgetMissing: (ids: number[]) => invoke<{ photos: number; files: number }>("forget_missing", { ids }),
   addFolder: (path: string) => invoke<number>("add_folder", { path }),
   rescan: (rootId: number) => invoke<void>("rescan", { rootId }),
   rescanAll: () => invoke<number>("rescan_all"),
@@ -397,6 +401,8 @@ export interface DeletePlan {
   photos: number;
   /** Marked photos on unplugged disks or folders not found. */
   waiting: number;
+  /** Marked photos already gone from every disk: the delete only takes them out of the catalog. */
+  gone: number[];
   disks: PlanDisk[];
   files: PlanFile[];
   bytes: number;
@@ -409,8 +415,34 @@ export interface DeleteReport {
   recycled: number;
   permanent: number;
   photosRemoved: number;
+  /** Of those, marked photos that were already gone from every disk. */
+  forgotten: number;
   failed: string[];
 }
+
+/** Photos with no copy left on any disk, and which of them are in the system's bin. */
+export interface MissingReport {
+  /** False when the bin couldn't be read: nothing is known about it. */
+  binRead: boolean;
+  photos: MissingPhoto[];
+}
+
+export interface MissingPhoto {
+  id: number;
+  /** Where its files were. */
+  paths: string[];
+  /** Every one of its files is in the bin: deleted, not moved. */
+  inBin: boolean;
+  /** When the last of them went to the bin (seconds since 1970; 0 = unknown). */
+  deletedAt: number;
+}
+
+/** What this system calls its bin. */
+export const BIN = /Windows/i.test(navigator.userAgent) ? "Recycle Bin" : "Trash";
+
+const deletedFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+/** When a file went to the bin (seconds since 1970), in this computer's time. */
+export const fmtDeleted = (ts: number) => deletedFmt.format(new Date(ts * 1000));
 
 /** What Cull can find wrong with a photo; `bit` is its bit in PhotoList.flags. */
 export type Problem = "empty" | "dark" | "blurry" | "soft" | "faceSoft" | "blown" | "bright";

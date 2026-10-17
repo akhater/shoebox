@@ -36,6 +36,24 @@ Newest first. Same format and versioning as Argentum.
   shows a photo's measures and problems, `cull` gives a view as Cull shows
   it (`--closer` looks at the originals first), and `cull-accept` marks the
   rejects it suggests.
+- **Remove missing photos from the catalog.** A photo deleted outside
+  Shoebox (in Explorer, Finder, another app or another catalog) stays in the
+  catalog as missing, as before; now you can take it out. The Missing view
+  has "Remove all from catalog", the toolbar has "Remove from catalog" for
+  selected missing photos, and so does the viewer. Nothing on any disk is
+  touched, and a photo with a copy on any disk, plugged in or not, stays.
+  `shoebox-cli missing` lists them and `shoebox-cli forget-missing` removes
+  them (by id, `--in-bin` or `--all`).
+
+- **Deleted or moved?** Shoebox looks in the Recycle Bin (the Trash on macOS
+  and Linux) for missing photos. Those found there are marked with a bin on
+  their thumbnail, the date they were deleted, and a "Remove the N in the
+  Recycle Bin" button. Restore one from the bin instead and the next scan
+  finds it again with its faces and tags.
+
+- **"Delete marked files" takes marked photos that are already gone.** A
+  photo marked for deletion whose file was deleted elsewhere used to wait
+  for its disk forever; the delete now takes it out of the catalog.
 
 ## 26.42.4 - 2026-10-17
 

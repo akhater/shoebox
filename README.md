@@ -37,7 +37,8 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
 - **Navigate by date** with a date rail on the grid and a calendar of every
   day you took photos.
 - **Culling.** Mark photos as you review them, then send them all to the
-  Recycle Bin in one step. A RAW's camera JPEG goes with it.
+  Recycle Bin (the Trash on macOS and Linux) in one step. A RAW's camera
+  JPEG goes with it.
 - **Cull's assistant.** A shoot one shot at a time: the frames of a burst
   gathered, the sharpest first in line, and what's wrong with each frame -
   blurry, a face out of focus, too dark, blown out, nothing in it (lens cap).
@@ -64,7 +65,9 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
 - **An unplugged drive never changes the catalog.**
 - **Nothing is removed because it wasn't found.** A file is marked *missing*
   only after a complete scan of its connected drive. It stays in the catalog
-  and is relinked automatically if it turns up again.
+  and is relinked automatically if it turns up again. The Missing view shows
+  which missing photos are in the Recycle Bin or Trash (deleted, not moved);
+  only you can take them out of the catalog.
 - **A photo is its content, not its path.** Photos are identified by a content
   fingerprint, so moved, renamed and copied files keep their tags and people.
   Drives are identified by serial number, not by drive letter.

@@ -316,6 +316,130 @@ impl Catalog {
         Ok(RemoveReport { files: files.len() as i64, photos: gone.len() as i64 })
     }
 
+    /// Which of `photo_ids` are missing - no copy left on any disk, plugged in
+    /// or not - where their files were, and which of them sit in the system's
+    /// bin (deleted, not moved). Looked up photo by photo: costs what it asks.
+    pub fn missing(&self, photo_ids: &[i64]) -> Result<MissingReport> {
+        let started = std::time::Instant::now();
+        let online = self.online.read().unwrap().clone();
+        let mut photos = Vec::new();
+        {
+            let db = self.read()?;
+            let mut stmt = db.prepare(
+                "SELECT f.state, f.name, f.size, fo.rel_path, fo.volume_id, v.last_mount
+                   FROM files f JOIN folders fo ON fo.id = f.folder_id JOIN volumes v ON v.id = fo.volume_id
+                  WHERE f.photo_id = ?1",
+            )?;
+            for &id in photo_ids {
+                let files: Vec<(i64, String, i64, String, i64, Option<String>)> = stmt
+                    .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                if files.is_empty() || files.iter().any(|f| f.0 == FILE_PRESENT) {
+                    continue;
+                }
+                let files = files
+                    .into_iter()
+                    .map(|(_, name, size, rel, vid, last_mount)| {
+                        // Only a plugged-in disk's bin can be looked into.
+                        let mount = online.get(&vid).cloned();
+                        let shown = mount.clone().or(last_mount).unwrap_or_else(|| "?:\\".into());
+                        let path = PathBuf::from(volumes::join(&shown, &rel)).join(name);
+                        (path, size as u64, mount)
+                    })
+                    .collect();
+                photos.push((id, files));
+            }
+        }
+        // Only the bins of the disks they were on, plugged in now.
+        let mut mounts: Vec<String> = photos
+            .iter()
+            .flat_map(|(_, files): &(i64, Vec<MissingFile>)| files.iter().filter_map(|f| f.2.clone()))
+            .collect();
+        mounts.sort();
+        mounts.dedup();
+        let looked = started.elapsed();
+        let bin = if mounts.is_empty() { None } else { crate::trash_bin::read(&mounts) };
+        log::info!(
+            "missing: {} of {} photos looked up in {} ms, {} read in {} ms",
+            photos.len(),
+            photo_ids.len(),
+            looked.as_millis(),
+            crate::trash_bin::NAME,
+            (started.elapsed() - looked).as_millis()
+        );
+        let photos = photos
+            .into_iter()
+            .map(|(id, files): (i64, Vec<MissingFile>)| {
+                let binned: Vec<Option<i64>> = files
+                    .iter()
+                    .map(|(path, size, mount)| {
+                        bin.as_ref().filter(|_| mount.is_some()).and_then(|b| b.deleted(path, *size))
+                    })
+                    .collect();
+                MissingPhoto {
+                    id,
+                    paths: files.iter().map(|(p, _, _)| p.to_string_lossy().into_owned()).collect(),
+                    in_bin: binned.iter().all(Option::is_some),
+                    deleted_at: binned.iter().flatten().copied().max().unwrap_or(0),
+                }
+            })
+            .collect();
+        Ok(MissingReport { bin: crate::trash_bin::NAME, bin_read: bin.is_some(), photos })
+    }
+
+    /// Takes the missing photos among `photo_ids` out of the catalog: those
+    /// with no copy left on any disk, plugged in or not. **No file is
+    /// touched**, and a photo with a copy anywhere stays. They leave with their
+    /// previews, faces and tags; people left without a face go too.
+    pub fn forget_missing(&self, photo_ids: &[i64]) -> Result<ForgetReport> {
+        let mut report = ForgetReport::default();
+        let mut gone = Vec::new();
+        {
+            let mut db = self.db();
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            for &id in photo_ids {
+                let (exists, here): (bool, bool) = tx.query_row(
+                    &format!(
+                        "SELECT EXISTS (SELECT 1 FROM photos WHERE id = ?1),
+                                EXISTS (SELECT 1 FROM files WHERE photo_id = ?1 AND state = {FILE_PRESENT})"
+                    ),
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                if !exists || here || gone.contains(&id) {
+                    continue;
+                }
+                report.files += tx.execute("DELETE FROM files WHERE photo_id = ?1", [id])?;
+                gone.push(id);
+            }
+            forget_photos(&tx, &gone)?;
+            tx.commit()?;
+        }
+        self.drop_previews(&gone)?;
+        report.photos = gone.len();
+        Ok(report)
+    }
+
+    /// Previews and thumbnails of photos that left the catalog. A photo id taken
+    /// again since (SQLite reuses the highest one) keeps its new preview: the
+    /// check and the removal happen while no one can add a photo.
+    pub(crate) fn drop_previews(&self, photos: &[i64]) -> Result<()> {
+        if photos.is_empty() {
+            return Ok(());
+        }
+        let mut db = self.db();
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for pid in photos {
+            let back: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM photos WHERE id = ?1)", [pid], |r| r.get(0))?;
+            if !back {
+                let _ = self.data.remove(&self.data.preview_path(*pid));
+                let _ = self.data.remove(&self.data.thumb_path(*pid));
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn stats(&self) -> Result<Stats> {
         let (photos, raw, no_preview, files, missing_files, roots, disks): (i64, i64, i64, i64, i64, i64, i64) =
             self.db().query_row(
@@ -1258,6 +1382,63 @@ pub struct BackupReport {
 pub struct RemoveReport {
     pub files: i64,
     pub photos: i64,
+}
+
+/// A missing photo's file: where it was, its size, and its disk's mount
+/// point when that disk is plugged in.
+type MissingFile = (PathBuf, u64, Option<String>);
+
+/// Photos with no copy left on any disk ([`Catalog::missing`]).
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingReport {
+    /// What the system calls its bin: "Recycle Bin" or "Trash".
+    pub bin: &'static str,
+    /// False when the bin couldn't be read: nothing is known about it.
+    pub bin_read: bool,
+    pub photos: Vec<MissingPhoto>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingPhoto {
+    pub id: i64,
+    /// Where its files were.
+    pub paths: Vec<String>,
+    /// Every one of its files is in the bin: deleted, not moved.
+    pub in_bin: bool,
+    /// When the last of them went to the bin (seconds since 1970; 0 = unknown).
+    pub deleted_at: i64,
+}
+
+/// What [`Catalog::forget_missing`] took out of the catalog.
+#[derive(Serialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgetReport {
+    pub photos: usize,
+    pub files: usize,
+}
+
+/// Takes `photos`, whose files are already out of the catalog, out with their
+/// faces (tags follow by themselves); people left without a face go too.
+/// Their previews go after the transaction ([`Catalog::drop_previews`]).
+pub(crate) fn forget_photos(tx: &Connection, photos: &[i64]) -> Result<()> {
+    let mut people = std::collections::BTreeSet::new();
+    for pid in photos {
+        let mut stmt = tx.prepare("SELECT person_id FROM faces WHERE photo_id = ?1 AND person_id IS NOT NULL")?;
+        people.extend(stmt.query_map([pid], |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?);
+        drop(stmt);
+        tx.execute("DELETE FROM faces WHERE photo_id = ?1", [pid])?;
+        tx.execute("DELETE FROM face_scan WHERE photo_id = ?1", [pid])?;
+        tx.execute("DELETE FROM photos WHERE id = ?1", [pid])?;
+    }
+    for person in people {
+        tx.execute(
+            "DELETE FROM people WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM faces f WHERE f.person_id = ?1)",
+            [person],
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]

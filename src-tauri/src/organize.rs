@@ -27,13 +27,13 @@
 //! original is removed only once its copy was compared byte for byte; a copy
 //! is taken back only while its original is there.
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, forget_photos};
 use crate::db::{self, FILE_PRESENT};
 use crate::formats::{self, Kind};
 use crate::paths::OpLock;
 use crate::volumes;
 use anyhow::{Result, anyhow, bail};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -90,6 +90,9 @@ pub struct DeletePlan {
     pub photos: usize,
     /// Marked photos on unplugged disks (or folders not found): they wait.
     pub waiting: usize,
+    /// Marked photos already gone: missing, no copy left on any disk. The
+    /// delete only takes them out of the catalog.
+    pub gone: Vec<i64>,
     pub disks: Vec<PlanDisk>,
     pub files: Vec<PlanFile>,
     pub bytes: u64,
@@ -99,7 +102,7 @@ pub struct DeletePlan {
 
 /// What deleting the marked photos would remove, right now.
 pub fn plan(cat: &Catalog) -> Result<DeletePlan> {
-    let (rows, marked, labels) = {
+    let (rows, marked, gone, labels) = {
         let db = cat.db();
         let rows: Vec<(i64, String, i64, String, String, i64)> = db
             .prepare(&format!(
@@ -110,11 +113,19 @@ pub fn plan(cat: &Catalog) -> Result<DeletePlan> {
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let marked: i64 = db.query_row("SELECT COUNT(*) FROM photos WHERE marked = 1", [], |r| r.get(0))?;
+        let gone: Vec<i64> = db
+            .prepare(&format!(
+                "SELECT p.id FROM photos p WHERE p.marked = 1
+                    AND NOT EXISTS (SELECT 1 FROM files f WHERE f.photo_id = p.id AND f.state = {FILE_PRESENT})
+                  ORDER BY p.id"
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
         let labels: HashMap<i64, String> = db
             .prepare("SELECT id, label FROM volumes")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        (rows, marked as usize, labels)
+        (rows, marked as usize, gone, labels)
     };
 
     let mut plan = DeletePlan { marked, ..Default::default() };
@@ -159,9 +170,10 @@ pub fn plan(cat: &Catalog) -> Result<DeletePlan> {
     }
     plan.files.sort_by(|a, b| (a.volume_id, &a.path).cmp(&(b.volume_id, &b.path)));
     plan.photos = here.len();
-    plan.waiting = marked.saturating_sub(here.len());
+    plan.waiting = marked.saturating_sub(here.len() + gone.len());
     plan.disks = disks.into_values().collect();
-    plan.token = token(&plan.files);
+    plan.token = token(&plan.files, &gone);
+    plan.gone = gone;
     Ok(plan)
 }
 
@@ -210,11 +222,14 @@ fn companions(name: &str, kind: &str, entries: &[(String, u64)]) -> Vec<(String,
     out
 }
 
-fn token(files: &[PlanFile]) -> String {
+fn token(files: &[PlanFile], gone: &[i64]) -> String {
     let mut h = blake3::Hasher::new();
     for f in files {
         h.update(f.path.as_bytes());
         h.update(&f.size.to_le_bytes());
+    }
+    for id in gone {
+        h.update(&id.to_le_bytes());
     }
     h.finalize().to_hex()[..16].to_string()
 }
@@ -228,20 +243,34 @@ pub struct DeleteReport {
     pub permanent: usize,
     /// Photos that left the catalog (no copy left anywhere).
     pub photos_removed: usize,
+    /// Of those, marked photos that were already gone from every disk.
+    pub forgotten: usize,
     pub failed: Vec<String>,
 }
 
-/// Deletes the plan the user was shown (`token`), on the disks they ticked. Refuses
-/// if the plan changed since.
+/// Deletes the plan the user was shown (`token`), on the disks they ticked, and
+/// takes the marked photos already gone out of the catalog. Refuses if the plan
+/// changed since.
 pub fn delete_confirmed(cat: &Catalog, token: &str, volume_ids: &[i64]) -> Result<DeleteReport> {
     let current = plan(cat)?;
     if current.token != token {
         bail!("The list of files changed since you looked at it. Nothing was deleted - please review it again.");
     }
     let chosen: Vec<&PlanFile> = current.files.iter().filter(|f| volume_ids.contains(&f.volume_id)).collect();
-    if chosen.is_empty() {
+    if chosen.is_empty() && current.gone.is_empty() {
         bail!("No disk ticked: nothing was deleted.");
     }
+    let mut report = if chosen.is_empty() { DeleteReport::default() } else { delete_files(cat, &current, &chosen)? };
+    // Only the catalog still has them: no file to touch.
+    let forgotten = cat.forget_missing(&current.gone)?;
+    report.forgotten = forgotten.photos;
+    report.photos_removed += forgotten.photos;
+    Ok(report)
+}
+
+/// The files `chosen` from the `current` plan: to the bin (or for good on
+/// removable media), then out of the catalog once really gone.
+fn delete_files(cat: &Catalog, current: &DeletePlan, chosen: &[&PlanFile]) -> Result<DeleteReport> {
     let disk = |vid: i64| current.disks.iter().find(|d| d.volume_id == vid).expect("every file's disk is in the plan");
     // Each file as the catalog knows it: (disk, folder, name).
     let places: Vec<(i64, String, String)> = chosen
@@ -263,8 +292,8 @@ pub fn delete_confirmed(cat: &Catalog, token: &str, volume_ids: &[i64]) -> Resul
     if !to_bin.is_empty() {
         let paths: Vec<&Path> = to_bin.iter().map(|f| Path::new(&f.path)).collect();
         if let Err(e) = trash::delete_all(&paths) {
-            log::warn!("recycle bin: {e}");
-            report.failed.push(format!("Recycle Bin: {e}"));
+            log::warn!("{}: {e}", crate::trash_bin::NAME);
+            report.failed.push(format!("{}: {e}", crate::trash_bin::NAME));
         }
     }
     for f in &to_nuke {
@@ -294,15 +323,15 @@ pub fn delete_confirmed(cat: &Catalog, token: &str, volume_ids: &[i64]) -> Resul
     let removed = forget_files(cat, &gone, &journal, &places)?;
     report.photos_removed = removed.len();
     kill_point("delete:forgotten");
-    drop_previews(cat, &removed)?;
+    cat.drop_previews(&removed)?;
     journal.end(cat);
     Ok(report)
 }
 
 /// Drops the catalog rows of deleted files (volume id, folder, name). Photos
 /// left with no file leave the catalog with their faces; their previews go
-/// next ([`drop_previews`]). The delete's journal (`journal`, listing all of
-/// `files`) moves on in the same transaction. Returns the photos that left.
+/// next ([`Catalog::drop_previews`]). The delete's journal (`journal`, listing
+/// all of `files`) moves on in the same transaction. Returns the photos that left.
 fn forget_files(
     cat: &Catalog,
     gone: &[(i64, String, String)],
@@ -328,53 +357,19 @@ fn forget_files(
                 touched.extend(pid);
             }
         }
-        let mut people = BTreeSet::new();
         for pid in &touched {
             let left: bool =
                 tx.query_row("SELECT EXISTS (SELECT 1 FROM files WHERE photo_id = ?1)", [pid], |r| r.get(0))?;
-            if left {
-                continue;
+            if !left {
+                removed.push(*pid);
             }
-            let mut stmt = tx.prepare("SELECT person_id FROM faces WHERE photo_id = ?1 AND person_id IS NOT NULL")?;
-            people.extend(stmt.query_map([pid], |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?);
-            drop(stmt);
-            tx.execute("DELETE FROM faces WHERE photo_id = ?1", [pid])?;
-            tx.execute("DELETE FROM face_scan WHERE photo_id = ?1", [pid])?;
-            tx.execute("DELETE FROM photos WHERE id = ?1", [pid])?;
-            removed.push(*pid);
         }
-        // People whose only faces were in deleted photos.
-        for person in people {
-            tx.execute(
-                "DELETE FROM people WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM faces f WHERE f.person_id = ?1)",
-                [person],
-            )?;
-        }
+        forget_photos(&tx, &removed)?;
         let next = Op::Delete(DeleteOp { files: files.to_vec(), photos: removed.clone() });
         journal.set_step(&tx, FORGOTTEN, Some(&next))?;
         tx.commit()?;
     }
     Ok(removed)
-}
-
-/// Previews and thumbnails of photos that left the catalog. A photo id taken
-/// again since (SQLite reuses the highest one) keeps its new preview: the
-/// check and the removal happen while no one can add a photo.
-fn drop_previews(cat: &Catalog, photos: &[i64]) -> Result<()> {
-    if photos.is_empty() {
-        return Ok(());
-    }
-    let mut db = cat.db();
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    for pid in photos {
-        let back: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM photos WHERE id = ?1)", [pid], |r| r.get(0))?;
-        if !back {
-            let _ = cat.data.remove(&cat.data.preview_path(*pid));
-            let _ = cat.data.remove(&cat.data.thumb_path(*pid));
-        }
-    }
-    tx.commit()?;
-    Ok(())
 }
 
 /// A name Windows accepts for a folder.
@@ -1050,7 +1045,7 @@ fn settle(cat: &Catalog, journal: Journal, step: &str, op: &Op) -> Result<Settle
         }
         (Op::Delete(d), DELETING) => settle_delete(cat, journal, d)?,
         (Op::Delete(d), FORGOTTEN) => {
-            drop_previews(cat, &d.photos)?;
+            cat.drop_previews(&d.photos)?;
             journal.end(cat);
             Settled::Finished
         }
@@ -1197,7 +1192,7 @@ fn settle_delete(cat: &Catalog, journal: Journal, d: &DeleteOp) -> Result<Settle
         }
     }
     let removed = forget_files(cat, &gone, &journal, &d.files)?;
-    drop_previews(cat, &removed)?;
+    cat.drop_previews(&removed)?;
     journal.end(cat);
     Ok(if gone.is_empty() { Settled::Undone } else { Settled::Finished })
 }

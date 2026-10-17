@@ -55,6 +55,9 @@ export interface Call {
 export function fakeBackend() {
   const photos: Photo[] = ROOTS.flatMap((r) => photosOf(r.id).map((id) => ({ id, root: r.id, taken: JAN_2026 + id * 3600 })));
   const marked = new Set<number>();
+  /** Photos missing everywhere (a test sets them), and those of them in the bin. */
+  const missing = new Set<number>();
+  const inBin = new Set<number>();
   /** Originals Cull couldn't read for a closer look (a test sets them). */
   let unreadable: Shoot["unreadable"] = [];
   let people: Person[] = [
@@ -132,7 +135,7 @@ export function fakeBackend() {
     total: photos.length,
     online: photos.length,
     offline: 0,
-    missing: 0,
+    missing: photos.filter((p) => missing.has(p.id)).length,
     marked: marked.size,
     dataDir: "data",
   });
@@ -149,6 +152,8 @@ export function fakeBackend() {
         return photos.filter((p) => inPerson[s.id]?.includes(p.id));
       case "marked":
         return photos.filter((p) => marked.has(p.id));
+      case "missing":
+        return photos.filter((p) => missing.has(p.id));
       default:
         return [];
     }
@@ -157,7 +162,7 @@ export function fakeBackend() {
   const listOf = (ps: Photo[]): PhotoList => ({
     ids: ps.map((p) => p.id),
     taken: ps.map((p) => p.taken),
-    state: ps.map(() => 2),
+    state: ps.map((p) => (missing.has(p.id) ? 0 : 2)),
     w: ps.map(() => 1500),
     h: ps.map(() => 1000),
     rev: ps.map(() => 1),
@@ -287,6 +292,22 @@ export function fakeBackend() {
       case "tags_on":
       case "tags_all":
         return [];
+      case "missing_photos":
+        return {
+          bin: "Trash",
+          binRead: true,
+          photos: (a.ids as number[])
+            .filter((id) => missing.has(id) && photos.some((p) => p.id === id))
+            .map((id) => ({ id, paths: [`D:\Gone\IMG_${id}.jpg`], inBin: inBin.has(id), deletedAt: 0 })),
+        };
+      case "forget_missing": {
+        const gone = (a.ids as number[]).filter((id) => missing.has(id) && photos.some((p) => p.id === id));
+        for (const id of gone) photos.splice(photos.findIndex((p) => p.id === id), 1);
+        return { photos: gone.length, files: gone.length };
+      }
+      // ask(): answered with its OK button.
+      case "plugin:dialog|message":
+        return (a.buttons as { OkCancelCustom?: [string, string] } | undefined)?.OkCancelCustom?.[0] ?? "Yes";
       case "mark_photos":
         for (const id of a.ids as number[]) (a.marked ? marked.add(id) : marked.delete(id));
         return (a.ids as number[]).length;
@@ -398,6 +419,8 @@ export function fakeBackend() {
     /** Makes every answer to `cmd` take `ms` longer. */
     delay: (cmd: string, ms: number) => cmdDelays.set(cmd, ms),
     marked,
+    missing,
+    inBin,
     /** What Cull says it couldn't read. */
     unreadableOriginals: (u: Shoot["unreadable"]) => {
       unreadable = u;

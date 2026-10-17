@@ -2,6 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
+  ArchiveX,
   ArrowLeft,
   CalendarDays,
   Eye,
@@ -26,6 +27,7 @@ import {
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   ai,
+  BIN,
   api,
   cull,
   headOf,
@@ -48,6 +50,7 @@ import {
   type FolderNode,
   type Overview,
   type Merged,
+  type MissingPhoto,
   type Moved,
   type Person,
   type PhotoList,
@@ -137,11 +140,15 @@ interface Place {
 
 function deleteSummary(r: DeleteReport) {
   const where = [
-    r.recycled && `${fmtNum(r.recycled)} to the Recycle Bin`,
+    r.recycled && `${fmtNum(r.recycled)} to the ${BIN}`,
     r.permanent && `${fmtNum(r.permanent)} deleted for good`,
   ].filter(Boolean);
   const left = r.photosRemoved ? ` ${fmtNum(r.photosRemoved)} photos left the catalog.` : "";
-  return `Deleted ${fmtNum(r.deleted)} files (${fmtBytes(r.bytes)})${where.length ? `: ${where.join(", ")}` : ""}.${left}`;
+  const gone = r.forgotten
+    ? ` ${fmtNum(r.forgotten)} of them ${r.forgotten === 1 ? "was" : "were"} already gone from ${r.forgotten === 1 ? "its disk" : "their disks"}.`
+    : "";
+  const deleted = r.deleted || !r.forgotten ? `Deleted ${fmtNum(r.deleted)} files (${fmtBytes(r.bytes)})${where.length ? `: ${where.join(", ")}` : ""}.` : "";
+  return `${deleted}${left}${gone}`.trim();
 }
 
 function loadRowHeight() {
@@ -368,6 +375,25 @@ export default function App() {
   const viewKeyRef = useRef(viewKey);
   viewKeyRef.current = viewKey;
   const current = loaded.key === viewKey;
+
+  // In the Missing view, once its photos are here: those whose files are in the
+  // system's bin (deleted, not moved). Kept with the list they are about.
+  const [binned, setBinned] = useState<{ list: PhotoList; photos: Map<number, MissingPhoto> } | null>(null);
+  const missingView = scope.kind === "missing" && current;
+  useEffect(() => {
+    if (!missingView || list.ids.length === 0) return;
+    let left = false;
+    api
+      .missingPhotos(list.ids)
+      .then((r) => {
+        if (!left) setBinned({ list, photos: new Map(r.photos.filter((p) => p.inBin).map((p) => [p.id, p])) });
+      })
+      .catch(() => {});
+    return () => {
+      left = true;
+    };
+  }, [missingView, list]);
+  const inBin = missingView && binned?.list === list ? binned.photos : null;
 
   // The photos of the view shown, then its filters' counts. Only the latest
   // request counts: an answer for a view already left is dropped.
@@ -929,6 +955,29 @@ export default function App() {
     }
   };
 
+  // Missing photos deleted outside Shoebox: out of the catalog, files already gone.
+  const forgetMissing = async (ids: number[]) => {
+    const n = ids.length;
+    if (n === 0) return;
+    const one = n === 1;
+    const yes = await ask(
+      `Take ${one ? "this missing photo" : `these ${fmtNum(n)} missing photos`} out of the catalog?\n\n` +
+        `${one ? "Its file is" : "Their files are"} already gone from ${one ? "its disk" : "their disks"}: nothing on any disk is touched. ` +
+        `Shoebox forgets ${one ? "it" : "them"} with ${one ? "its" : "their"} preview${one ? "" : "s"}, faces and tags. ` +
+        `If a file turns up again, the next scan adds it back as a new photo.`,
+      { title: "Remove from catalog", kind: "warning", okLabel: "Remove", cancelLabel: "Keep" },
+    );
+    if (!yes) return;
+    try {
+      const r = await api.forgetMissing(ids);
+      setSelected(new Set());
+      setMessage({ text: `${fmtNum(r.photos)} missing photo${r.photos === 1 ? "" : "s"} removed from the catalog.` });
+      refresh();
+    } catch (e) {
+      setMessage({ text: String(e), warn: true });
+    }
+  };
+
   // A search shows its clear matches unless "show more" was pressed.
   const shown = useMemo(
     () => (loaded.query && !showPossible ? headOf(list, clearCount) : list),
@@ -939,6 +988,11 @@ export default function App() {
   // ...and "Only new" there: just those photos.
   const newOnlyHere = scope.kind === "person" && !!scope.newOnly;
   const viewerIndex = useMemo(() => (viewerId == null ? -1 : shown.ids.indexOf(viewerId)), [viewerId, shown]);
+  // Selected photos that are missing everywhere: "Remove from catalog" takes them.
+  const missingSelected = useMemo(
+    () => (current && selected.size > 0 ? shown.ids.filter((id, i) => shown.state[i] === 0 && selected.has(id)) : []),
+    [current, selected, shown],
+  );
   const focusIndex = useMemo(() => (focusId == null ? null : shown.ids.indexOf(focusId)), [focusId, shown]);
   // Stable, so the grid isn't drawn again for a scan's progress or a letter typed in the search box.
   const openPhoto = useLatest((i: number) => setViewerId(shown.ids[i]));
@@ -1317,6 +1371,16 @@ export default function App() {
                 <UserX size={15} /> Not {personHere.name?.split(" ")[0] ?? "them"}…
               </button>
             )}
+            {view === "photos" && missingSelected.length > 0 && (
+              <button
+                className="btn ghost"
+                onClick={() => forgetMissing(missingSelected)}
+                title="Take the selected missing photos out of the catalog: for files deleted outside Shoebox"
+              >
+                <ArchiveX size={15} /> Remove{missingSelected.length > 1 ? ` ${fmtNum(missingSelected.length)}` : ""} from
+                catalog…
+              </button>
+            )}
             {view === "photos" && !empty && (
               <button
                 className="btn ghost"
@@ -1417,8 +1481,42 @@ export default function App() {
         )}
         {scope.kind === "missing" && (
           <div className="banner warn">
-            These photos weren't where Shoebox last saw them, on a disk that was plugged in. They stay in the catalog: if
-            they turn up on any disk, the next scan finds them again.
+            <span>
+              These photos weren't where Shoebox last saw them, on a disk that was plugged in. They stay in the catalog: if
+              they turn up on any disk, the next scan finds them again.
+              {inBin && inBin.size > 0 && (
+                <>
+                  {" "}
+                  <b>
+                    {inBin.size === list.ids.length
+                      ? list.ids.length === 1
+                        ? "It is"
+                        : "All of them are"
+                      : `${fmtNum(inBin.size)} of them ${inBin.size === 1 ? "is" : "are"}`}{" "}
+                    in the {BIN}
+                  </b>
+                  : deleted, not moved. Restore {inBin.size === 1 ? "it" : "them"} from the {BIN} to keep{" "}
+                  {inBin.size === 1 ? "it" : "them"} with faces and tags, or remove {inBin.size === 1 ? "it" : "them"}{" "}
+                  from the catalog.
+                </>
+              )}
+            </span>
+            <span className="grow" />
+            {inBin && inBin.size > 0 && inBin.size < list.ids.length && (
+              <button className="btn small ghost" onClick={() => forgetMissing([...inBin.keys()])}>
+                Remove the {fmtNum(inBin.size)} in the {BIN}…
+              </button>
+            )}
+            {list.ids.length > 0 && (
+              <button
+                className="btn small danger"
+                disabled={!current}
+                onClick={() => forgetMissing(list.ids)}
+                title="Take these photos out of the catalog: for files deleted outside Shoebox. Nothing on any disk is touched."
+              >
+                <ArchiveX size={14} /> Remove {list.ids.length === 1 ? "it" : `all ${fmtNum(list.ids.length)}`} from catalog…
+              </button>
+            )}
           </div>
         )}
         {scope.kind === "marked" && view === "photos" && (
@@ -1482,6 +1580,7 @@ export default function App() {
               onMark={setMarked}
               onTag={setTagging}
               selected={selected}
+              binned={inBin}
               keyboard={
                 current && viewerIndex < 0 && !calendar && !deleteOpen && !settingsOpen && !straysFor && !tagging && !reassigning
               }
@@ -1530,6 +1629,7 @@ export default function App() {
           index={viewerIndex}
           onIndex={(i) => setViewerId(shown.ids[i])}
           onToggleMark={() => setMarked([shown.ids[viewerIndex]], shown.marked[viewerIndex] !== 1)}
+          onForget={() => forgetMissing([shown.ids[viewerIndex]])}
           onTagsChanged={refreshSoon}
           onPerson={(id) => drill({ kind: "person", id })}
           onFolder={goToFolder}

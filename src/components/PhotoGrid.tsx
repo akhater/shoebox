@@ -1,6 +1,6 @@
-import { Focus, ImageOff, Trash2, TriangleAlert, Unplug } from "lucide-react";
+import { Focus, ImageOff, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { fmtNum, problemsOf, thumbUrl, type PhotoList } from "../api";
+import { BIN, fmtDeleted, fmtNum, problemsOf, thumbUrl, type MissingPhoto, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
 import { TimelineRail } from "./TimelineRail";
 
@@ -17,6 +17,8 @@ interface Props {
   focusIndex: number | null;
   /** Selected photo ids. */
   selected: Set<number>;
+  /** Missing photos whose files are in the system's bin (deleted, not moved). */
+  binned?: Map<number, MissingPhoto> | null;
   /** The cursor moved and/or the selection changed. */
   onSelect: (cursor: number, selected: Set<number>) => void;
   onOpen: (index: number) => void;
@@ -279,6 +281,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                 const state = list.state[t.index];
                 const preview = list.preview[t.index];
                 const marked = list.marked[t.index] === 1;
+                const inBin = state === 0 ? p.binned?.get(id) : undefined;
                 const problems = problemsOf(list.flags[t.index] ?? 0);
                 return (
                   <button
@@ -298,9 +301,11 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                         ? "Marked for deletion (Delete to unmark)"
                         : state === 1
                           ? "Not reachable now: disk unplugged or folder not found"
-                          : state === 0
-                            ? "Missing: not found where it was"
-                            : undefined
+                          : inBin
+                            ? `In the ${BIN}${inBin.deletedAt ? ` since ${fmtDeleted(inBin.deletedAt)}` : ""}: deleted, not moved`
+                            : state === 0
+                              ? "Missing: not found where it was"
+                              : undefined
                     }
                   >
                     {preview === 1 ? (
@@ -318,8 +323,8 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                       </span>
                     )}
                     {state === 0 && (
-                      <span className="badge missing">
-                        <TriangleAlert size={13} />
+                      <span className={`badge missing ${inBin ? "in-bin" : ""}`}>
+                        {inBin ? <Trash size={13} /> : <TriangleAlert size={13} />}
                       </span>
                     )}
                     {list.fresh[t.index] === 1 && (

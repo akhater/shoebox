@@ -1,16 +1,19 @@
-import { ChevronLeft, ChevronRight, ExternalLink, FolderInput, FolderOpen, ImageOff, Trash2, Undo2, UserX, X } from "lucide-react";
+import { ArchiveX, ChevronLeft, ChevronRight, ExternalLink, FolderInput, FolderOpen, ImageOff, Trash2, Undo2, UserX, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import {
   api,
+  BIN,
   faceUrl,
   fmtBytes,
   fmtDay,
+  fmtDeleted,
   fmtNum,
   fullUrl,
   people,
   previewUrl,
   thumbUrl,
   type FileLoc,
+  type MissingPhoto,
   type PhotoDetail,
   type Person,
   type PhotoFace,
@@ -32,6 +35,8 @@ interface Props {
   onClose: () => void;
   /** Marks the photo for deletion, or unmarks it. */
   onToggleMark: () => void;
+  /** A missing photo: takes it out of the catalog (asks first). */
+  onForget: () => void;
   /** Show a person's photos. */
   onPerson: (personId: number) => void;
   /** Show the folder a copy of the photo is in. */
@@ -51,11 +56,38 @@ const STATE_LABEL = {
   missing: "Missing",
 } as const;
 
-export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, onFolder, onTagsChanged, everyone, onFacesChanged }: Props) {
+export function Viewer({
+  list,
+  index,
+  onIndex,
+  onClose,
+  onToggleMark,
+  onForget,
+  onPerson,
+  onFolder,
+  onTagsChanged,
+  everyone,
+  onFacesChanged,
+}: Props) {
   const tagBox = useRef<HTMLInputElement>(null);
   const id = list.ids[index];
   const rev = list.rev[index];
   const marked = list.marked[index] === 1;
+  const missing = list.state[index] === 0;
+  // A missing photo: is its file in the system's bin (deleted, not moved)?
+  const [gone, setGone] = useState<{ id: number; photo: MissingPhoto | null } | null>(null);
+  useEffect(() => {
+    if (!missing) return;
+    let left = false;
+    api
+      .missingPhotos([id])
+      .then((r) => !left && setGone({ id, photo: r.photos[0] ?? null }))
+      .catch(() => {});
+    return () => {
+      left = true;
+    };
+  }, [id, missing]);
+  const binned = gone?.id === id && gone.photo?.inBin ? gone.photo : null;
   const [detail, setDetail] = useState<PhotoDetail | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -424,6 +456,22 @@ export function Viewer({ list, index, onIndex, onClose, onToggleMark, onPerson, 
                 </li>
               ))}
             </ul>
+            {missing && (
+              <div className="gone-note">
+                <p className="note warn">
+                  {binned
+                    ? `Deleted: in the ${BIN}${binned.deletedAt ? ` since ${fmtDeleted(binned.deletedAt)}` : ""}. Restore it from there and the next scan finds it again, faces and tags kept.`
+                    : "Not found where it was, on a disk that was plugged in. If it was deleted outside Shoebox, take it out of the catalog."}
+                </p>
+                <button
+                  className="btn small danger"
+                  onClick={onForget}
+                  title="Take this photo out of the catalog. Nothing on any disk is touched."
+                >
+                  <ArchiveX size={14} /> Remove from catalog…
+                </button>
+              </div>
+            )}
           </>
         )}
         {error && <p className="note warn">{error}</p>}

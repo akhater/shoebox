@@ -763,6 +763,10 @@ button {
 .badge.missing {
   color: var(--warn);
 }
+/* Missing, and in the system's bin: deleted, not moved. */
+.badge.missing.in-bin {
+  color: var(--muted);
+}
 /* File type in the bottom-right corner (an option in the toolbar); RAW in the accent colour. */
 .type-tag {
   position: absolute;
@@ -1199,6 +1203,13 @@ button {
 }
 .note.warn {
   color: #f0a18c;
+}
+/* Viewer: a missing photo, and taking it out of the catalog. */
+.gone-note {
+  margin-top: 12px;
+}
+.gone-note .note {
+  margin: 0 0 8px;
 }
 
 /* Settings */
