@@ -2,7 +2,7 @@
 
 Newest first. Same format and versioning as Argentum.
 
-## 26.42.4 - unreleased
+## 26.42.4 - 2026-10-17
 
 ### Added
 
@@ -43,19 +43,6 @@ Newest first. Same format and versioning as Argentum.
   The ticked faces move to the person in one step, with Undo.
   `shoebox-cli more-faces <person-id> [--apply]` does the same.
 
-## 26.42.3 - 2026-10-16
-
-### Added
-
-- **Catalog memory, and a benchmark for any computer.** Settings > General >
-  Catalog memory sets how much of the catalog is read straight from memory;
-  Automatic (the default) follows the catalog's size, and Windows gives the
-  memory back when other programs need it. `shoebox-cli bench` times what
-  the window does most (start-up, the sidebar, People, all photos, a camera,
-  a year, a person) on this catalog and computer, and `--cache-mb` /
-  `--map-mb` try other values for one run. `shoebox-cli settings` shows and
-  changes every setting.
-
 ### Fixed
 
 - **New photos tell children apart.** A new face is compared with each
@@ -82,6 +69,22 @@ Newest first. Same format and versioning as Argentum.
   "Find more" compares each face with the person it is in around then too:
   after "not them" for a child's faces, it ticks 41% of them instead of 29%,
   and offers a tenth as many faces of other people to check.
+
+## 26.42.3 - 2026-10-16
+
+### Added
+
+- **Catalog memory, and a benchmark for any computer.** Settings > General >
+  Catalog memory sets how much of the catalog is read straight from memory;
+  Automatic (the default) follows the catalog's size, and Windows gives the
+  memory back when other programs need it. `shoebox-cli bench` times what
+  the window does most (start-up, the sidebar, People, all photos, a camera,
+  a year, a person) on this catalog and computer, and `--cache-mb` /
+  `--map-mb` try other values for one run. `shoebox-cli settings` shows and
+  changes every setting.
+
+### Fixed
+
 - **Opens at once, however big the catalog.** The window no longer waits
   for word search's descriptions and everyone's faces to be read: they are
   read in the background, and a search or a face waits for them only if
