@@ -310,8 +310,27 @@ fn migrate(conn: &Connection) -> Result<()> {
              COMMIT;"
         ))?;
     }
+    if version < 15 {
+        conn.execute_batch(&format!("BEGIN; {SCHEMA_V15} PRAGMA user_version = 15; COMMIT;"))?;
+    }
     Ok(())
 }
+
+/// People check findings the user looked at and kept ("Leave as is", see
+/// faces.rs): left out of the check from then on. Keyed by what each is
+/// about: twice in a photo by (photo, person), a face's age jump or look-alike
+/// by (face, 0), two people by (lower id, higher id). `seen` is the finding as
+/// it was then (JSON): once that changes, the finding comes back by itself.
+const SCHEMA_V15: &str = r#"
+CREATE TABLE IF NOT EXISTS check_left (
+    kind        TEXT    NOT NULL,   -- 'twice', 'ageJump', 'likeOther', 'samePerson'
+    id          INTEGER NOT NULL,
+    id2         INTEGER NOT NULL,
+    seen        TEXT    NOT NULL,
+    left_at     INTEGER NOT NULL,
+    PRIMARY KEY (kind, id, id2)
+) WITHOUT ROWID;
+"#;
 
 /// Folder moves, renames and deletes under way (see organize.rs): what the
 /// next start needs to finish or undo one that was cut short. Each step
