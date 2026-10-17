@@ -1856,6 +1856,88 @@ button {
   flex: none;
 }
 
+/* Check people: likely mix-ups, by kind, one action each */
+.check-modal {
+  width: 720px;
+}
+.check-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px;
+  margin: 6px 0 14px;
+}
+.check-section h3 {
+  margin: 14px 0 8px;
+  font-size: 13px;
+}
+.check-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+.check-card.done {
+  opacity: 0.7;
+}
+.check-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.4;
+}
+.check-card .strays-grid {
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  margin: 10px 0;
+  /* The list scrolls, not each card. */
+  flex: none;
+  overflow: visible;
+}
+.check-card .stray:disabled {
+  cursor: default;
+}
+.check-photos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 10px 0;
+}
+.check-photo {
+  display: flex;
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 40px;
+}
+.check-photo .stray {
+  width: 64px;
+}
+.check-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 28px;
+}
+.check-pair {
+  display: flex;
+  gap: 24px;
+  margin: 10px 0;
+}
+.check-pair figure {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.check-pair img {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
 /* "Who is this?": move faces to someone else */
 .who-modal {
   width: 440px;

@@ -605,6 +605,40 @@ export interface Placement {
   seen: boolean;
 }
 
+/** What "Same person" changed: `people.unmerge` puts it back (Undo). */
+export interface Merged {
+  into: number;
+  /** Its name before (it takes the first name among them when it has none). */
+  name: string | null;
+  /** The people who joined, as they were, with their faces. */
+  joined: { id: number; name: string | null; ignored: boolean; createdAt: number; faces: number[] }[];
+}
+
+/** A face in a People check finding. */
+export interface CheckFace {
+  faceId: number;
+  photoId: number;
+  /** Likeness to the rest of its person, 0..1. */
+  similarity: number;
+  /** Put in this person by hand. */
+  byHand: boolean;
+}
+
+/** "Check" in People: likely mix-ups among named people. A face is in one finding at most. */
+export interface PeopleCheck {
+  /** Named people checked, and their faces. */
+  people: number;
+  faces: number;
+  /** Someone twice in one photo: `elsewhere` are the faces to move out (all but the most alike). */
+  twice: { personId: number; photoId: number; faces: CheckFace[]; elsewhere: number[] }[];
+  /** A face unlike them that year (`own`), like them years apart (`like` in `likeYear`): a sibling, a child, a parent. */
+  ageJumps: { personId: number; face: CheckFace; year: number; own: number; likeYear: number; like: number }[];
+  /** A face much more like another named person; `near`: its photo is within a month of theirs (else unsure). */
+  likeOthers: { personId: number; face: CheckFace; otherId: number; other: number; near: boolean }[];
+  /** Two named people who may be one; "Same person" merges `otherId` into `personId`. Suggested only when `together` is 0. */
+  samePeople: { personId: number; otherId: number; similarity: number; sameName: boolean; together: number }[];
+}
+
 export const people = {
   list: () => invoke<Person[]>("people"),
   /** People's search box: whoever's name matches, best first (any part of
@@ -615,7 +649,11 @@ export const people = {
   /** "Mark all as read" in People. */
   readAll: () => invoke<number>("read_all_people"),
   rename: (personId: number, name: string) => invoke<void>("rename_person", { personId, name }),
-  merge: (ids: number[], into: number) => invoke<void>("merge_people", { ids, into }),
+  merge: (ids: number[], into: number) => invoke<Merged>("merge_people", { ids, into }),
+  /** Undo of `merge`: the people are apart again. */
+  unmerge: (merged: Merged) => invoke<number>("unmerge_people", { merged }),
+  /** "Check": likely mix-ups among named people (nothing changes). */
+  check: () => invoke<PeopleCheck>("check_people"),
   ignore: (ids: number[], ignored: boolean) => invoke<void>("ignore_people", { ids, ignored }),
   /** Re-sorts faces not named, ignored or placed by hand. [faces, new people] */
   regroup: () => invoke<[number, number]>("regroup_faces"),
