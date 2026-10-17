@@ -1,4 +1,4 @@
-import { Check, Focus, ImageOff, Trash2, TriangleAlert, Unplug } from "lucide-react";
+import { Focus, ImageOff, Trash2, TriangleAlert, Unplug } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { fmtNum, problemsOf, thumbUrl, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
@@ -22,7 +22,7 @@ interface Props {
   onOpen: (index: number) => void;
   /** Delete: mark (or unmark) these photos for deletion. */
   onMark: (ids: number[], marked: boolean) => void;
-  /** P: pick (or unpick) these photos as keepers. */
+  /** P: keep these photos (decided: not to delete), or undo that. */
   onPick: (ids: number[], picked: boolean) => void;
   /** T: tag these photos. */
   onTag: (ids: number[]) => void;
@@ -34,6 +34,8 @@ interface Props {
   flatLabel?: string;
   /** The file type (CR3, JPG...) in a corner of each thumbnail. */
   showType: boolean;
+  /** What Cull found wrong (blurry, dark...) in a corner of each thumbnail. */
+  showProblems: boolean;
   /** Brings this photo to the top of the grid (a day picked in the calendar); a new `seq` each time. */
   jump?: { index: number; seq: number } | null;
   /** The first photo on screen changed (where the calendar opens). */
@@ -309,7 +311,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                       marked
                         ? "Marked for deletion (Delete to unmark)"
                         : picked
-                          ? "Picked (P to unpick)"
+                          ? "Kept: not to be deleted (P to undo)"
                           : state === 1
                           ? "Not reachable now: disk unplugged or folder not found"
                           : state === 0
@@ -346,12 +348,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                         <Trash2 size={13} />
                       </span>
                     )}
-                    {picked && (
-                      <span className="badge picked">
-                        <Check size={13} />
-                      </span>
-                    )}
-                    {problems.length > 0 && !marked && (
+                    {p.showProblems && problems.length > 0 && !marked && (
                       <span
                         className={`badge problem ${list.fresh[t.index] === 1 ? "after-new" : ""}`}
                         title={problems.map((x) => x.label).join(" · ")}

@@ -456,6 +456,8 @@ export interface CullFrame {
   alike: number | null;
   /** How alike its layout and the frame before's are (-1..1). */
   framing: number | null;
+  /** Where to look at 100% first: the middle of its largest face (0..1 of the picture). */
+  focus: [number, number] | null;
 }
 /** Frames of the same shot; `keeper` = the one Cull would keep. */
 export interface CullStack {
@@ -469,6 +471,8 @@ export interface Shoot {
   described: number;
   /** Photos whose original is reachable now and not looked at closer yet. */
   canLookCloser: number[];
+  /** Originals a closer look couldn't read, and why. */
+  unreadable: { id: number; name: string | null; reason: string }[];
   stacks: CullStack[];
 }
 export interface CloserProgress {

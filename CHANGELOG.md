@@ -7,26 +7,33 @@ Newest first. Same format and versioning as Argentum.
 ### Added
 
 - **Cull's assistant.** A **Cull** button above the photos opens the folder
-  or day shown as a shoot, one shot at a time. The frames of a burst (taken
+  or day shown as a shoot, one shot at a time (its hover text says how many
+  photos, and that a folder includes its subfolders). The frames of a burst (taken
   within seconds, framed the same and alike to word search) come as one
   stack, the frame to keep first in line; a RAW and its JPEG or export count
   as one frame. Each frame says what's wrong with it - blurry everywhere
   (with the shutter speed when it was slow for the lens), a face out of focus
   while something else is sharp, very dark, highlights blown, nothing in it
-  (a lens cap, a pocket) - and what Cull suggests: keep or reject. P picks,
+  (a lens cap, a pocket) - and what Cull suggests: keep or reject. P keeps,
   X rejects, U undecides, Enter does what Cull suggests for the shot and
-  moves on, **Accept all suggestions** does it for the whole shoot, and Z
-  opens the viewer for a 100% look. A reject is a mark for deletion, as
+  moves on, and **Accept all suggestions** does it for the whole shoot. Ctrl or
+  Shift click selects several frames, or several shots in the list on the
+  left, and P, X or U then applies to all of them. Z or a click shows the
+  frame at 100% from its original, centred on the face or where you
+  clicked; drag to move, and the burst's other frames open at the same
+  spot, to compare their sharpness. A reject is a mark for deletion, as
   before: nothing is deleted until you confirm. Every photo is measured in
   the background from its preview, so photos on unplugged drives too; with
   the drive connected, **Look closer** reads the originals at half size
-  (read-only) and finds the frames that are only soft at 100%. The measures
+  (read-only) and finds the frames that are only soft at 100%; an original
+  it can't read is named, with why, and not offered again. The measures
   live in `quality.db` beside the catalog: they can always be made again.
-- **Picks.** P in the grid picks the selected photos (a check mark in the
-  corner) or unpicks them; a pick is never also marked for deletion. The
-  filter bar has a **Cull** filter: picked, rejected, not decided. A photo
-  Cull found something wrong with carries a small badge, the reasons on
-  hover.
+- **Keep.** P in the grid keeps the selected photos (decided: not to be
+  deleted) or undoes it; a kept photo is never also marked for deletion,
+  and carries no mark (its hover text says so). The filter bar has a
+  **Cull** filter: kept, rejected, not decided. A toolbar toggle, off by
+  default and remembered like the file type's, shows what Cull found wrong
+  on each thumbnail, the reasons on hover.
 - `shoebox-cli quality` measures the photos not measured yet, `measure`
   shows a photo's measures and problems, `cull` gives a view as Cull shows
   it (`--closer` looks at the originals first), `cull-accept` does what it

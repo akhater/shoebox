@@ -8,6 +8,7 @@ import {
   ListChecks,
   EyeOff,
   FileType,
+  Focus,
   Pencil,
   FolderPlus,
   FolderX,
@@ -118,6 +119,9 @@ function useLatest<A extends unknown[], R>(f: (...args: A) => R) {
   latest.current = f;
   return useCallback((...args: A) => latest.current(...args), []);
 }
+
+/** Cull works on a shoot: up to this many photos at once (as the backend). */
+const CULL_MAX = 5000;
 
 /** What the main area shows: the photo grid, People, or Cull on the photos of the grid. */
 type View = "photos" | "people" | "cull";
@@ -293,6 +297,8 @@ export default function App() {
   const [sort, setSort] = useState<Sort>(loadSort);
   // File type (CR3, JPG...) on each thumbnail.
   const [showType, setShowType] = useRemembered("shoebox.showType", false);
+  // What Cull found wrong (blurry, dark...) on each thumbnail.
+  const [showProblems, setShowProblems] = useRemembered("shoebox.showProblems", false);
   // The sidebar folded to a rail of icons.
   const [folded, setFolded] = useRemembered("shoebox.sidebarFolded", false);
   const sortRef = useRef(sort);
@@ -1057,6 +1063,31 @@ export default function App() {
   }, [scope, overview, peopleList, browse]);
 
   const empty = overview && overview.volumes.length === 0;
+  // What Cull would work on: the photos shown, as filtered.
+  const cullTitle = useMemo(() => {
+    if (query) return "Cull works on a folder or a day, not on search results: clear the search first";
+    const n = shown.ids.length;
+    const what =
+      scope.kind === "folder" || scope.kind === "root"
+        ? "of this folder and its subfolders"
+        : scope.kind === "volume"
+          ? "of this disk"
+          : scope.kind === "date"
+            ? `of ${fmtDateKey(scope.key)}`
+            : scope.kind === "camera" || scope.kind === "lens"
+              ? `taken with ${scope.name}`
+              : scope.kind === "person"
+                ? `of ${scopeInfo.title}`
+                : scope.kind === "marked"
+                  ? "marked for deletion"
+                  : scope.kind === "missing"
+                    ? "missing"
+                    : "in the catalog";
+    const filtered = filtersOn(filters) ? ", as the filters narrow them" : "";
+    if (current && n > CULL_MAX)
+      return `Cull works on up to ${fmtNum(CULL_MAX)} photos at once; this view has ${fmtNum(n)}: pick a folder or a day, or narrow it with the filters`;
+    return `Cull the ${current ? `${fmtNum(n)} ` : ""}photos ${what}${filtered}: bursts gathered, what's blurry or badly exposed, what to keep. Keep (P) and reject (Delete) in the grid too.`;
+  }, [query, shown, scope, scopeInfo.title, filters, current]);
   // The people People shows without asking: not ignored, not seen only once.
   const shownPeople = useMemo(() => peopleList.filter((p) => !p.ignored && (p.name || p.photos >= 2)), [peopleList]);
   const peopleNew = useMemo(() => shownPeople.filter((p) => p.isNew || p.newPhotos > 0).length, [shownPeople]);
@@ -1323,12 +1354,8 @@ export default function App() {
                   setCalendar(false);
                   setView("cull");
                 }}
-                disabled={!!query}
-                title={
-                  query
-                    ? "Cull works on a folder or a day, not on search results: clear the search first"
-                    : "Cull these photos: bursts gathered, what's blurry or badly exposed, what to keep. Pick (P) and reject (Delete) in the grid too."
-                }
+                disabled={!!query || (current && shown.ids.length > CULL_MAX)}
+                title={cullTitle}
               >
                 <ListChecks size={15} /> Cull
               </button>
@@ -1354,6 +1381,20 @@ export default function App() {
                 aria-pressed={showType}
               >
                 <FileType size={16} />
+              </button>
+            )}
+            {view === "photos" && (
+              <button
+                className={`icon-btn type-toggle ${showProblems ? "on" : ""}`}
+                onClick={() => setShowProblems(!showProblems)}
+                title={
+                  showProblems
+                    ? "Hide what Cull found on thumbnails"
+                    : "Show what Cull found (blurry, face out of focus, dark...) on thumbnails"
+                }
+                aria-pressed={showProblems}
+              >
+                <Focus size={16} />
               </button>
             )}
             <input
@@ -1430,7 +1471,6 @@ export default function App() {
             onClose={closeCull}
             onChanged={cullChanged}
             onError={cullError}
-            everyone={peopleList}
           />
         ) : view === "people" ? (
           <PeopleView
@@ -1478,6 +1518,7 @@ export default function App() {
               focusRequest={gridFocus}
               focusIndex={focusIndex}
               showType={showType}
+              showProblems={showProblems}
               flatLabel={flatLabel}
               jump={jump}
               onTopPhoto={topPhoto}

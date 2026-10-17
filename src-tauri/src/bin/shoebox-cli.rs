@@ -140,7 +140,8 @@
 //!                                         stacks, each frame's problems, and Cull's suggestion
 //!                                         (pick, reject, none) with the reasons. --closer first
 //!                                         looks closer at the originals plugged in (read at half
-//!                                         size, read-only), which shows a photo only soft at 100%
+//!                                         size, read-only), which shows a photo only soft at 100%;
+//!                                         originals it couldn't read are listed under "unreadable", with why
 //!   shoebox-cli cull-accept [filters] [scope]   do what Cull suggests for the frames not decided
 //!                                         yet: picks picked, rejects marked for deletion
 //!   shoebox-cli pick <photo-id>... | unpick <photo-id>...   a pick is never also marked

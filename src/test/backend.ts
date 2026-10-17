@@ -56,6 +56,8 @@ export function fakeBackend() {
   const photos: Photo[] = ROOTS.flatMap((r) => photosOf(r.id).map((id) => ({ id, root: r.id, taken: JAN_2026 + id * 3600 })));
   const marked = new Set<number>();
   const picked = new Set<number>();
+  /** Originals Cull couldn't read for a closer look (a test sets them). */
+  let unreadable: Shoot["unreadable"] = [];
   let people: Person[] = [
     { id: 7, name: "Ana", faces: 3, photos: 3, cover: 1, ignored: false, isNew: false, newPhotos: 0 },
     { id: 8, name: null, faces: 2, photos: 2, cover: 2, ignored: false, isNew: false, newPhotos: 0 },
@@ -192,6 +194,7 @@ export function fakeBackend() {
       closer: false,
       alike: null,
       framing: null,
+      focus: [0.5, 0.3],
     });
     const stacks: CullStack[] = [];
     for (const p of ps) {
@@ -207,7 +210,7 @@ export function fakeBackend() {
         stacks.push({ frames: [frame(p, "pick", [])], keeper: 0 });
       }
     }
-    return { photos: ps.length, measured: ps.length, closer: 0, described: ps.length, canLookCloser: ps.map((p) => p.id), stacks };
+    return { photos: ps.length, measured: ps.length, closer: 0, described: ps.length, canLookCloser: ps.map((p) => p.id), unreadable, stacks };
   };
 
   const sorted = (ps: Photo[], sort: Sort) =>
@@ -411,6 +414,10 @@ export function fakeBackend() {
     delay: (cmd: string, ms: number) => cmdDelays.set(cmd, ms),
     marked,
     picked,
+    /** What Cull says it couldn't read. */
+    unreadableOriginals: (u: Shoot["unreadable"]) => {
+      unreadable = u;
+    },
     /** Face finding: someone new, or more photos of someone. */
     addPerson: (p: Person, photoIds: number[]) => {
       people = [...people, p];

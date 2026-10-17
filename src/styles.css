@@ -800,14 +800,7 @@ button {
   right: 6px;
   color: var(--warn);
 }
-/* Cull: a pick (top right, where a mark would be: never both), and what's wrong (top left). */
-.badge.picked {
-  top: 6px;
-  bottom: auto;
-  left: auto;
-  right: 6px;
-  color: var(--on);
-}
+/* Cull: what's wrong (top left; a toolbar toggle shows it). */
 .badge.problem {
   top: 6px;
   bottom: auto;
@@ -2953,4 +2946,70 @@ button {
 }
 .cull-keys {
   flex: none;
+}
+/* Cull at 100%: the original, drawn at its own size, the spot looked at in the middle. */
+.cull-photo {
+  cursor: zoom-in;
+}
+.cull-zoom {
+  position: relative;
+  flex: 1;
+  min-height: 120px;
+  overflow: hidden;
+  background: #0d0e10;
+  border-radius: var(--radius);
+  cursor: wait;
+  user-select: none;
+}
+.cull-zoom.ready {
+  cursor: grab;
+}
+.cull-zoom.ready:active {
+  cursor: grabbing;
+}
+.cull-zoom-wait {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.5;
+}
+.cull-zoom-full {
+  position: absolute;
+  max-width: none;
+  max-height: none;
+  visibility: hidden;
+}
+.cull-zoom.ready .cull-zoom-full {
+  visibility: visible;
+}
+.cull-zoom-note {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  background: rgba(10, 10, 12, 0.8);
+  font-size: 13px;
+}
+/* Several selected: P, X and U act on them all. */
+.cull-frame.selected,
+.cull-shot.selected {
+  outline: 2px dashed var(--accent);
+  outline-offset: 1px;
+}
+.cull-selected {
+  color: var(--accent);
+}
+.cull-unreadable {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--warn);
+  cursor: help;
 }

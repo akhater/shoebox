@@ -27,7 +27,7 @@ interface Props {
 }
 
 const STATUS_LABEL: Record<string, string> = { online: "Plugged in", offline: "Unplugged", missing: "Missing" };
-const CULL_LABEL: Record<string, string> = { picked: "Picked", rejected: "Rejected", undecided: "Not decided" };
+const CULL_LABEL: Record<string, string> = { picked: "Kept", rejected: "Rejected", undecided: "Not decided" };
 
 /** Ticked values first stay listed even when nothing matches them any more. */
 function withPicked(values: FacetValue[], picked: string[]): FacetValue[] {

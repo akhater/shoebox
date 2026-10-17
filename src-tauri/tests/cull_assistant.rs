@@ -144,3 +144,39 @@ fn a_shoot_is_measured_stacked_and_decided() {
     drop((quality, search, cat));
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// An original that can't be read for a closer look (gone from the disk since
+/// the last scan) is named with why, and no longer offered.
+#[test]
+fn an_original_that_cant_be_read_is_named_and_not_offered_again() {
+    let base = std::env::temp_dir().join("shoebox-cull-unreadable");
+    let _ = std::fs::remove_dir_all(&base);
+    let photos = base.join("photos");
+    std::fs::create_dir_all(&photos).unwrap();
+    squares(&photos.join("IMG_0001.JPG"), 2000, 1333, 0.0);
+    squares_of(&photos.join("IMG_0002.JPG"), 2000, 1333, 0.0, 50);
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data).unwrap();
+    let root = cat.add_root(&photos).unwrap();
+    scan_root(&cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
+    let (one, two) = (id_of(&cat, "IMG_0001.JPG"), id_of(&cat, "IMG_0002.JPG"));
+    std::fs::remove_file(photos.join("IMG_0002.JPG")).unwrap();
+
+    let quality = QualityIndex::open(&cat).unwrap();
+    quality.index_pending(&cat, &AtomicBool::new(false), &|_| {}).unwrap();
+    let search = SearchIndex::open(&cat).unwrap();
+    let scope = Scope::Root { id: root };
+    let shoot = quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap();
+    assert_eq!(shoot.can_look_closer, [one, two]);
+    let looked = quality.look_closer(&cat, &shoot.can_look_closer, &AtomicBool::new(false), &|_, _| {}).unwrap();
+    assert_eq!(looked, 1);
+    let shoot = quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap();
+    assert!(shoot.can_look_closer.is_empty(), "{:?}", shoot.can_look_closer);
+    assert_eq!(shoot.unreadable.len(), 1);
+    assert_eq!((shoot.unreadable[0].id, shoot.unreadable[0].name.as_deref()), (two, Some("IMG_0002.JPG")));
+    assert!(!shoot.unreadable[0].reason.is_empty());
+
+    drop((quality, search, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}

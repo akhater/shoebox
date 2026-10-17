@@ -539,6 +539,9 @@ pub struct QualityIndex {
     /// Photos measured while their faces weren't looked for yet: measured
     /// again once they are.
     without_faces: RwLock<HashSet<i64>>,
+    /// Originals a closer look couldn't read, and why (until Shoebox restarts):
+    /// Cull stops offering them and says so.
+    unreadable: Mutex<HashMap<i64, String>>,
     /// Open once the measures are read.
     ready: crate::Ready,
     /// Measuring takes a few threads, never all of them: the window's own
@@ -598,6 +601,7 @@ impl QualityIndex {
             db: Mutex::new(conn),
             measured: RwLock::new(HashMap::new()),
             without_faces: RwLock::new(HashSet::new()),
+            unreadable: Mutex::new(HashMap::new()),
             ready: crate::Ready::default(),
             pool: rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|i| format!("cull-{i}")).build()?,
         })
@@ -799,23 +803,29 @@ impl QualityIndex {
             }
             let faces = faces_of(&cat.db(), chunk)?;
             let fingerprints = fingerprints_of(&cat.db(), chunk)?;
-            let found: Vec<(i64, Measures)> = self.pool.install(|| {
+            let results: Vec<(i64, std::result::Result<Measures, String>)> = self.pool.install(|| {
                 chunk
                     .par_iter()
                     .with_max_len(1)
-                    .filter_map(|id| {
-                        let (path, kind) = cat.original(*id).ok()?;
-                        let full = cat.full_size(*id);
-                        let long = full.map_or(3000, |l| if l <= CLOSE_WHOLE { l } else { l / 2 });
-                        let loaded = crate::imaging::load(&path, kind, long);
-                        let full = full.or(loaded.meta.width.max(loaded.meta.height));
-                        let img = loaded.image.ok()?.to_rgb8();
-                        let mut m = measure(&img, faces.get(id).map(Vec::as_slice).unwrap_or(&[]));
-                        m.full = full.filter(|&f| f >= m.long);
-                        Some((*id, m))
-                    })
+                    .map(|id| (*id, closer_look(cat, *id, faces.get(id).map(Vec::as_slice).unwrap_or(&[]))))
                     .collect()
             });
+            let mut found = Vec::new();
+            {
+                let mut unreadable = self.unreadable.lock().unwrap();
+                for (id, r) in results {
+                    match r {
+                        Ok(m) => {
+                            unreadable.remove(&id);
+                            found.push((id, m));
+                        }
+                        Err(why) => {
+                            log::warn!("cull: photo {id}: original not read for a closer look: {why}");
+                            unreadable.insert(id, why);
+                        }
+                    }
+                }
+            }
             looked += found.len();
             self.store_close(cat, &found, &fingerprints, &faces)?;
             done += chunk.len() as u64;
@@ -887,6 +897,7 @@ impl QualityIndex {
             );
         }
         let info = cat.shot_info(&list.ids)?;
+        let faces = faces_of(&*cat.read()?, &list.ids)?;
         let vectors = search.vectors(&list.ids);
         let measured = self.measured.read().unwrap();
         let frames: Vec<FrameIn> = list
@@ -912,6 +923,7 @@ impl QualityIndex {
                         rev: list.rev[i],
                         picked: info.picked,
                         marked: list.marked[i] == 1,
+                        focus: faces.get(id).and_then(|f| focus_of(f)),
                         ..Default::default()
                     },
                 }
@@ -920,10 +932,18 @@ impl QualityIndex {
         drop(measured);
         let measured_n = frames.iter().filter(|f| f.quality.is_some()).count();
         let closer_n = frames.iter().filter(|f| f.quality.is_some_and(|q| q.close.is_some())).count();
+        let failed = self.unreadable.lock().unwrap().clone();
         let can_look = frames
             .iter()
-            .filter(|f| f.row.state == 2 && f.quality.is_none_or(|q| q.close.is_none()))
+            .filter(|f| f.row.state == 2 && f.quality.is_none_or(|q| q.close.is_none()) && !failed.contains_key(&f.id))
             .map(|f| f.id)
+            .collect();
+        let unreadable = frames
+            .iter()
+            .filter_map(|f| {
+                let reason = failed.get(&f.id)?.clone();
+                Some(Unreadable { id: f.id, name: f.row.name.clone(), reason })
+            })
             .collect();
         let described = frames.iter().filter(|f| f.vector.is_some()).count();
         let stacks = suggest(frames);
@@ -934,9 +954,31 @@ impl QualityIndex {
             closer: closer_n,
             described,
             can_look_closer: can_look,
+            unreadable,
             stacks,
         })
     }
+}
+
+/// A photo's original, read at half its size (whole when small, read-only),
+/// and measured; or why it couldn't be.
+fn closer_look(cat: &Catalog, id: i64, faces: &[FaceBox]) -> std::result::Result<Measures, String> {
+    let (path, kind) = cat.original(id).map_err(|e| format!("{e:#}"))?;
+    let full = cat.full_size(id);
+    let long = full.map_or(3000, |l| if l <= CLOSE_WHOLE { l } else { l / 2 });
+    let loaded = crate::imaging::load(&path, kind, long);
+    let full = full.or(loaded.meta.width.max(loaded.meta.height));
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let img = loaded.image.map_err(|e| format!("{name}: {e}"))?.to_rgb8();
+    let mut m = measure(&img, faces);
+    m.full = full.filter(|&f| f >= m.long);
+    Ok(m)
+}
+
+/// Where to look at 100% first: the middle of the largest face (0..1 of the picture).
+fn focus_of(faces: &[FaceBox]) -> Option<[f32; 2]> {
+    let f = faces.iter().max_by(|a, b| (a.x2 - a.x1).total_cmp(&(b.x2 - b.x1)))?;
+    Some([(f.x1 + f.x2) * 0.5, (f.y1 + f.y2) * 0.5])
 }
 
 /// The faces found in these photos.
@@ -985,6 +1027,8 @@ pub struct Shoot {
     pub described: usize,
     /// Photos whose original is reachable now and not looked at closer yet.
     pub can_look_closer: Vec<i64>,
+    /// Originals a closer look couldn't read, and why.
+    pub unreadable: Vec<Unreadable>,
     pub stacks: Vec<Stack>,
 }
 
@@ -1035,6 +1079,17 @@ pub struct FrameRow {
     pub alike: Option<f32>,
     /// How alike its layout and the frame before's are (-1..1).
     pub framing: Option<f32>,
+    /// Where to look at 100% first: the middle of its largest face (0..1 of the picture).
+    pub focus: Option<[f32; 2]>,
+}
+
+/// An original a closer look couldn't read.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Unreadable {
+    pub id: i64,
+    pub name: Option<String>,
+    pub reason: String,
 }
 
 struct FrameIn {
