@@ -459,7 +459,7 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("look-alikes <face-id>...");
             }
             let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
-            println!("{}", serde_json::to_string_pretty(&faces.look_alikes(&ids, &[], 6)?)?);
+            println!("{}", serde_json::to_string_pretty(&faces.look_alikes(&cat, &ids, &[], 6)?)?);
         }
         Some("move-faces") => {
             use shoebox_lib::faces::FaceTarget;

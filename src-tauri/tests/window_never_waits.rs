@@ -20,7 +20,7 @@ fn questions_are_answered_while_the_catalog_is_written() {
     data.ensure().unwrap();
     let cat = Catalog::open(data).unwrap();
     let disk = cat.plug_in_test_disk("Disk", &base).unwrap();
-    let (photo, file, person) = {
+    let (photo, file, person, face) = {
         let db = cat.db();
         db.execute("INSERT INTO folders (volume_id, rel_path) VALUES (?1, 'Pictures')", [disk]).unwrap();
         let folder = db.last_insert_rowid();
@@ -43,11 +43,18 @@ fn questions_are_answered_while_the_catalog_is_written() {
             params![photo, person],
         )
         .unwrap();
+        let face = db.last_insert_rowid();
         db.execute("INSERT INTO tags (name, created_at) VALUES ('beach', 0)", []).unwrap();
         db.execute("INSERT INTO photo_tags (photo_id, tag_id, added_at) VALUES (?1, last_insert_rowid(), 0)", [photo])
             .unwrap();
-        (photo, file, person)
+        (photo, file, person, face)
     };
+    // Her fingerprint, so suggestions and "find more" have someone to compare.
+    let emb = rusqlite::Connection::open(cat.data.root.join("faces.db")).unwrap();
+    emb.execute_batch("CREATE TABLE IF NOT EXISTS emb (face_id INTEGER PRIMARY KEY, vec BLOB NOT NULL);").unwrap();
+    let print: Vec<u8> = (0..512).flat_map(|i| (if i == 0 { 1f32 } else { 0.0 }).to_le_bytes()).collect();
+    emb.execute("INSERT INTO emb (face_id, vec) VALUES (?1, ?2)", params![face, print]).unwrap();
+    drop(emb);
     let faces = Arc::new(FaceIndex::open(&cat).unwrap());
     let cat = Arc::new(cat);
 
@@ -82,6 +89,8 @@ fn questions_are_answered_while_the_catalog_is_written() {
         f.photo_faces(&c, photo).unwrap();
         f.faces_in(&c, &[photo]).unwrap();
         f.person_faces(&c, person).unwrap();
+        f.look_alikes(&c, &[face], &[], 6).unwrap();
+        f.more_of(&c, person).unwrap();
         shoebox_lib::tags::all(&c).unwrap();
         shoebox_lib::tags::on(&c, &[photo]).unwrap();
         let _ = done.send(());

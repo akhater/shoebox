@@ -88,7 +88,7 @@ fn a_face_goes_where_ak_says_and_stays_there() {
     assert!(all.windows(2).all(|p| p[0].similarity <= p[1].similarity), "least alike first");
 
     // z looks like Cy (Ana herself not suggested).
-    let alike = faces.look_alikes(&[z], &[1], 6).unwrap();
+    let alike = faces.look_alikes(&cat, &[z], &[1], 6).unwrap();
     assert_eq!(alike.first().map(|l| l.person_id), Some(3));
 
     // "x is Bob": Bob was already in photo A (y), so y makes room - not back

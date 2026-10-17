@@ -342,7 +342,7 @@ fn an_unnamed_person_merged_into_gets_its_name_back_on_undo() {
     assert_eq!(name, None);
     assert_eq!((person_of(&cat, a), person_of(&cat, c)), (1, c_now));
     // The averages followed: Bo's remaining face looks like Bo again.
-    let alike = faces.look_alikes(&[b], &[], 3).unwrap();
+    let alike = faces.look_alikes(&cat, &[b], &[], 3).unwrap();
     assert_eq!(alike.first().map(|l| l.person_id), Some(bo));
     assert!(alike[0].similarity > 0.99);
 }

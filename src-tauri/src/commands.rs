@@ -331,8 +331,8 @@ pub async fn look_alikes(
     face_ids: Vec<i64>,
     except: Vec<i64>,
 ) -> Res<Vec<crate::faces::LookAlike>> {
-    let faces = state.faces.clone();
-    blocking(move || faces.look_alikes(&face_ids, &except, 12)).await
+    let (cat, faces) = (state.cat.clone(), state.faces.clone());
+    blocking(move || faces.look_alikes(&cat, &face_ids, &except, 12)).await
 }
 
 /// Faces in a person that don't look like them, worst first.
