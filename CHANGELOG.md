@@ -40,6 +40,15 @@ Newest first. Same format and versioning as Argentum.
   already made stay as they are: Regroup faces in People sorts the unnamed
   ones again with the new comparison. Reading everyone's faces at start
   takes about 0.05 s more.
+- **"Who is this" and "Find more" tell children apart too.** Both now
+  compare a face with each person as they looked around the date of its
+  photo, as grouping does. On a copy of a real catalog, "Who is this" shows
+  the person the user chose first for 81% of faces placed by hand instead of
+  69% (babies under one: 82% instead of 62%), and among the five suggestions
+  for 84% instead of 58% of the faces old groups put in someone else.
+  "Find more" compares each face with the person it is in around then too:
+  after "not them" for a child's faces, it ticks 41% of them instead of 29%,
+  and offers a tenth as many faces of other people to check.
 - **Opens at once, however big the catalog.** The window no longer waits
   for word search's descriptions and everyone's faces to be read: they are
   read in the background, and a search or a face waits for them only if

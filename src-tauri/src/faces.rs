@@ -345,7 +345,12 @@ impl Averages {
     /// How a person looked over `months` (first, last): their faces from
     /// then and the nearest months either side holding AROUND_FACES, as a
     /// unit vector; none when there are fewer within AROUND_MONTHS.
-    fn around(&self, person: i64, (first, last): (i64, i64)) -> Option<Vec<f32>> {
+    fn around(&self, person: i64, months: (i64, i64)) -> Option<Vec<f32>> {
+        self.around_sum(person, months).map(|(sum, _)| unit(sum))
+    }
+
+    /// [`Averages::around`], as the sum of those faces and how many.
+    fn around_sum(&self, person: i64, (first, last): (i64, i64)) -> Option<(Vec<f32>, u32)> {
         let months = self.months.get(&person)?;
         let faces = |k: i64| months.range(first - k..=last + k).map(|(_, (_, n))| n).sum::<u32>();
         if faces(AROUND_MONTHS) < AROUND_FACES {
@@ -357,7 +362,7 @@ impl Averages {
         for (_, (s, _)) in months.range(first - k..=last + k) {
             sum.iter_mut().zip(s).for_each(|(a, b)| *a += b);
         }
-        Some(unit(sum))
+        Some((sum, faces(k)))
     }
 
     /// The first and last month of a person's photos with a date.
@@ -366,12 +371,12 @@ impl Averages {
         Some((*m.first_key_value()?.0, *m.last_key_value()?.0))
     }
 
-    /// The pairs of face (unit vector) and person, other than `except`, alike
-    /// enough to be them, for faces from `months` (first, last; none: date
+    /// The pairs of face (unit vector) and person, other than `except`, at
+    /// least `min` alike, for faces from `months` (first, last; none: date
     /// unknown): (likeness, face, person). Each person as they looked around
     /// then; one with too few photos from then (or a face with no date), by
     /// their whole-life average.
-    fn alike(&self, faces: &[&[f32]], months: Option<(i64, i64)>, except: &[i64]) -> Vec<(f32, usize, i64)> {
+    fn alike(&self, faces: &[&[f32]], months: Option<(i64, i64)>, except: &[i64], min: f32) -> Vec<(f32, usize, i64)> {
         let mut pairs = Vec::new();
         for (pid, (sum, n)) in &self.life {
             if *n == 0 || except.contains(pid) {
@@ -384,7 +389,7 @@ impl Averages {
             };
             for (i, v) in faces.iter().enumerate() {
                 let s = dot(c, v) / norm;
-                if s >= SAME_PERSON {
+                if s >= min {
                     pairs.push((s, i, *pid));
                 }
             }
@@ -396,7 +401,7 @@ impl Averages {
     /// face and person first, each person once, none of `taken` (already in
     /// the photo). None: nobody alike enough - someone new.
     fn choose(&self, faces: &[&[f32]], month: Option<i64>, taken: &[i64]) -> Vec<Option<i64>> {
-        let mut pairs = self.alike(faces, month.map(|m| (m, m)), taken);
+        let mut pairs = self.alike(faces, month.map(|m| (m, m)), taken, SAME_PERSON);
         // Ties: the earlier face, then the older person, so a regroup comes out the same.
         pairs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
         let mut out = vec![None; faces.len()];
@@ -429,9 +434,10 @@ pub struct Candidate {
     pub photo_id: i64,
     /// The person it's in now.
     pub person_id: i64,
-    /// Likeness to the person asked about, 0..1.
+    /// Likeness to the person asked about around the photo's date, 0..1.
     pub similarity: f32,
-    /// Likeness to the rest of the person it's in; none when it's their only face.
+    /// Likeness to the rest of the person it's in, around then; none when
+    /// it's their only face.
     pub now: Option<f32>,
     /// The user put it where it is.
     pub by_hand: bool,
@@ -1182,7 +1188,7 @@ impl FaceIndex {
             for (months, ls) in by_months {
                 let averages: Vec<Vec<f32>> = ls.iter().map(|l| unit(c.life[l].0.clone())).collect();
                 let faces: Vec<&[f32]> = averages.iter().map(Vec::as_slice).collect();
-                for (s, i, t) in c.alike(&faces, months, &[]) {
+                for (s, i, t) in c.alike(&faces, months, &[], SAME_PERSON) {
                     let l = ls[i];
                     if t != l && everyone.contains(&t) && (!movable.contains(&t) || bigger(t, l)) {
                         joins.push((s, l, t));
@@ -1413,28 +1419,33 @@ impl FaceIndex {
     }
 
     /// The people these faces look most like, best first, to suggest who
-    /// they are: by each person's average face, not counting `except`.
-    pub fn look_alikes(&self, face_ids: &[i64], except: &[i64], n: usize) -> Result<Vec<LookAlike>> {
+    /// they are, not counting `except`: each person as they looked around
+    /// the months of the faces' photos, as grouping compares them.
+    pub fn look_alikes(&self, cat: &Catalog, face_ids: &[i64], except: &[i64], n: usize) -> Result<Vec<LookAlike>> {
         self.ready.wait()?;
-        let mut vs = Vec::new();
+        let db = cat.read()?;
+        let mut taken =
+            db.prepare("SELECT p.taken_ts FROM faces f JOIN photos p ON p.id = f.photo_id WHERE f.id = ?1")?;
+        let (mut vs, mut months) = (Vec::new(), None::<(i64, i64)>);
         for &fid in face_ids {
-            if let Some(v) = self.vector(fid)? {
-                vs.push(v);
+            let Some(v) = self.vector(fid)? else { continue };
+            vs.push(v);
+            let when: Option<i64> = taken.query_row([fid], |r| r.get(0)).optional()?.flatten();
+            if let Some(m) = month_of(when) {
+                months = Some(months.map_or((m, m), |(a, b)| (a.min(m), b.max(m))));
             }
         }
         if vs.is_empty() {
             return Ok(Vec::new());
         }
         let face = mean(&vs.iter().map(Vec::as_slice).collect::<Vec<_>>());
-        let c = self.centroids.read().unwrap();
-        let mut out: Vec<LookAlike> = c
-            .iter()
-            .filter(|(pid, (_, n))| *n > 0 && !except.contains(pid))
-            .map(|(pid, (sum, _))| {
-                let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::EPSILON);
-                LookAlike { person_id: *pid, similarity: dot(sum, &face) / norm }
-            })
-            .filter(|l| l.similarity >= LOOKS_LIKE)
+        let mut out: Vec<LookAlike> = self
+            .centroids
+            .read()
+            .unwrap()
+            .alike(&[&face], months, except, LOOKS_LIKE)
+            .into_iter()
+            .map(|(similarity, _, person_id)| LookAlike { person_id, similarity })
             .collect();
         out.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
         out.truncate(n);
@@ -1485,90 +1496,107 @@ impl FaceIndex {
 
     /// "Find more": faces in other people that look more like this person
     /// than like the rest of the person they're in - Clean up the other way
-    /// round. Faces placed by hand are offered too: the user decides, face by
-    /// face, and nothing moves until they do. Grouped by the day the photo was
-    /// taken: to the model babies all look alike, while a person looks like
-    /// themselves around the same time, so the days near the person's own
-    /// photos come first and start ticked. A photo they're already in is
-    /// left out (a person stays once per photo).
+    /// round. Both as they looked around the date of the face's photo, as
+    /// grouping compares them: a baby's faces are found by the baby's own
+    /// months, not by an average over their childhood. Faces placed by hand
+    /// are offered too: the user decides, face by face, and nothing moves
+    /// until they do. Grouped by the day the photo was taken: to the model
+    /// babies all look alike, while a person looks like themselves around the
+    /// same time, so the days near the person's own photos come first and
+    /// start ticked. A photo they're already in is left out (a person stays
+    /// once per photo).
     pub fn more_of(&self, cat: &Catalog, person_id: i64) -> Result<Vec<CandidateDay>> {
         self.ready.wait()?;
-        let target = {
-            let c = self.centroids.read().unwrap();
-            match c.get(&person_id) {
-                Some((sum, n)) if *n > 0 => unit(sum.clone()),
-                _ => return Ok(Vec::new()),
-            }
-        };
         let db = cat.read()?;
-        let faces: Vec<(i64, i64, i64, bool)> = db
-            .prepare("SELECT id, person_id, photo_id, by_hand FROM faces WHERE person_id IS NOT NULL ORDER BY id")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0)))?
+        // (face, person, photo, by hand, taken)
+        let faces: Vec<(i64, i64, i64, bool, Option<i64>)> = db
+            .prepare(
+                "SELECT f.id, f.person_id, f.photo_id, f.by_hand, p.taken_ts FROM faces f
+                   JOIN photos p ON p.id = f.photo_id WHERE f.person_id IS NOT NULL ORDER BY f.id",
+            )?
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, r.get::<_, Option<i64>>(4)?))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         let theirs: HashSet<i64> = faces.iter().filter(|f| f.1 == person_id).map(|f| f.2).collect();
 
-        // Alike enough to be them: one pass over the fingerprints, in face order.
-        let mut alike: Vec<(i64, i64, i64, bool, f32, Vec<f32>)> = Vec::new();
+        // How they looked around each month the other faces were taken: the
+        // nearest months holding enough of their faces, else their whole life
+        // (also for a photo with no date).
+        let looks: HashMap<Option<i64>, Vec<f32>> = {
+            let c = self.centroids.read().unwrap();
+            let life = match c.get(&person_id) {
+                Some((sum, n)) if *n > 0 => unit(sum.clone()),
+                _ => return Ok(Vec::new()),
+            };
+            let months: HashSet<Option<i64>> = faces.iter().map(|f| month_of(f.4)).collect();
+            months
+                .into_iter()
+                .map(|m| (m, m.and_then(|m| c.around(person_id, (m, m))).unwrap_or_else(|| life.clone())))
+                .collect()
+        };
+
+        // Alike enough to be them, as (which of `faces`, likeness, fingerprint):
+        // one pass over the fingerprints, in face order.
+        let mut alike: Vec<(usize, f32, Vec<f32>)> = Vec::new();
         {
-            let mut faces = faces.iter().filter(|f| f.1 != person_id && !theirs.contains(&f.2)).peekable();
+            let mut faces =
+                faces.iter().enumerate().filter(|(_, f)| f.1 != person_id && !theirs.contains(&f.2)).peekable();
             let emb = self.db.lock().unwrap();
             let mut stmt = emb.prepare("SELECT face_id, vec FROM emb ORDER BY face_id")?;
             let mut rows = stmt.query([])?;
             while let Some(r) = rows.next()? {
                 let fid: i64 = r.get(0)?;
-                while faces.next_if(|f| f.0 < fid).is_some() {}
-                let Some(&(_, pid, photo, by_hand)) = faces.next_if(|f| f.0 == fid) else { continue };
+                while faces.next_if(|(_, f)| f.0 < fid).is_some() {}
+                let Some((i, f)) = faces.next_if(|(_, f)| f.0 == fid) else { continue };
                 let blob = r.get_ref(1)?.as_blob()?;
                 if blob.len() != DIM * 4 {
                     continue;
                 }
                 let v: Vec<f32> = blob.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
-                let s = dot(&v, &target);
+                let s = dot(&v, &looks[&month_of(f.4)]);
                 if s >= SAME_PERSON {
-                    alike.push((fid, pid, photo, by_hand, s, v));
+                    alike.push((i, s, v));
                 }
             }
         }
 
-        // More like them than like the rest of their own person (a face alone
-        // in its person has no rest to compare with).
-        let mut found: Vec<Candidate> = Vec::new();
+        // More like them than like the rest of their own person around then,
+        // or over its whole life (a face alone in its person has no rest to
+        // compare with).
+        let mut found: Vec<(Candidate, Option<i64>)> = Vec::new();
         {
             let c = self.centroids.read().unwrap();
-            for (fid, pid, photo, by_hand, s, v) in alike {
-                let now = c.get(&pid).filter(|(_, n)| *n > 1).map(|(sum, _)| {
-                    let rest: Vec<f32> = sum.iter().zip(&v).map(|(a, b)| a - b).collect();
-                    let norm = rest.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::EPSILON);
-                    dot(&rest, &v) / norm
-                });
+            for (i, s, v) in alike {
+                let (fid, pid, photo, by_hand, taken) = faces[i];
+                let rest_of = |sum: &[f32], n: u32| {
+                    (n > 1).then(|| {
+                        let rest: Vec<f32> = sum.iter().zip(&v).map(|(a, b)| a - b).collect();
+                        let norm = rest.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::EPSILON);
+                        dot(&rest, &v) / norm
+                    })
+                };
+                let now = match month_of(taken).and_then(|m| c.around_sum(pid, (m, m))) {
+                    Some((sum, n)) => rest_of(&sum, n),
+                    None => c.get(&pid).and_then(|(sum, n)| rest_of(sum, *n)),
+                };
                 if now.is_none_or(|n| s > n) {
-                    found.push(Candidate {
-                        face_id: fid,
-                        photo_id: photo,
-                        person_id: pid,
-                        similarity: s,
-                        now,
-                        by_hand,
-                    });
+                    let f = Candidate { face_id: fid, photo_id: photo, person_id: pid, similarity: s, now, by_hand };
+                    found.push((f, taken.filter(|t| *t > 0)));
                 }
             }
         }
 
         // By day, and near the person's own photos or not.
-        let mut taken = db.prepare("SELECT taken_ts FROM photos WHERE id = ?1 AND COALESCE(taken_ts, 0) > 0")?;
-        let mut when = |photo: i64| -> Result<Option<i64>> { Ok(taken.query_row([photo], |r| r.get(0)).optional()?) };
-        let mut own: Vec<i64> = Vec::new();
-        for &photo in &theirs {
-            own.extend(when(photo)?);
-        }
+        let mut own: Vec<i64> =
+            faces.iter().filter(|f| f.1 == person_id).filter_map(|f| f.4.filter(|t| *t > 0)).collect();
         own.sort_unstable();
         let near = |ts: i64| {
             let i = own.partition_point(|&t| t < ts - NEAR_DAYS * 86_400);
             own.get(i).is_some_and(|&t| t <= ts + NEAR_DAYS * 86_400)
         };
         let mut days: HashMap<Option<String>, CandidateDay> = HashMap::new();
-        for f in found {
-            let ts = when(f.photo_id)?;
+        for (f, ts) in found {
             let day = ts.and_then(|t| chrono::DateTime::from_timestamp(t, 0)).map(|d| d.format("%Y-%m-%d").to_string());
             let d = days.entry(day.clone()).or_insert_with(|| CandidateDay { day, near: false, faces: Vec::new() });
             d.near |= ts.is_some_and(near);
