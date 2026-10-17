@@ -1,6 +1,8 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
   CandidateDay,
+  CullFrame,
+  CullStack,
   FaceTarget,
   Facets,
   LeftAsIs,
@@ -11,7 +13,9 @@ import type {
   PhotoDetail,
   PhotoList,
   Placement,
+  Problem,
   Scope,
+  Shoot,
   Sort,
 } from "../api";
 
@@ -51,6 +55,7 @@ export interface Call {
 export function fakeBackend() {
   const photos: Photo[] = ROOTS.flatMap((r) => photosOf(r.id).map((id) => ({ id, root: r.id, taken: JAN_2026 + id * 3600 })));
   const marked = new Set<number>();
+  const picked = new Set<number>();
   let people: Person[] = [
     { id: 7, name: "Ana", faces: 3, photos: 3, cover: 1, ignored: false, isNew: false, newPhotos: 0 },
     { id: 8, name: null, faces: 2, photos: 2, cover: 2, ignored: false, isNew: false, newPhotos: 0 },
@@ -160,12 +165,55 @@ export function fakeBackend() {
     ext: ps.map(() => "jpg"),
     raw: ps.map(() => 0),
     fresh: ps.map(() => 0),
+    picked: ps.map((p) => +picked.has(p.id)),
+    // The fourth photo of each source is blurry.
+    flags: ps.map((p) => (p.id % 10 === 4 ? 4 : 0)),
   });
+
+  /**
+   * Cull's shoot: in each source, its first two photos are a burst (the
+   * second is sharper and kept), the third is fine, the fourth blurry.
+   */
+  const shootOf = (ps: Photo[]): Shoot => {
+    const frame = (p: Photo, suggest: CullFrame["suggest"], reasons: string[], problems: Problem[] = []): CullFrame => ({
+      id: p.id,
+      name: `IMG_${p.id}.jpg`,
+      taken: p.taken,
+      state: 2,
+      w: 150,
+      h: 100,
+      rev: 1,
+      picked: picked.has(p.id),
+      marked: marked.has(p.id),
+      suggest,
+      reasons,
+      problems,
+      blur: 0.3,
+      closer: false,
+      alike: null,
+      framing: null,
+    });
+    const stacks: CullStack[] = [];
+    for (const p of ps) {
+      const n = p.id % 10;
+      const prev = stacks[stacks.length - 1];
+      if (n === 2 && prev?.frames[0].id === p.id - 1) {
+        prev.frames[0] = { ...prev.frames[0], suggest: "reject", reasons: ["Same shot: frame 2 is better"] };
+        prev.frames.push(frame(p, "pick", ["The best of these 2 frames"]));
+        prev.keeper = 1;
+      } else if (n === 4) {
+        stacks.push({ frames: [frame(p, "reject", ["Blurry everywhere: shake, motion or focus missed"], ["blurry"])], keeper: 0 });
+      } else {
+        stacks.push({ frames: [frame(p, "pick", [])], keeper: 0 });
+      }
+    }
+    return { photos: ps.length, measured: ps.length, closer: 0, described: ps.length, canLookCloser: ps.map((p) => p.id), stacks };
+  };
 
   const sorted = (ps: Photo[], sort: Sort) =>
     sort === "newest" ? [...ps].sort((a, b) => b.taken - a.taken) : [...ps].sort((a, b) => a.taken - b.taken);
 
-  const facets = (): Facets => ({ dates: [], cameras: [], lenses: [], types: [], status: [], people: [], tags: [] });
+  const facets = (): Facets => ({ dates: [], cameras: [], lenses: [], types: [], status: [], people: [], tags: [], cull: [] });
 
   const detail = (id: number): PhotoDetail => {
     const root = ROOTS.find((r) => r.id === photos.find((p) => p.id === id)?.root)!;
@@ -240,8 +288,26 @@ export function fakeBackend() {
       case "tags_all":
         return [];
       case "mark_photos":
-        for (const id of a.ids as number[]) (a.marked ? marked.add(id) : marked.delete(id));
+        for (const id of a.ids as number[]) {
+          if (a.marked) {
+            marked.add(id);
+            picked.delete(id);
+          } else marked.delete(id);
+        }
         return (a.ids as number[]).length;
+      case "cull_shoot":
+        return shootOf(sorted(inScope(a.scope as Scope), "oldest"));
+      case "cull_decide": {
+        const [picks, rejects, undecided] = [a.picks, a.rejects, a.undecided] as number[][];
+        for (const id of picks) (picked.add(id), marked.delete(id));
+        for (const id of rejects) (marked.add(id), picked.delete(id));
+        for (const id of undecided) (marked.delete(id), picked.delete(id));
+        return picks.length + rejects.length + undecided.length;
+      }
+      case "cull_progress":
+      case "cull_look_closer":
+      case "cull_stop":
+        return null;
       case "read_people":
         return 0;
       case "check_people":
@@ -344,6 +410,7 @@ export function fakeBackend() {
     /** Makes every answer to `cmd` take `ms` longer. */
     delay: (cmd: string, ms: number) => cmdDelays.set(cmd, ms),
     marked,
+    picked,
     /** Face finding: someone new, or more photos of someone. */
     addPerson: (p: Person, photoIds: number[]) => {
       people = [...people, p];

@@ -42,12 +42,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use testing::point as kill_point;
 
 /// Marks (or unmarks) photos for deletion. Catalog only: no file is touched.
+/// A photo marked is no longer picked (Cull).
 pub fn mark(cat: &Catalog, photo_ids: &[i64], marked: bool) -> Result<usize> {
     let mut db = cat.db();
     let tx = db.transaction()?;
     let mut n = 0;
     for id in photo_ids {
-        n += tx.execute("UPDATE photos SET marked = ?1 WHERE id = ?2", params![marked as i64, id])?;
+        n += tx.execute(
+            "UPDATE photos SET marked = ?1, picked = CASE WHEN ?1 = 1 THEN 0 ELSE picked END WHERE id = ?2",
+            params![marked as i64, id],
+        )?;
     }
     tx.commit()?;
     Ok(n)

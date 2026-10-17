@@ -512,18 +512,18 @@ impl Catalog {
             "SELECT p.id, COALESCE(p.taken_ts, 0), {state},
                     COALESCE(p.thumb_w, 0), COALESCE(p.thumb_h, 0), p.preview_rev, p.preview_state, p.marked,
                     COALESCE((SELECT {EXT_SQL} FROM files f WHERE f.photo_id = p.id ORDER BY f.state LIMIT 1), ''),
-                    p.kind = 'raw', {fresh}
+                    p.kind = 'raw', {fresh}, p.picked
                FROM photos p
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
-                AND (?10 IS NULL OR p.id IN (SELECT value FROM json_each(?10)))
+                AND (?11 IS NULL OR p.id IN (SELECT value FROM json_each(?11)))
               ORDER BY {order}",
             filters_sql(filters, &state)
         );
         let only = only.map(serde_json::to_string).transpose()?;
         let mut out = PhotoList::default();
         let mut stmt = db.prepare(&sql)?;
-        let [d, c, l, t, s, pe, tg] = filters.params(None);
-        let mut rows = stmt.query(params![p1, p2, d, c, l, t, s, pe, tg, only])?;
+        let [d, c, l, t, s, pe, tg, cu] = filters.params(None);
+        let mut rows = stmt.query(params![p1, p2, d, c, l, t, s, pe, tg, cu, only])?;
         while let Some(r) = rows.next()? {
             out.ids.push(r.get(0)?);
             out.taken.push(r.get(1)?);
@@ -536,6 +536,7 @@ impl Catalog {
             out.ext.push(r.get(8)?);
             out.raw.push(r.get(9)?);
             out.fresh.push(r.get(10)?);
+            out.picked.push(r.get(11)?);
         }
         Ok(out)
     }
@@ -555,8 +556,8 @@ impl Catalog {
             filters_sql(filters, &state)
         );
         let mut stmt = db.prepare(&sql)?;
-        let [d, c, l, t, s, pe, tg] = filters.params(None);
-        let mut rows = stmt.query(params![p1, p2, d, c, l, t, s, pe, tg])?;
+        let [d, c, l, t, s, pe, tg, cu] = filters.params(None);
+        let mut rows = stmt.query(params![p1, p2, d, c, l, t, s, pe, tg, cu])?;
         let mut out = Days::default();
         while let Some(r) = rows.next()? {
             match r.get::<_, Option<String>>(0)? {
@@ -585,10 +586,10 @@ impl Catalog {
             let sql = format!(
                 "SELECT {value} AS v, COUNT(DISTINCT p.id) FROM {from} WHERE {where_} GROUP BY v ORDER BY {order}"
             );
-            let [d, c, l, t, s, pe, tg] = filters.params(Some(own));
+            let [d, c, l, t, s, pe, tg, cu] = filters.params(Some(own));
             let rows = db
                 .prepare(&sql)?
-                .query_map(params![p1, p2, d, c, l, t, s, pe, tg], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map(params![p1, p2, d, c, l, t, s, pe, tg, cu], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(rows)
         };
@@ -602,9 +603,9 @@ impl Catalog {
                     AND (pe.name IS NOT NULL OR (SELECT COUNT(DISTINCT f3.photo_id) FROM faces f3 WHERE f3.person_id = pe.id) >= 2)
                   GROUP BY pe.id ORDER BY pe.name IS NULL, COUNT(DISTINCT p.id) DESC, pe.name"
             );
-            let [d, c, l, t, s, pe, tg] = filters.params(Some(Facet::People));
+            let [d, c, l, t, s, pe, tg, cu] = filters.params(Some(Facet::People));
             db.prepare(&sql)?
-                .query_map(params![p1, p2, d, c, l, t, s, pe, tg], |r| {
+                .query_map(params![p1, p2, d, c, l, t, s, pe, tg, cu], |r| {
                     Ok(PersonValue { id: r.get(0)?, name: r.get(1)?, cover: r.get(2)?, count: r.get(3)? })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -617,9 +618,9 @@ impl Catalog {
                   WHERE {where_}
                   GROUP BY tg.id ORDER BY COUNT(DISTINCT p.id) DESC, tg.name COLLATE NOCASE"
             );
-            let [d, c, l, t, s, pe, tg] = filters.params(Some(Facet::Tags));
+            let [d, c, l, t, s, pe, tg, cu] = filters.params(Some(Facet::Tags));
             db.prepare(&sql)?
-                .query_map(params![p1, p2, d, c, l, t, s, pe, tg], |r| {
+                .query_map(params![p1, p2, d, c, l, t, s, pe, tg, cu], |r| {
                     Ok(crate::tags::Tag { id: r.get(0)?, name: r.get(1)?, count: r.get(2)? })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -652,6 +653,7 @@ impl Catalog {
             status: count(&status_sql(&state), "photos p", "v DESC", Facet::Status)?.into_iter().map(value).collect(),
             people,
             tags,
+            cull: count(CULL_SQL, "photos p", "v", Facet::Cull)?.into_iter().map(value).collect(),
         })
     }
 
@@ -734,6 +736,7 @@ impl Catalog {
                 out.ext.push(all.ext[i].clone());
                 out.raw.push(all.raw[i]);
                 out.fresh.push(all.fresh[i]);
+                out.picked.push(all.picked[i]);
             }
         }
         Ok(out)
@@ -891,7 +894,7 @@ impl Catalog {
         let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
 
         // files() leaves out the databases (snapshotted, not copied): count them here.
-        let dbs = ["faces.db", "search.db"].map(|n| self.data.root.join(n));
+        let dbs = paths::SIDE_DATABASES.map(|n| self.data.root.join(n));
         let bytes: u64 = self
             .data
             .files()
@@ -950,7 +953,7 @@ impl Catalog {
         }
         let lock = self.data.begin_move(&to)?;
         let steps = || -> Result<()> {
-            for db in ["faces.db", "search.db"] {
+            for db in paths::SIDE_DATABASES {
                 let src = self.data.root.join(db);
                 if src.is_file() {
                     paths::snapshot_sqlite(&src, &to)?;
@@ -994,7 +997,7 @@ impl Catalog {
             self.data.snapshot_into(&db, &dir.join("catalog.db"))?;
         }
         files.push("catalog.db".to_string());
-        for name in ["faces.db", "search.db"] {
+        for name in paths::SIDE_DATABASES {
             let src = self.data.root.join(name);
             if src.is_file() {
                 let conn = Connection::open_with_flags(&src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -1056,6 +1059,41 @@ impl Catalog {
             }
         }
         bail!("No copy of this photo is plugged in")
+    }
+
+    /// The photo's long edge at full size, px, when its files say.
+    pub fn full_size(&self, photo_id: i64) -> Option<u32> {
+        let db = self.read().ok()?;
+        let (w, h): (Option<u32>, Option<u32>) = db
+            .query_row("SELECT width, height FROM photos WHERE id = ?1", [photo_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .ok()?;
+        w.max(h).filter(|&l| l > 0)
+    }
+
+    /// Camera, exposure, Cull's pick and a file name of each photo, by id
+    /// (each found through its own row, whatever the catalog's size).
+    pub fn shot_info(&self, ids: &[i64]) -> Result<HashMap<i64, crate::cull::ShotInfo>> {
+        let db = self.read()?;
+        let mut stmt = db.prepare(
+            "SELECT p.id, p.camera_shown, p.exposure, p.focal, p.picked,
+                    (SELECT MIN(f.name) FROM files f WHERE f.photo_id = p.id)
+               FROM photos p WHERE p.id IN (SELECT value FROM json_each(?1))",
+        )?;
+        let out = stmt
+            .query_map([serde_json::to_string(ids)?], |r| {
+                Ok((
+                    r.get(0)?,
+                    crate::cull::ShotInfo {
+                        camera: r.get(1)?,
+                        exposure: r.get(2)?,
+                        focal: r.get(3)?,
+                        picked: r.get::<_, i64>(4)? == 1,
+                        name: r.get(5)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(out)
     }
 
     /// Full path of a catalog folder that is there now (disk plugged in, folder found).
@@ -1329,6 +1367,8 @@ pub struct Filters {
     pub tags: Vec<i64>,
     /// Photos with all of `tags` (default: tags narrow down), or any of them.
     pub tags_match: Match,
+    /// Cull's decisions: "picked", "rejected" (marked for deletion), "undecided".
+    pub cull: Vec<String>,
 }
 
 impl Default for Filters {
@@ -1343,6 +1383,7 @@ impl Default for Filters {
             people_match: Match::Any,
             tags: Vec::new(),
             tags_match: Match::All,
+            cull: Vec::new(),
         }
     }
 }
@@ -1367,12 +1408,13 @@ pub enum Facet {
     Status,
     People,
     Tags,
+    Cull,
 }
 
 impl Filters {
-    /// Parameters ?3..?9 of [`filters_sql`], as JSON arrays; `except` is left
+    /// Parameters ?3..?10 of [`filters_sql`], as JSON arrays; `except` is left
     /// out, unless it asks for all of its values: then counts must narrow too.
-    fn params(&self, except: Option<Facet>) -> [String; 7] {
+    fn params(&self, except: Option<Facet>) -> [String; 8] {
         let json = |v: String, f: Facet| if except == Some(f) { "[]".to_string() } else { v };
         let list = |v: &Vec<String>| serde_json::to_string(v).unwrap_or_else(|_| "[]".into());
         let ids = |v: &Vec<i64>, m: Match, f: Facet| {
@@ -1387,6 +1429,7 @@ impl Filters {
             json(list(&self.status), Facet::Status),
             ids(&self.people, self.people_match, Facet::People),
             ids(&self.tags, self.tags_match, Facet::Tags),
+            json(list(&self.cull), Facet::Cull),
         ]
     }
 
@@ -1398,15 +1441,19 @@ impl Filters {
             && self.status.is_empty()
             && self.people.is_empty()
             && self.tags.is_empty()
+            && self.cull.is_empty()
     }
 }
+
+/// The Cull filter's value for photo `p`.
+const CULL_SQL: &str = "CASE WHEN p.picked = 1 THEN 'picked' WHEN p.marked = 1 THEN 'rejected' ELSE 'undecided' END";
 
 /// A file's extension, lower case ("IMG_0001.CR3" -> "cr3"), on file alias `f`.
 const EXT_SQL: &str = db::FILE_TYPE_SQL;
 
 /// The filters as one SQL condition on photo `p` whose state is `state`
 /// ([`state_sql`]), with parameters ?3 dates, ?4 cameras, ?5 lenses, ?6 types,
-/// ?7 status, ?8 people, ?9 tags (JSON arrays).
+/// ?7 status, ?8 people, ?9 tags, ?10 Cull's decisions (JSON arrays).
 fn filters_sql(f: &Filters, state: &str) -> String {
     let people = has_sql(f.people_match, 8, "FROM faces fa WHERE fa.photo_id = p.id", "fa.person_id");
     let tags = has_sql(f.tags_match, 9, "FROM photo_tags pt WHERE pt.photo_id = p.id", "pt.tag_id");
@@ -1423,7 +1470,8 @@ fn filters_sql(f: &Filters, state: &str) -> String {
              AND {EXT_SQL} IN (SELECT value FROM json_each(?6))))
      AND (json_array_length(?7) = 0 OR {status} IN (SELECT value FROM json_each(?7)))
      AND (json_array_length(?8) = 0 OR {people})
-     AND (json_array_length(?9) = 0 OR {tags})"
+     AND (json_array_length(?9) = 0 OR {tags})
+     AND (json_array_length(?10) = 0 OR {CULL_SQL} IN (SELECT value FROM json_each(?10)))"
     )
 }
 
@@ -1480,6 +1528,8 @@ pub struct Facets {
     pub people: Vec<PersonValue>,
     /// Tags on the photos shown, most used first.
     pub tags: Vec<crate::tags::Tag>,
+    /// Cull's decisions: "picked", "rejected", "undecided".
+    pub cull: Vec<FacetValue>,
 }
 
 /// Grid order. Capture-time orders keep month headers; the others are one list.
@@ -1651,6 +1701,11 @@ pub struct PhotoList {
     pub raw: Vec<i64>,
     /// On a person's page: 1 = they were found in it since the user last looked at them.
     pub fresh: Vec<i64>,
+    /// 1 = picked: a keeper (Cull).
+    pub picked: Vec<i64>,
+    /// What Cull found wrong with each photo, as bits of [`crate::cull::Problem`]
+    /// (0: nothing, or not measured yet). Filled by whoever asks with Cull's measures at hand.
+    pub flags: Vec<u32>,
 }
 
 /// Photos per day, for the calendar.

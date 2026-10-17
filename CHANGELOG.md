@@ -4,6 +4,34 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.42.5 - unreleased
 
+### Added
+
+- **Cull's assistant.** A **Cull** button above the photos opens the folder
+  or day shown as a shoot, one shot at a time. The frames of a burst (taken
+  within seconds, framed the same and alike to word search) come as one
+  stack, the frame to keep first in line; a RAW and its JPEG or export count
+  as one frame. Each frame says what's wrong with it - blurry everywhere
+  (with the shutter speed when it was slow for the lens), a face out of focus
+  while something else is sharp, very dark, highlights blown, nothing in it
+  (a lens cap, a pocket) - and what Cull suggests: keep or reject. P picks,
+  X rejects, U undecides, Enter does what Cull suggests for the shot and
+  moves on, **Accept all suggestions** does it for the whole shoot, and Z
+  opens the viewer for a 100% look. A reject is a mark for deletion, as
+  before: nothing is deleted until you confirm. Every photo is measured in
+  the background from its preview, so photos on unplugged drives too; with
+  the drive connected, **Look closer** reads the originals at half size
+  (read-only) and finds the frames that are only soft at 100%. The measures
+  live in `quality.db` beside the catalog: they can always be made again.
+- **Picks.** P in the grid picks the selected photos (a check mark in the
+  corner) or unpicks them; a pick is never also marked for deletion. The
+  filter bar has a **Cull** filter: picked, rejected, not decided. A photo
+  Cull found something wrong with carries a small badge, the reasons on
+  hover.
+- `shoebox-cli quality` measures the photos not measured yet, `measure`
+  shows a photo's measures and problems, `cull` gives a view as Cull shows
+  it (`--closer` looks at the originals first), `cull-accept` does what it
+  suggests, and `pick` / `unpick` set the flag.
+
 ## 26.42.4 - 2026-10-17
 
 ### Added

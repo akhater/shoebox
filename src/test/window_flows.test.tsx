@@ -123,6 +123,84 @@ describe("marking for deletion", () => {
   });
 });
 
+describe("Cull", () => {
+  /** The frame shown big in Cull, by its preview. */
+  const cullPhoto = (host: HTMLElement) => Number(/preview\/(\d+)/.exec(host.querySelector<HTMLImageElement>(".cull-photo img")!.src)![1]);
+  const decisions = (be: ReturnType<typeof fakeBackend>, from: number) =>
+    be.calls.slice(from).filter((c) => c.cmd === "cull_decide").map((c) => c.args);
+
+  test("a folder as shots: Enter does what Cull suggests for a shot, P and X decide a frame, Esc goes back to the grid", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(sidebarItem(host, "Trip"));
+    await wait(100);
+    await click(byText(host, ".toolbar button", "Cull"));
+    await wait(100);
+    expect(title(host)).toBe("Cull · Trip");
+    // The burst (301, 302), then 303 and the blurry 304: three shots, from the burst's keeper.
+    expect(host.querySelectorAll(".cull-shot")).toHaveLength(3);
+    expect(cullPhoto(host)).toBe(302);
+    expect(host.querySelector(".cull-suggest")!.textContent).toBe("Cull suggests: keep");
+
+    let from = be.calls.length;
+    await key(document.body, "Enter");
+    await wait(50);
+    expect(decisions(be, from)).toEqual([{ picks: [302], rejects: [301], undecided: [] }]);
+    // On to the next shot. X rejects it (and moves on), P picks the blurry one anyway.
+    expect(cullPhoto(host)).toBe(303);
+    from = be.calls.length;
+    await key(document.body, "x");
+    await wait(30);
+    expect(cullPhoto(host)).toBe(304);
+    expect(host.querySelector(".cull-says")!.textContent).toMatch(/Cull suggests: reject.*Blurry everywhere/);
+    await key(document.body, "p");
+    await wait(50);
+    expect(decisions(be, from)).toEqual([
+      { picks: [], rejects: [303], undecided: [] },
+      { picks: [304], rejects: [], undecided: [] },
+    ]);
+    expect(be.picked).toEqual(new Set([302, 304]));
+    expect(be.marked).toEqual(new Set([301, 303]));
+
+    await key(document.body, "Escape");
+    await wait(100);
+    expect(title(host)).toBe("Trip");
+    expect(tile(host, 302).querySelector(".badge.picked")).not.toBeNull();
+    expect(tile(host, 301).classList).toContain("is-marked");
+  });
+
+  test("Accept all suggestions decides every frame not decided yet", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(sidebarItem(host, "Fast"));
+    await wait(100);
+    await click(byText(host, ".toolbar button", "Cull"));
+    await wait(100);
+    await key(document.body, "p"); // 202, the keeper, picked by hand
+    await wait(30);
+    const from = be.calls.length;
+    await click(byText(host, ".cull-head button", /Accept all suggestions/));
+    await wait(50);
+    expect(decisions(be, from)).toEqual([{ picks: [203], rejects: [201, 204], undecided: [] }]);
+    expect(byText(host, ".cull-head button", /Accept all suggestions/).hasAttribute("disabled")).toBe(true);
+  });
+
+  test("in the grid, P picks the selected photo and a photo Cull found blurry carries a badge", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    expect(tile(host, 204).querySelector(".badge.problem")!.getAttribute("title")).toBe("Blurry");
+    expect(tile(host, 203).querySelector(".badge.problem")).toBeNull();
+    await click(tile(host, 203));
+    await key(scroller(host), "p");
+    expect(tile(host, 203).querySelector(".badge.picked")).not.toBeNull(); // before the backend answers
+    await wait(50);
+    expect(be.picked).toEqual(new Set([203]));
+    await key(scroller(host), "p");
+    await wait(50);
+    expect(be.picked.size).toBe(0);
+  });
+});
+
 describe("the viewer", () => {
   test("a double click opens a photo, Esc closes it and leaves it selected", async () => {
     fakeBackend();

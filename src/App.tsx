@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   CalendarDays,
   Eye,
+  ListChecks,
   EyeOff,
   FileType,
   Pencil,
@@ -60,6 +61,7 @@ import {
   updatesApi,
 } from "./api";
 import { CalendarView } from "./components/CalendarView";
+import { CullView } from "./components/CullView";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
 import { StraysDialog } from "./components/StraysDialog";
@@ -85,6 +87,8 @@ const EMPTY: PhotoList = {
   ext: [],
   raw: [],
   fresh: [],
+  picked: [],
+  flags: [],
 };
 
 /** A per-viewer on/off remembered between sessions (convenience only). */
@@ -115,9 +119,12 @@ function useLatest<A extends unknown[], R>(f: (...args: A) => R) {
   return useCallback((...args: A) => latest.current(...args), []);
 }
 
+/** What the main area shows: the photo grid, People, or Cull on the photos of the grid. */
+type View = "photos" | "people" | "cull";
+
 /** A place to come back to: the view, what it showed, and the photo looked at. */
 interface Place {
-  view: "photos" | "people";
+  view: View;
   scope: Scope;
   focusId: number | null;
   viewerId: number | null;
@@ -295,8 +302,8 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [aiProgress, setAiProgress] = useState<AiProgress | null>(null);
   const [showPossible, setShowPossible] = useState(false);
-  // "people" shows the People view instead of the photo grid.
-  const [view, setView] = useState<"photos" | "people">("photos");
+  // "people" shows the People view instead of the photo grid; "cull", Cull on the grid's photos.
+  const [view, setView] = useState<View>("photos");
   const [peopleList, setPeopleList] = useState<Person[]>([]);
   // People's search box: what's typed, and whoever it finds (null: nothing typed).
   const [personTyped, setPersonTyped] = useState("");
@@ -573,9 +580,14 @@ export default function App() {
   const setMarked = useCallback(
     (ids: number[], marked: boolean) => {
       const set = new Set(ids);
+      // A photo marked is no longer picked.
       setLoaded((v) => ({
         ...v,
-        list: { ...v.list, marked: v.list.marked.map((m, i) => (set.has(v.list.ids[i]) ? +marked : m)) },
+        list: {
+          ...v.list,
+          marked: v.list.marked.map((m, i) => (set.has(v.list.ids[i]) ? +marked : m)),
+          picked: v.list.picked.map((p, i) => (marked && set.has(v.list.ids[i]) ? 0 : p)),
+        },
       }));
       cull
         .mark(ids, marked)
@@ -587,6 +599,43 @@ export default function App() {
     },
     [refresh],
   );
+
+  // Cull's pick, from the grid (P): shown at once, never also marked.
+  const setPicked = useCallback(
+    (ids: number[], picked: boolean) => {
+      const set = new Set(ids);
+      setLoaded((v) => ({
+        ...v,
+        list: {
+          ...v.list,
+          picked: v.list.picked.map((p, i) => (set.has(v.list.ids[i]) ? +picked : p)),
+          marked: v.list.marked.map((m, i) => (picked && set.has(v.list.ids[i]) ? 0 : m)),
+        },
+      }));
+      cull
+        // Unpicked: picked photos are never marked, so they become undecided.
+        .decide(picked ? { picks: ids } : { undecided: ids })
+        .then(() => api.overview().then(setOverview))
+        .catch((e) => {
+          setMessage({ text: String(e), warn: true });
+          refresh();
+        });
+    },
+    [refresh],
+  );
+  // Cull's decisions change what the sidebar counts (marked for deletion).
+  const cullChanged = useLatest(() => {
+    api
+      .overview()
+      .then(setOverview)
+      .catch(() => {});
+  });
+  const cullError = useLatest((text: string) => setMessage({ text, warn: true }));
+  const closeCull = useLatest(() => {
+    setView("photos");
+    setGridFocus((n) => n + 1);
+    refresh();
+  });
 
   // Drill-downs (People -> a person, a face in the viewer -> their photos)
   // remember where they came from; Back or Escape returns there.
@@ -738,8 +787,10 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning]);
 
+  // (Cull has its own Escape: Done.)
   useEffect(() => {
-    if (!trail.length || calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning) return;
+    if (!trail.length || view === "cull" || calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning)
+      return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const t = e.target as HTMLElement | null;
@@ -748,7 +799,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [trail, calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning, goBack]);
+  }, [trail, view, calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning, goBack]);
 
   // Drag and drop of a folder. Same disk: done at once, with Undo. Another
   // disk: asked first, then copied, checked and the original removed in the
@@ -1149,10 +1200,12 @@ export default function App() {
                 </>
               )
             ) : (
-              <h1>{view === "people" ? "People" : scopeInfo.title}</h1>
+              <h1>{view === "people" ? "People" : view === "cull" ? `Cull · ${scopeInfo.title}` : scopeInfo.title}</h1>
             )}
             <span className="muted">
-              {view === "people"
+              {view === "cull"
+                ? ""
+                : view === "people"
                 ? personFound
                   ? `${fmtNum(personFound.length)} found`
                   : `${fmtNum(shownPeople.length)} people`
@@ -1174,6 +1227,8 @@ export default function App() {
               onChange={setPersonTyped}
               onOpen={(p) => drill({ kind: "person", id: p.id })}
             />
+          ) : view === "cull" ? (
+            <span className="grow" />
           ) : (
             <div className="search">
               <Search size={15} />
@@ -1258,6 +1313,24 @@ export default function App() {
                 title={`Not ${personHere.name ?? "this person"} in ${selected.size === 1 ? "this photo" : "these photos"}: say who it is`}
               >
                 <UserX size={15} /> Not {personHere.name?.split(" ")[0] ?? "them"}…
+              </button>
+            )}
+            {view === "photos" && !empty && (
+              <button
+                className="btn ghost"
+                onClick={() => {
+                  setViewerId(null);
+                  setCalendar(false);
+                  setView("cull");
+                }}
+                disabled={!!query}
+                title={
+                  query
+                    ? "Cull works on a folder or a day, not on search results: clear the search first"
+                    : "Cull these photos: bursts gathered, what's blurry or badly exposed, what to keep. Pick (P) and reject (Delete) in the grid too."
+                }
+              >
+                <ListChecks size={15} /> Cull
               </button>
             )}
             {view === "photos" && (
@@ -1349,7 +1422,17 @@ export default function App() {
           </div>
         )}
 
-        {view === "people" ? (
+        {view === "cull" ? (
+          <CullView
+            scope={scope}
+            filters={filters}
+            title={scopeInfo.title}
+            onClose={closeCull}
+            onChanged={cullChanged}
+            onError={cullError}
+            everyone={peopleList}
+          />
+        ) : view === "people" ? (
           <PeopleView
             people={peopleList}
             found={personFound}
@@ -1386,6 +1469,7 @@ export default function App() {
               onOpen={openPhoto}
               onSelect={selectPhotos}
               onMark={setMarked}
+              onPick={setPicked}
               onTag={setTagging}
               selected={selected}
               keyboard={

@@ -41,6 +41,8 @@ export interface Filters {
   tags: number[];
   /** Photos with all of `tags` (tags narrow down), or any of them. */
   tagsMatch: Match;
+  /** Cull's decisions. */
+  cull: ("picked" | "rejected" | "undecided")[];
 }
 export const NO_FILTERS: Filters = {
   dates: [],
@@ -52,9 +54,10 @@ export const NO_FILTERS: Filters = {
   peopleMatch: "any",
   tags: [],
   tagsMatch: "all",
+  cull: [],
 };
 export const filtersOn = (f: Filters) =>
-  f.dates.length + f.cameras.length + f.lenses.length + f.types.length + f.status.length + f.people.length + f.tags.length >
+  f.dates.length + f.cameras.length + f.lenses.length + f.types.length + f.status.length + f.people.length + f.tags.length + f.cull.length >
   0;
 
 /** A tag; `count` = photos with it (in the catalog, or among the photos asked about). */
@@ -90,6 +93,8 @@ export interface Facets {
   people: { id: number; name: string | null; cover: number; count: number }[];
   /** Tags on the photos shown, most used first. */
   tags: Tag[];
+  /** Cull's decisions: "picked", "rejected", "undecided". */
+  cull: FacetValue[];
 }
 
 /** Grid order: capture time (oldest/newest first, with month headers), file name, recently added. */
@@ -207,6 +212,10 @@ export interface PhotoList {
   raw: number[];
   /** On a person's page: 1 = they were found in it since you last looked at them. */
   fresh: number[];
+  /** 1 = picked as a keeper (Cull). */
+  picked: number[];
+  /** What Cull found wrong with each photo: bits of PROBLEMS (0 = nothing, or not measured yet). */
+  flags: number[];
 }
 
 export interface FileLoc {
@@ -410,12 +419,79 @@ export interface DeleteReport {
   failed: string[];
 }
 
-/** Culling: marking is catalog-only; files go only after a confirmed plan. */
+/** What Cull can find wrong with a photo; `bit` is its bit in PhotoList.flags. */
+export type Problem = "empty" | "dark" | "blurry" | "soft" | "faceSoft" | "blown" | "bright";
+export const PROBLEMS: { problem: Problem; bit: number; label: string }[] = [
+  { problem: "empty", bit: 1, label: "Nothing in it" },
+  { problem: "dark", bit: 2, label: "Very dark" },
+  { problem: "blurry", bit: 4, label: "Blurry" },
+  { problem: "soft", bit: 8, label: "Soft at 100%" },
+  { problem: "faceSoft", bit: 16, label: "Face out of focus" },
+  { problem: "blown", bit: 32, label: "Highlights blown" },
+  { problem: "bright", bit: 64, label: "Very bright" },
+];
+export const problemsOf = (flags: number) => PROBLEMS.filter((p) => flags & p.bit);
+
+/** A frame of a shoot in Cull, with what Cull suggests for it and why. */
+export interface CullFrame {
+  id: number;
+  name: string | null;
+  taken: number;
+  /** 2 = on a plugged-in disk, 1 = unplugged, 0 = missing. */
+  state: number;
+  w: number;
+  h: number;
+  rev: number;
+  picked: boolean;
+  marked: boolean;
+  suggest: "pick" | "reject" | "none";
+  /** Why, the first one the main reason. */
+  reasons: string[];
+  problems: Problem[];
+  /** Edge blur compared between frames, thousandths of the long edge (lower is sharper). */
+  blur: number | null;
+  /** Measured from the original, not only the preview. */
+  closer: boolean;
+  /** How alike CLIP finds it and the frame before (0..1). */
+  alike: number | null;
+  /** How alike its layout and the frame before's are (-1..1). */
+  framing: number | null;
+}
+/** Frames of the same shot; `keeper` = the one Cull would keep. */
+export interface CullStack {
+  frames: CullFrame[];
+  keeper: number;
+}
+export interface Shoot {
+  photos: number;
+  measured: number;
+  closer: number;
+  described: number;
+  /** Photos whose original is reachable now and not looked at closer yet. */
+  canLookCloser: number[];
+  stacks: CullStack[];
+}
+export interface CloserProgress {
+  done: number;
+  total: number;
+  finished: boolean;
+}
+
+/** Culling: marking is catalog-only; files go only after a confirmed plan. Picks are a flag. */
 export const cull = {
   mark: (ids: number[], marked: boolean) => invoke<number>("mark_photos", { ids, marked }),
   unmarkAll: () => invoke<number>("unmark_all"),
   plan: () => invoke<DeletePlan>("delete_plan"),
   delete: (token: string, volumeIds: number[]) => invoke<DeleteReport>("delete_marked", { token, volumeIds }),
+  /** A view as a shoot: bursts in stacks, problems, suggestions. */
+  shoot: (scope: Scope, filters: Filters) => invoke<Shoot>("cull_shoot", { scope, filters }),
+  /** Picked, rejected (marked for deletion), or neither. */
+  decide: (d: { picks?: number[]; rejects?: number[]; undecided?: number[] }) =>
+    invoke<number>("cull_decide", { picks: d.picks ?? [], rejects: d.rejects ?? [], undecided: d.undecided ?? [] }),
+  /** Measure these photos again from their originals (those plugged in), in the background. */
+  lookCloser: (ids: number[]) => invoke<void>("cull_look_closer", { ids }),
+  stop: () => invoke<void>("cull_stop"),
+  progress: () => invoke<CloserProgress | null>("cull_progress"),
 };
 
 export const thumbUrl = (id: number, rev: number) => `http://shoebox.localhost/thumb/${id}?r=${rev}`;
@@ -479,7 +555,7 @@ export function fmtAgo(ts: number | null) {
 }
 
 export interface AiProgress {
-  task: "search" | "faces";
+  task: "search" | "faces" | "quality";
   done: number;
   total: number;
   gpu: boolean;
@@ -508,6 +584,8 @@ export function headOf(l: PhotoList, n: number): PhotoList {
     ext: l.ext.slice(0, n),
     raw: l.raw.slice(0, n),
     fresh: l.fresh.slice(0, n),
+    picked: l.picked.slice(0, n),
+    flags: l.flags.slice(0, n),
   };
 }
 
