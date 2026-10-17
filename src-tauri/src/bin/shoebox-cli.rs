@@ -123,10 +123,20 @@
 //! `delete-marked` quoting the token of the plan a person was shown:
 //!   shoebox-cli mark <photo-id>...             mark for deletion
 //!   shoebox-cli unmark <photo-id>... | --all
-//!   shoebox-cli marked                         what deleting would remove now, by disk, with its token
+//!   shoebox-cli marked                         what deleting would remove now, by disk, with its token;
+//!                                              "gone": marked photos already missing everywhere
 //!   shoebox-cli delete-marked <token> [volume-id...]
-//!                                              delete it (Recycle Bin; removable media for good),
-//!                                              on the listed disks or every disk in the plan
+//!                                              delete it (the system's bin: Recycle Bin, Trash;
+//!                                              removable media for good), on the listed disks or every
+//!                                              disk in the plan; the "gone" ones only leave the catalog
+//!
+//! Missing photos (JSON out): no copy found on any disk, plugged in or not.
+//!   shoebox-cli missing                        each one, where its files were, and whether they are
+//!                                              in the system's bin (deleted, not moved: restoring
+//!                                              them brings the photo back with its faces and tags)
+//!   shoebox-cli forget-missing <photo-id>... | --in-bin | --all
+//!                                              take them out of the catalog (no file is touched);
+//!                                              photos with a copy anywhere stay
 
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::paths::DataDir;
@@ -694,8 +704,24 @@ fn main() -> anyhow::Result<()> {
             }
             println!("{}", serde_json::to_string_pretty(&organize::delete_confirmed(&cat, token, &disks)?)?);
         }
+        Some("missing") => {
+            let ids = cat.list_photos(&Scope::Missing, Sort::default(), &Filters::default())?.ids;
+            println!("{}", serde_json::to_string_pretty(&cat.missing(&ids)?)?);
+        }
+        Some("forget-missing") => {
+            let missing = || cat.list_photos(&Scope::Missing, Sort::default(), &Filters::default()).map(|l| l.ids);
+            let ids: Vec<i64> = match args.get(1).map(String::as_str) {
+                None => anyhow::bail!("forget-missing <photo-id>... | --in-bin | --all"),
+                Some("--all") => missing()?,
+                Some("--in-bin") => {
+                    cat.missing(&missing()?)?.photos.into_iter().filter(|p| p.in_bin).map(|p| p.id).collect()
+                }
+                Some(_) => args[1..].iter().map(|a| a.parse()).collect::<Result<_, _>>()?,
+            };
+            println!("{}", serde_json::to_string_pretty(&cat.forget_missing(&ids)?)?);
+        }
         _ => eprintln!(
-            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...]"
+            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | missing | forget-missing <id>... | --in-bin | --all"
         ),
     }
     Ok(())

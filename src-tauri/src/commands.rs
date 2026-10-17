@@ -7,7 +7,8 @@
 
 use crate::AppState;
 use crate::catalog::{
-    Browse, Facets, Filters, FolderCheck, Overview, PhotoDetail, PhotoList, RemoveReport, Scope, Sort, Stats,
+    Browse, Facets, Filters, FolderCheck, ForgetReport, MissingReport, Overview, PhotoDetail, PhotoList, RemoveReport,
+    Scope, Sort, Stats,
 };
 use crate::gear;
 use crate::models;
@@ -184,6 +185,23 @@ pub async fn remove_folder(state: State<'_, AppState>, root_id: i64) -> Res<Remo
     state.scans.forget(root_id);
     let cat = state.cat.clone();
     in_order(move || cat.remove_root(root_id)).await
+}
+
+/// Which of these photos are missing everywhere, and which of those are in the
+/// system's bin (deleted, not moved).
+#[tauri::command]
+pub async fn missing_photos(state: State<'_, AppState>, ids: Vec<i64>) -> Res<MissingReport> {
+    let cat = state.cat.clone();
+    blocking(move || cat.missing(&ids)).await
+}
+
+/// Takes the missing photos among these out of the catalog. No file is touched.
+#[tauri::command]
+pub async fn forget_missing(app: AppHandle, state: State<'_, AppState>, ids: Vec<i64>) -> Res<ForgetReport> {
+    let cat = state.cat.clone();
+    let report = in_order(move || cat.forget_missing(&ids)).await?;
+    let _ = app.emit("catalog-changed", ());
+    Ok(report)
 }
 
 #[tauri::command]

@@ -15,6 +15,7 @@ pub mod scan;
 pub mod search;
 pub mod settings;
 pub mod tags;
+pub mod trash_bin;
 pub mod updates;
 pub mod volumes;
 #[cfg(windows)]
@@ -758,6 +759,8 @@ pub fn run() {
             commands::unmark_all,
             commands::delete_plan,
             commands::delete_marked,
+            commands::missing_photos,
+            commands::forget_missing,
             commands::models_list,
             commands::model_download,
             commands::model_stop,
