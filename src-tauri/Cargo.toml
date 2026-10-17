@@ -3,7 +3,7 @@ name = "shoebox"
 description = "Shoebox - an offline catalog of every photo, on every disk."
 authors = ["Antoine Khater"]
 edition = "2024"
-version = "26.42.4"
+version = "26.42.5"
 rust-version = "1.98"
 default-run = "shoebox"
 
