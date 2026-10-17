@@ -69,7 +69,15 @@ fn only_photos_gone_from_every_disk_leave_and_no_file_is_touched() {
         std::fs::remove_file(shoot.join(name)).unwrap();
     }
     scan(&cat, shoot_root);
-    assert_eq!(missing_ids(&cat), vec![a, d], "c still has its copy");
+    assert_eq!(
+        missing_ids(&cat),
+        {
+            let mut gone = vec![a, d];
+            gone.sort();
+            gone
+        },
+        "c still has its copy"
+    );
     let report = cat.missing(&[a, b, c, d]).unwrap();
     assert_eq!(report.photos.iter().map(|p| p.id).collect::<Vec<_>>(), vec![a, d]);
     assert!(report.photos.iter().all(|p| !p.in_bin), "deleted for good, not sent to the bin");
