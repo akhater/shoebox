@@ -485,6 +485,20 @@ describe("Cull", () => {
     expect(host.querySelectorAll(".cull-zoom .focus-points .af.inFocus")).toHaveLength(1);
   });
 
+  test("the line under a frame says where its shot's frames were compared", async () => {
+    const be = fakeBackend();
+    be.focusOf.set(303, { mode: "Single point", points: [{ x: 0.7, y: 0.4, w: 0.04, h: 0.06, state: "inFocus" }] });
+    const host = await renderApp();
+    await openCull(host, "Trip");
+    const meta = () => host.querySelector(".cull-meta")!.textContent;
+    // The burst's files say nothing about focus: their sharpest parts.
+    expect(meta()).toContain(" · sharpest edges 0.30‰ of the width (preview)");
+    await key(document.body, "ArrowDown");
+    await wait(20);
+    expect(cullPhoto(host)).toBe(303);
+    expect(meta()).toContain(" · edges at the focus point 0.30‰ of the width (preview)");
+  });
+
   test("Ctrl or Shift click selects several frames or shots: X and P act on them all", async () => {
     const be = fakeBackend();
     const host = await renderApp();

@@ -35,6 +35,13 @@ Newest first. Same format and versioning as Argentum.
   the shot leaves the point where the subject was. Photos measured before
   are measured again once their focus points are known. `shoebox-cli cull`
   gives it too.
+- **Cull keeps the frame that is sharp where the camera focused.** In a
+  burst without a face to judge by, the frames are compared where the camera
+  focused instead of on their sharpest part, so a frame whose focus jumped to
+  the background is no longer kept over the one sharp on the subject. When
+  the point is soft in every frame (focused, then the camera turned to frame
+  the shot), the sharpest part decides, as before. The line under the photo
+  says where the frames were compared.
 
 ## 26.42.5 - 2026-10-18
 

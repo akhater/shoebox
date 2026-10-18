@@ -1192,6 +1192,61 @@ pub struct Stack {
     pub frames: Vec<FrameRow>,
     /// The frame Cull would keep (an index into `frames`).
     pub keeper: usize,
+    /// Where its frames' sharpness was compared (each frame's `blur`).
+    pub compared: Compared,
+    /// Compared on what the originals showed: every frame was looked at closer.
+    pub closer: bool,
+}
+
+/// Where the frames of a stack are compared, to find the one to keep: where
+/// the subject is, as far as Cull can tell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Compared {
+    /// Around the eyes of the largest face: every frame has one measured.
+    Face,
+    /// Where the camera focused: every frame's file says, and the point is
+    /// sharp in one of them at least ([`Compared::of`]).
+    FocusPoint,
+    /// The frame's sharpest part.
+    #[default]
+    Sharpest,
+}
+
+impl Compared {
+    /// Where frames measured as `looks` (one look each, the same kind for
+    /// all) are compared: on their faces when every one has one measured,
+    /// else where the camera focused when every one's file says, else on
+    /// their sharpest part.
+    ///
+    /// The camera's point counts only when it is sharp in one of the frames
+    /// at least: within [`FACE_VS_SHARPEST`] of the sharpest part of any of
+    /// them. Softer than that in all of them, it isn't where the subject is:
+    /// a photographer who focused, then turned the camera to frame the shot,
+    /// leaves the point where the subject was, now on the background. Frames
+    /// compared there would differ by chance, and one softer where the
+    /// subject is could be kept.
+    fn of(looks: &[Option<Measures>]) -> Self {
+        let every = |at: Compared| looks.iter().all(|m| m.as_ref().is_some_and(|m| at.blur(m).is_some()));
+        if every(Compared::Face) {
+            return Compared::Face;
+        }
+        let least = |at: Compared| looks.iter().flatten().filter_map(|m| at.blur(m)).min_by(f32::total_cmp);
+        let sharp_somewhere = match (least(Compared::FocusPoint), least(Compared::Sharpest)) {
+            (Some(point), Some(sharpest)) => point <= FACE_VS_SHARPEST * sharpest,
+            _ => false,
+        };
+        if every(Compared::FocusPoint) && sharp_somewhere { Compared::FocusPoint } else { Compared::Sharpest }
+    }
+
+    /// Edge blur there, in thousandths of the long edge.
+    fn blur(self, m: &Measures) -> Option<f32> {
+        m.rel(match self {
+            Compared::Face => m.face,
+            Compared::FocusPoint => m.focus_point,
+            Compared::Sharpest => m.sharpest,
+        })
+    }
 }
 
 /// What Cull suggests for a frame.
@@ -1224,7 +1279,8 @@ pub struct FrameRow {
     pub reasons: Vec<String>,
     pub problems: Vec<Problem>,
     /// Edge blur used to compare frames, in thousandths of the long edge
-    /// (lower is sharper). None: not measured yet.
+    /// (lower is sharper): at the face, where the camera focused or the
+    /// sharpest part, as the stack's `compared` says. None: not measured yet.
     pub blur: Option<f32>,
     /// Measured from the original, not only the preview.
     pub closer: bool,
@@ -1325,15 +1381,14 @@ fn same_capture(a: &FrameIn, b: &FrameIn) -> bool {
 fn stack_of(frames: Vec<FrameIn>) -> Stack {
     let found: Vec<Vec<Found>> =
         frames.iter().map(|f| f.quality.map(|q| problems(&q, &f.shot)).unwrap_or_default()).collect();
-    // Frames compare on their faces when each has one measured, else on their
-    // sharpest part; on the originals when each was looked at closer.
+    // Frames compare on their faces, else where the camera focused, else on
+    // their sharpest part ([`Compared::of`]); on the originals when each was
+    // looked at closer.
     let all_close = frames.iter().all(|f| f.quality.is_some_and(|q| q.close.is_some()));
-    let pick_measures = |f: &FrameIn| f.quality.map(|q| if all_close { *q.best() } else { q.preview });
-    let all_faces = frames.iter().all(|f| pick_measures(f).is_some_and(|m| m.face.is_some()));
-    let blur: Vec<Option<f32>> = frames
-        .iter()
-        .map(|f| pick_measures(f).and_then(|m| m.rel(if all_faces { m.face } else { m.sharpest })))
-        .collect();
+    let looks: Vec<Option<Measures>> =
+        frames.iter().map(|f| f.quality.map(|q| if all_close { *q.best() } else { q.preview })).collect();
+    let compared = Compared::of(&looks);
+    let blur: Vec<Option<f32>> = looks.iter().map(|m| m.as_ref().and_then(|m| compared.blur(m))).collect();
     let score = |i: usize| -> f32 {
         let major = found[i].iter().filter(|p| p.problem.major()).count() as f32;
         let minor = found[i].len() as f32 - major;
@@ -1393,7 +1448,7 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
             row
         })
         .collect();
-    Stack { frames: rows, keeper }
+    Stack { frames: rows, keeper, compared, closer: all_close }
 }
 
 impl Shoot {
@@ -1659,6 +1714,94 @@ mod tests {
         // Without descriptions, only frames a second apart are one burst.
         let stacks = suggest(vec![frame(1, 100, None, 0.5), frame(2, 101, None, 0.2), frame(3, 110, None, 0.2)]);
         assert_eq!(stacks.iter().map(|s| s.frames.len()).collect::<Vec<_>>(), [2, 1]);
+    }
+
+    /// Frame `id` of a burst: its sharpest part, and where the camera focused
+    /// when its file says (edge blur, thousandths of the long edge).
+    fn focused(id: i64, sharpest: f32, point: Option<f32>) -> FrameIn {
+        let mut f = frame(id, 100 + id, None, sharpest);
+        f.quality.as_mut().unwrap().preview.focus_point = point;
+        f
+    }
+
+    #[test]
+    fn a_burst_is_compared_where_the_camera_focused() {
+        // The subject sharp where the camera focused; then a frame whose focus
+        // jumped to the background, sharper there than anything in the first.
+        let burst = || vec![focused(1, 0.5, Some(0.5)), focused(2, 0.3, Some(1.6))];
+        let s = &suggest(burst())[0];
+        assert_eq!((s.compared, s.keeper), (Compared::FocusPoint, 0));
+        assert!(s.frames[1].blur.is_some_and(|b| (b - 1.6).abs() < 1e-4), "{:?}", s.frames[1]);
+        assert_eq!(s.frames[1].reasons[0], "Same shot: frame 1 is better");
+        // A frame whose file doesn't say: their sharpest parts decide.
+        let s = &suggest(vec![focused(1, 0.5, Some(0.5)), focused(2, 0.3, None)])[0];
+        assert_eq!((s.compared, s.keeper), (Compared::Sharpest, 1));
+        // Faces first: every frame has one measured, the sharper face is kept.
+        let mut frames = burst();
+        for (f, face) in frames.iter_mut().zip([1.4, 0.9]) {
+            f.quality.as_mut().unwrap().preview.face = Some(face);
+        }
+        let s = &suggest(frames)[0];
+        assert_eq!((s.compared, s.keeper), (Compared::Face, 1));
+        // Every frame looked at closer: compared where the originals show the point.
+        let closer = |points: [Option<f32>; 2]| {
+            let mut frames = burst();
+            for (f, point) in frames.iter_mut().zip(points) {
+                let q = f.quality.as_mut().unwrap();
+                q.close = Some(Measures { long: 3000, sharpest: Some(1.2), focus_point: point, ..q.preview });
+            }
+            suggest(frames).remove(0)
+        };
+        let s = closer([Some(2.0), Some(0.8)]);
+        assert_eq!((s.compared, s.closer, s.keeper), (Compared::FocusPoint, true, 1));
+        // Looked at closer before Cull knew the points: the originals' sharpest parts.
+        let s = closer([None, None]);
+        assert_eq!((s.compared, s.closer), (Compared::Sharpest, true));
+        assert!(!suggest(burst())[0].closer);
+    }
+
+    #[test]
+    fn a_point_left_on_the_background_doesnt_choose_the_keeper() {
+        // Focus and recompose: the camera's point stays where the subject was,
+        // on the soft background now, in every frame; a little less soft, by
+        // chance, in the frame where the subject moved. The sharpest part
+        // decides, and the sharper subject is kept.
+        let s = &suggest(vec![focused(1, 0.3, Some(1.4)), focused(2, 0.7, Some(1.3))])[0];
+        assert_eq!((s.compared, s.keeper), (Compared::Sharpest, 0));
+        // The same when the point is soft enough for Focus missed in each.
+        let s = &suggest(vec![focused(1, 0.3, Some(3.0)), focused(2, 0.7, Some(2.8))])[0];
+        assert_eq!((s.compared, s.keeper), (Compared::Sharpest, 0));
+        assert!(s.frames.iter().all(|f| f.problems == [Problem::FocusMissed]), "{:?}", s.frames);
+        // A frame shaken all over has its point barely softer than its own
+        // sharpest part: that doesn't make the point the subject either.
+        let s = &suggest(vec![focused(1, 0.3, Some(1.5)), focused(2, 0.9, Some(1.45))])[0];
+        assert_eq!((s.compared, s.keeper), (Compared::Sharpest, 0));
+        // Sharp in one frame, the point is where the subject is.
+        let s = &suggest(vec![focused(1, 0.3, Some(2.5)), focused(2, 0.45, Some(0.55))])[0];
+        assert_eq!((s.compared, s.keeper), (Compared::FocusPoint, 1));
+
+        // Measured: the subject on the left, sharp in the first frame and
+        // softer in the next (it moved); the point on the right, on the
+        // background, blurred in both and a little less in the second. Compared
+        // there, the second frame would be kept.
+        let shot = |subject: f32, background: f32| {
+            let (s, b) = (squares(1080, 720, subject), squares(1080, 720, background));
+            RgbImage::from_fn(1080, 720, |x, y| if x < 360 { *s.get_pixel(x, y) } else { *b.get_pixel(x, y) })
+        };
+        // The camera focused at `x` (0..1 of the width).
+        let measured = |id: i64, img: RgbImage, x: f32| {
+            let mut f = frame(id, 100 + id, None, 0.0);
+            let preview = measure(&img, &[], &[point(x, 0.5, State::InFocus)]);
+            f.quality = Some(Quality { preview, close: None });
+            f
+        };
+        let s = &suggest(vec![measured(1, shot(0.6, 4.0), 0.75), measured(2, shot(1.0, 3.5), 0.75)])[0];
+        assert_eq!((s.frames.len(), s.compared, s.keeper), (2, Compared::Sharpest, 0), "{:?}", s.frames);
+        // The point on the subject, in focus in the first frame; in the next
+        // the focus jumped to the background, now sharper than the subject
+        // was. Compared on their sharpest parts, the second would be kept.
+        let s = &suggest(vec![measured(1, shot(0.8, 4.0), 0.17), measured(2, shot(2.0, 0.6), 0.17)])[0];
+        assert_eq!((s.frames.len(), s.compared, s.keeper), (2, Compared::FocusPoint, 0), "{:?}", s.frames);
     }
 
     #[test]

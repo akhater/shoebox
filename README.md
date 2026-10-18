@@ -40,7 +40,8 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   Recycle Bin (the Trash on macOS and Linux) in one step. A RAW's camera
   JPEG goes with it.
 - **Cull's assistant.** A shoot one shot at a time: the frames of a burst
-  gathered, the sharpest first in line, and what's wrong with each frame -
+  gathered, the sharpest first in line (at the face, else where the camera
+  focused), and what's wrong with each frame -
   blurry, a face out of focus, the focus missed where the camera says it
   focused, too dark, blown out, nothing in it (lens cap). At 100% it looks
   first where the camera focused.
