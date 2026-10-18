@@ -4,6 +4,7 @@ pub mod cull;
 pub mod db;
 pub mod embedded;
 pub mod faces;
+pub mod focus;
 pub mod formats;
 pub mod gear;
 pub mod imaging;
@@ -268,9 +269,9 @@ impl Ready {
     }
 }
 
-/// Reads the lenses an older Shoebox couldn't, from the originals plugged in
-/// (metadata only), and lets a shot's other file lend its lens. Kicked at
-/// start, after each scan, and when a disk is plugged in.
+/// Reads what an older Shoebox couldn't from the originals plugged in
+/// (metadata only): lenses, a shot's other file lending its lens, then focus
+/// points. Kicked at start, after each scan, and when a disk is plugged in.
 fn lens_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<Kick>) {
     let cancel = AtomicBool::new(false);
     loop {
@@ -281,6 +282,10 @@ fn lens_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<Kick>) {
             }
             Ok(_) => {}
             Err(e) => log::warn!("finding lenses failed: {e:#}"),
+        }
+        // Only the photo shown asks for them: nothing to tell the window.
+        if let Err(e) = focus::find(&cat, &cancel) {
+            log::warn!("finding focus points failed: {e:#}");
         }
     }
 }

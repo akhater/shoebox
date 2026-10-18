@@ -11,7 +11,16 @@ import {
   UserX,
   X,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import {
   api,
   BIN,
@@ -25,12 +34,15 @@ import {
   previewUrl,
   thumbUrl,
   type FileLoc,
+  type Focus,
   type MissingPhoto,
   type PhotoDetail,
   type Person,
   type PhotoFace,
   type PhotoList,
 } from "../api";
+import { useRemembered } from "../remembered";
+import { FocusIcon, FocusPoints, FocusSummary, hasFocusPoints } from "./FocusPoints";
 import { TagEditor } from "./Tags";
 import { TurnControl, turnedStyle, usePreviewHandlers } from "./TurnControl";
 import { WhoIsIt } from "./WhoIsIt";
@@ -149,6 +161,9 @@ export function Viewer({
   // revision it had then). `instant`: no animation (the new picture replacing it).
   const [turnView, setTurnView] = useState<{ q: number; transform: string; instant?: boolean } | null>(null);
   const waitingFor = useRef<number | null>(null);
+  // Where the camera focused, over the photo: off until asked for, then
+  // remembered for the next photos and the next time.
+  const [showFocus, setShowFocus] = useRemembered("shoebox.focusPoints", false);
 
   // In Sideways the photo is shown as Shoebox would turn it (or as it is), as in the grid.
   const proposal = suggested?.get(id) ?? 0;
@@ -354,12 +369,14 @@ export function Viewer({
         onShowTurned(!showTurned);
       } else if (e.key === "z" || e.key === "Z") {
         if (zoom) setZoom(null);
-        else zoomAt({ fx: 0.5, fy: 0.5 });
+        else zoomAt(focusCentre ?? { fx: 0.5, fy: 0.5 });
       } else if (e.key === "t" || e.key === "T") {
         e.preventDefault(); // don't type the "t"
         tagBox.current?.focus();
       } else if ((e.key === "r" || e.key === "R") && !e.ctrlKey && !e.metaKey && !e.altKey) {
         turnNow(e.shiftKey ? -1 : 1);
+      } else if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        toggleFocus();
       } else if (e.key === "ArrowLeft") go(index - 1, e.shiftKey ? "range" : "only");
       else if (e.key === "ArrowRight") go(index + 1, e.shiftKey ? "range" : "only");
       else if (e.key === "Delete") {
@@ -375,6 +392,28 @@ export function Viewer({
   const act = (p: Promise<void>) => p.catch((e) => setError(String(e)));
   const spotted = faces.find((f) => f.id === spot) ?? null;
   const d = detail?.id === id ? detail : null;
+  // Only over the picture they were read for (a turn makes a new one).
+  const focus = d && d.previewRev === rev ? d.focus : null;
+  const pointsHere = hasFocusPoints(focus);
+  const drawFocus = showFocus && loaded && pointsHere && focus ? focus : null;
+  const noFocusWords = d?.focus?.mode === "Manual focus" ? "Manual focus" : "Focus not recorded";
+  // With the points shown, Z zooms where the camera focused (where sharpness is checked first).
+  const focusPoint = drawFocus?.points.find((p) => p.state === "inFocus") ?? drawFocus?.points.find((p) => p.state === "chosen");
+  const focusCentre = focusPoint && !proposing ? { fx: focusPoint.x + focusPoint.w / 2, fy: focusPoint.y + focusPoint.h / 2 } : null;
+  const toggleFocus = () => {
+    const on = !showFocus;
+    setShowFocus(on);
+    // Nothing changes on this photo: say what happened.
+    if (d && !pointsHere) {
+      setHint(
+        on
+          ? d.focus?.mode === "Manual focus"
+            ? "Focus points on. This photo was focused by hand: the camera recorded no point."
+            : "Focus points on. This photo's file doesn't say where the camera focused."
+          : "Focus points off.",
+      );
+    }
+  };
   const exposure = d
     ? [
         d.fnumber && `f/${+d.fnumber.toFixed(1)}`,
@@ -395,6 +434,7 @@ export function Viewer({
             zoom={zoom}
             sharp={!!full}
             spot={spotted}
+            focus={drawFocus}
             onExit={() => setZoom(null)}
           />
         ) : list.preview[index] === 1 ? (
@@ -424,7 +464,16 @@ export function Viewer({
               title={reachable ? "Click to zoom to 100% (Z)" : undefined}
             />
             {sharp && <img className="viewer-img sharp" src={sharp} alt="" onClick={onPhotoClick} title="Click to zoom to 100% (Z)" />}
-            {spotted && previewSize && <FittedSpot stage={stage} size={previewSize} face={spotted} />}
+            {drawFocus && previewSize && (
+              <FittedFrame stage={stage} size={previewSize}>
+                <FocusPoints focus={drawFocus} faded={!!spotted} />
+              </FittedFrame>
+            )}
+            {spotted && previewSize && (
+              <FittedFrame stage={stage} size={previewSize}>
+                <FaceSpot face={spotted} />
+              </FittedFrame>
+            )}
           </div>
         ) : (
           <div className="viewer-empty">
@@ -469,6 +518,29 @@ export function Viewer({
               onPreview={previewTurn}
             />
           )
+        )}
+        {list.preview[index] === 1 && (
+          <button
+            className={`focus-toggle ${showFocus && d && !pointsHere ? "unrecorded" : ""}`}
+            aria-label="Focus points"
+            aria-pressed={showFocus}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleFocus();
+            }}
+            title={
+              !showFocus
+                ? "Show where the camera focused (F)"
+                : d && !pointsHere
+                  ? d.focus?.mode === "Manual focus"
+                    ? "Focused by hand: the camera recorded no point. Click to stop showing focus points (F)"
+                    : "The file doesn't say where the camera focused. Click to stop showing focus points (F)"
+                  : "Hide the focus points (F)"
+            }
+          >
+            <FocusIcon on={showFocus} />
+            {showFocus && d && !pointsHere ? noFocusWords : "Focus points"}
+          </button>
         )}
         {proposal !== 0 && onShowTurned && !zoom && (
           <div className="view-switch" role="group" aria-label="Show" onClick={(e) => e.stopPropagation()}>
@@ -547,6 +619,14 @@ export function Viewer({
                 <>
                   <dt>Exposure</dt>
                   <dd>{exposure.join("  ·  ")}</dd>
+                </>
+              )}
+              {d.focus && (
+                <>
+                  <dt>Focus</dt>
+                  <dd>
+                    <FocusSummary focus={d.focus} legend={!!drawFocus} />
+                  </dd>
                 </>
               )}
               {d.width && d.height && (
@@ -726,6 +806,7 @@ function ZoomedPhoto({
   zoom,
   sharp,
   spot,
+  focus,
   onExit,
 }: {
   src: string;
@@ -736,6 +817,8 @@ function ZoomedPhoto({
   sharp: boolean;
   /** The face to box (its name is pointed at). */
   spot: PhotoFace | null;
+  /** Where the camera focused, when shown. */
+  focus: Focus | null;
   onExit: () => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
@@ -816,6 +899,7 @@ function ZoomedPhoto({
             onLoad={(e) => onLoad(e.currentTarget)}
             style={size ? { width: size.w, height: size.h } : { visibility: "hidden" }}
           />
+          {focus && size && <FocusPoints focus={focus} faded={!!spot} />}
           {spot && size && <FaceSpot face={spot} ref={spotEl} />}
         </div>
       </div>
@@ -823,9 +907,18 @@ function ZoomedPhoto({
   );
 }
 
-/** Where the fitted photo is drawn in the stage (as .viewer-img: contained in the
- *  stage less 24 px each side), so a face's box lands on the face. */
-function FittedSpot({ stage, size, face }: { stage: RefObject<HTMLDivElement | null>; size: { w: number; h: number }; face: PhotoFace }) {
+/** A box where the fitted photo is drawn in the stage (as .viewer-img: contained in
+ *  the stage less 24 px each side), so what is drawn in it (a face's box, focus
+ *  points) lands on the photo. */
+function FittedFrame({
+  stage,
+  size,
+  children,
+}: {
+  stage: RefObject<HTMLDivElement | null>;
+  size: { w: number; h: number };
+  children: ReactNode;
+}) {
   const [room, setRoom] = useState<{ w: number; h: number } | null>(null);
   useLayoutEffect(() => {
     const el = stage.current;
@@ -840,8 +933,8 @@ function FittedSpot({ stage, size, face }: { stage: RefObject<HTMLDivElement | n
   const s = Math.min((room.w - 48) / size.w, (room.h - 48) / size.h);
   const [w, h] = [size.w * s, size.h * s];
   return (
-    <div className="face-spot-frame" style={{ left: (room.w - w) / 2, top: (room.h - h) / 2, width: w, height: h }}>
-      <FaceSpot face={face} />
+    <div className="fitted-frame" style={{ left: (room.w - w) / 2, top: (room.h - h) / 2, width: w, height: h }}>
+      {children}
     </div>
   );
 }

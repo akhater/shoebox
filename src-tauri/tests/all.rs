@@ -18,6 +18,7 @@ mod faces_by_date;
 mod faces_saved;
 mod failed_photos;
 mod filter_match;
+mod focus_points;
 mod forget_missing;
 mod grouping_replay;
 mod half_read;

@@ -101,6 +101,8 @@ impl Doc {
         let mut meta = ex.as_ref().map(crate::imaging::meta_of).unwrap_or_default();
         meta.width = Some(self.width);
         meta.height = Some(self.height);
+        // The camera's focus points were for the photo, not the picture made of it.
+        meta.focus = None;
         meta
     }
 }

@@ -5,6 +5,7 @@ import type {
   CullStack,
   FaceTarget,
   Facets,
+  Focus,
   LeftAsIs,
   Merged,
   Overview,
@@ -63,6 +64,8 @@ export function fakeBackend() {
   /** How photos were turned, and their previews' revisions (a turn makes a new one). */
   const turns = new Map<number, number>();
   const revs = new Map<number, number>();
+  /** Where the camera focused, for the photos a test says. */
+  const focusOf = new Map<number, Focus>();
   const turn = (ids: number[], by: (id: number) => number) => {
     const photos = ids.map((id) => {
       const q = ((by(id) % 4) + 4) % 4;
@@ -263,6 +266,7 @@ export function fakeBackend() {
       error: null,
       turn: turns.get(id) ?? 0,
       sideways: sideways.get(id) ?? 0,
+      focus: focusOf.get(id) ?? null,
       files: [
         {
           id: id * 10,
@@ -457,6 +461,7 @@ export function fakeBackend() {
     inBin,
     sideways,
     turns,
+    focusOf,
     /** What Cull says it couldn't read. */
     unreadableOriginals: (u: Shoot["unreadable"]) => {
       unreadable = u;

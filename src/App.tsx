@@ -81,6 +81,7 @@ import { Sidebar, type FolderTarget } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { TurnControl, TurnPhotoIcon } from "./components/TurnControl";
 import { turnWords, Viewer } from "./components/Viewer";
+import { useRemembered } from "./remembered";
 import { WhoIsIt } from "./components/WhoIsIt";
 
 const EMPTY: PhotoList = {
@@ -109,26 +110,6 @@ function turnedText(r: TurnReport, how: string | null) {
     ? ` ${fmtNum(r.toReadAgain.length)} couldn't be turned from Shoebox's copy: ${r.toReadAgain.length === 1 ? "it is" : "they are"} read again, turned, when ${r.toReadAgain.length === 1 ? "its disk is" : "their disks are"} plugged in.`
     : "";
   return turned + again;
-}
-
-/** A per-viewer on/off remembered between sessions (convenience only). */
-function useRemembered(key: string, initial: boolean) {
-  const [on, setOn] = useState(() => {
-    try {
-      const v = localStorage.getItem(key);
-      return v == null ? initial : v === "1";
-    } catch {
-      return initial;
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem(key, on ? "1" : "0");
-    } catch {
-      /* per-viewer convenience only */
-    }
-  }, [key, on]);
-  return [on, setOn] as const;
 }
 
 /** A handler that stays the same from one render to the next but always runs

@@ -6,6 +6,7 @@
 //! A Photoshop file, whatever its name, is read by [`crate::psd`].
 //! Shoebox only ever opens photos for reading.
 
+use crate::focus::Focus;
 use crate::formats::Kind;
 use anyhow::{Result, anyhow};
 use chrono::NaiveDateTime;
@@ -50,6 +51,8 @@ pub struct Meta {
     pub orientation: u16,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Where the camera focused, as the picture stands upright.
+    pub focus: Option<Focus>,
 }
 
 impl Meta {
@@ -58,7 +61,22 @@ impl Meta {
         macro_rules! fill {
             ($($f:ident),*) => { $( if self.$f.is_none() { self.$f = o.$f; } )* };
         }
-        fill!(taken, subsec, make, model, lens, serial, image_number, iso, fnumber, exposure, focal, width, height);
+        fill!(
+            taken,
+            subsec,
+            make,
+            model,
+            lens,
+            serial,
+            image_number,
+            iso,
+            fnumber,
+            exposure,
+            focal,
+            width,
+            height,
+            focus
+        );
         if self.orientation == 0 {
             self.orientation = o.orientation;
         }
@@ -107,13 +125,34 @@ pub fn read_lens(path: &Path, kind: Kind) -> Option<String> {
     lens.as_deref().and_then(crate::gear::file_name)
 }
 
+/// Where the camera focused, from the photo's metadata only (its maker note),
+/// as the picture stands upright: for photos read before Shoebox knew focus
+/// points ([`crate::focus::find`]).
+pub fn read_focus(path: &Path, kind: Kind) -> Option<Focus> {
+    if crate::psd::is_psd(path) {
+        return None;
+    }
+    match kind {
+        Kind::Raw => catch_unwind(AssertUnwindSafe(|| {
+            let src = RawSource::new(path).ok()?;
+            // A CRW keeps its orientation where only rawler (reading it all) finds it.
+            if src.buf().get(6..14) == Some(b"HEAPCCDR") {
+                return rawler_meta(path).ok()?.focus;
+            }
+            with_notes(&src, |n| note_focus(n, None))
+        }))
+        .ok()
+        .flatten(),
+        Kind::Image => exif_meta(path).and_then(|m| m.focus),
+    }
+}
+
 /// A RAW's lens: its name as the file records it, else rawler's lens table,
 /// else what the file says the lens is. The table's name is kept when it is
 /// the same lens, for its maker's name ("Canon EF 70-200mm f/4L IS USM" for
 /// "EF70-200mm f/4L IS USM"); when they disagree the file wins (lenses share
 /// ids, so the table can guess wrong).
-fn raw_lens(src: &RawSource, table: Option<String>) -> Option<String> {
-    let clues = file_clues(src);
+fn raw_lens(clues: Clues, table: Option<String>) -> Option<String> {
     match (clues.name, table) {
         (Some(f), Some(t)) if crate::gear::same_lens(&f, &t) => Some(t),
         (Some(f), _) => Some(f),
@@ -136,6 +175,8 @@ fn rawler_lens(src: &RawSource) -> Option<String> {
 }
 
 const MAKE: u16 = 0x010F;
+const MODEL: u16 = 0x0110;
+const ORIENTATION: u16 = 0x0112;
 const EXIF_IFD: u16 = 0x8769;
 const MAKER_NOTE: u16 = 0x927C;
 /// Standard EXIF (2.3): the lens's name, and what it is - min and max focal
@@ -150,8 +191,10 @@ const DNG_PRIVATE_DATA: u16 = 0xC634;
 /// camera settings (lens id at 22, focal range at 23-25, aperture at 26).
 const CANON_LENS_MODEL: u16 = 0x0095;
 const CANON_CAMERA_SETTINGS: u16 = 0x0001;
-/// The same camera settings in a CRW (CIFF) file.
+/// The same camera settings in a CRW (CIFF) file, and its AF points (as
+/// Canon's maker note AFInfo).
 const CIFF_CAMERA_SETTINGS: u16 = 0x102D;
+const CIFF_AF_INFO: u16 = 0x1038;
 /// Nikon's maker note: what the lens is, as LensSpecification.
 const NIKON_LENS: u16 = 0x0084;
 /// Pentax's maker note: the lens's id (series, number).
@@ -165,61 +208,108 @@ struct Clues {
     spec: Option<String>,
 }
 
-/// The lens as a RAW file records it, read where each format keeps it: the
-/// TIFF-based RAWs (CR2, NEF, ARW, ORF, PEF, RW2, DNG...), a CR3's boxes, the
-/// JPEG inside a Fuji RAF, a CRW's heap.
+/// A file's metadata directories, as its maker's note is read: the maker
+/// (lower case) and model, its EXIF and main directories, the note itself,
+/// and the EXIF orientation.
+struct Notes<'a> {
+    make: &'a str,
+    model: &'a str,
+    ifds: &'a [&'a IFD],
+    note: Option<&'a IFD>,
+    orientation: u16,
+}
+
+/// The lens as a RAW file records it, read where each format keeps it (see
+/// [`with_notes`]), and a CRW's heap.
 fn file_clues(src: &RawSource) -> Clues {
-    let buf = src.buf();
-    let Some(head) = buf.get(..16) else { return Clues::default() };
-    if &head[4..8] == b"ftyp" {
-        let Ok(bmff) = rawler::formats::bmff::Bmff::new(src.reader()) else { return Clues::default() };
-        let Some(cr3) = bmff.filebox.moov.cr3desc.as_ref() else { return Clues::default() };
-        let ifds = [cr3.cmt2.tiff.root_ifd(), cr3.cmt1.tiff.root_ifd()];
-        return clues("canon", &ifds, Some(cr3.cmt3.tiff.root_ifd()));
+    if src.buf().get(6..14) == Some(b"HEAPCCDR") {
+        return ciff_clues(src.buf());
     }
-    if &head[6..14] == b"HEAPCCDR" {
-        return ciff_clues(buf);
+    with_notes(src, |n| clues(n.make, n.ifds, n.note))
+}
+
+/// `f` of a RAW file's metadata, read where each format keeps it: the
+/// TIFF-based RAWs (CR2, NEF, ARW, ORF, PEF, RW2, DNG...), a CR3's boxes, the
+/// JPEG inside a Fuji RAF.
+fn with_notes<T: Default>(src: &RawSource, f: impl FnOnce(&Notes) -> T) -> T {
+    let buf = src.buf();
+    let Some(head) = buf.get(..16) else { return T::default() };
+    if &head[4..8] == b"ftyp" {
+        let Ok(bmff) = rawler::formats::bmff::Bmff::new(src.reader()) else { return T::default() };
+        let Some(cr3) = bmff.filebox.moov.cr3desc.as_ref() else { return T::default() };
+        let ifds = [cr3.cmt2.tiff.root_ifd(), cr3.cmt1.tiff.root_ifd()];
+        let orientation = short(ifds[1], ORIENTATION).unwrap_or(0);
+        let model = ascii(ifds[1], MODEL).unwrap_or_default();
+        let note = Some(cr3.cmt3.tiff.root_ifd());
+        return f(&Notes { make: "canon", model: &model, ifds: &ifds, note, orientation });
     }
     if head.starts_with(b"FUJIFILM") {
         // The camera's JPEG: offset and length at 84, big-endian. Its EXIF is
         // at its start, so a file cut short still has it.
         let at = |i: usize| buf.get(i..i + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
         let jpeg = at(84).zip(at(88)).and_then(|(off, len)| buf.get(off..off.saturating_add(len).min(buf.len())));
-        return jpeg
-            .and_then(|j| exif::Reader::new().read_from_container(&mut Cursor::new(j)).ok())
-            .map(|ex| exif_clues(&ex))
-            .unwrap_or_default();
+        return match jpeg.and_then(|j| exif::Reader::new().read_from_container(&mut Cursor::new(j)).ok()) {
+            Some(ex) => exif_notes(&ex, f),
+            None => T::default(),
+        };
     }
     if head.starts_with(b"II") || head.starts_with(b"MM") {
         let mut r = src.reader();
         if let Ok(tiff) = GenericTiffReader::new(&mut r, 0, 0, Some(0), &[]) {
-            return tiff_clues(&tiff, &mut r);
+            return tiff_notes(&tiff, &mut r, f);
         }
     }
-    Clues::default()
+    T::default()
 }
 
 /// The lens in a parsed EXIF block (a JPEG's, a HEIC's...).
 fn exif_lens(ex: &exif::Exif) -> Option<String> {
-    let c = exif_clues(ex);
+    let c = exif_notes(ex, |n| clues(n.make, n.ifds, n.note));
     c.name.or(c.spec)
 }
 
-fn exif_clues(ex: &exif::Exif) -> Clues {
+/// `f` of a parsed EXIF block's directories (a JPEG's, a HEIC's...).
+fn exif_notes<T: Default>(ex: &exif::Exif, f: impl FnOnce(&Notes) -> T) -> T {
     let buf = ex.buf();
     match GenericTiffReader::new_with_buffer(buf, 0, 0, Some(0)) {
-        Ok(tiff) => tiff_clues(&tiff, &mut Cursor::new(buf)),
-        Err(_) => Clues::default(),
+        Ok(tiff) => tiff_notes(&tiff, &mut Cursor::new(buf), f),
+        Err(_) => T::default(),
     }
 }
 
-fn tiff_clues<R: Read + Seek>(tiff: &GenericTiffReader, r: &mut R) -> Clues {
+fn tiff_notes<R: Read + Seek, T>(tiff: &GenericTiffReader, r: &mut R, f: impl FnOnce(&Notes) -> T) -> T {
     let root = tiff.root_ifd();
     let exif = root.get_sub_ifd(EXIF_IFD);
     let make = ascii(root, MAKE).unwrap_or_default().to_ascii_lowercase();
+    let model = ascii(root, MODEL).unwrap_or_default();
     let note = exif.and_then(|e| maker_note(e, r)).or_else(|| dng_maker_note(root, r));
     let ifds: Vec<&IFD> = exif.into_iter().chain(std::iter::once(root)).collect();
-    clues(&make, &ifds, note.as_ref())
+    let orientation = short(root, ORIENTATION).unwrap_or(0);
+    f(&Notes { make: &make, model: &model, ifds: &ifds, note: note.as_ref(), orientation })
+}
+
+/// Where the camera focused, as the picture stands upright. `picture`: its
+/// size as the file stores it, when the file may have been edited (a JPEG):
+/// points of a picture cropped since are left out.
+fn note_focus(n: &Notes, picture: Option<(u32, u32)>) -> Option<Focus> {
+    let src = crate::focus::Source { make: n.make, model: n.model, ifds: n.ifds, note: n.note };
+    crate::focus::read(&src, picture).map(|f| f.upright(n.orientation))
+}
+
+/// Where a CRW's camera focused: Canon's AFInfo, in its heap, not yet
+/// turned upright.
+fn ciff_focus(buf: &[u8]) -> Option<Focus> {
+    let start = le32(buf, 2)?;
+    let data = ciff_find(buf, start as usize, buf.len(), CIFF_AF_INFO, 0)?;
+    let v: Vec<u16> = data.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+    crate::focus::from_crw(&v)
+}
+
+fn short(ifd: &IFD, tag: u16) -> Option<u16> {
+    match &ifd.get_entry(tag)?.value {
+        TiffValue::Short(v) => v.first().copied(),
+        _ => None,
+    }
 }
 
 /// The lens from a file's EXIF / TIFF directories and its maker's note: by
@@ -269,8 +359,38 @@ fn note_ifd<R: Read + Seek>(r: &mut R, at: u32, data: &[u8], endian: Endian, cor
         b"MM" => Some(Endian::Big),
         _ => None,
     };
+    // Older Nikon compacts: a name, then the directory; offsets from the file's TIFF header.
+    if data.starts_with(b"Nikon\0\x01") {
+        return IFD::new(r, at + 8, 0, corr, endian, &[]).ok();
+    }
     if data.starts_with(b"Nikon\0") {
         return IFD::new(r, 8, at + 10, 0, order(data.get(10..12)?)?, &[]).ok();
+    }
+    // Sony (and Hasselblad's Sony-made bodies), Panasonic and Leica's
+    // Panasonic-made ones: a name, then the directory; offsets from the
+    // file's TIFF header.
+    let named = [&b"SONY DSC "[..], b"SONY CAM ", b"SONY MOBILE", b"VHAB     ", b"Panasonic\0"];
+    if named.iter().any(|h| data.starts_with(h)) {
+        return IFD::new(r, at + 12, 0, corr, endian, &[]).ok();
+    }
+    if data.starts_with(b"LEICA\0\0\0") {
+        return IFD::new(r, at + 8, 0, corr, endian, &[]).ok();
+    }
+    // Fujifilm: its name, then where its directory starts; offsets from the
+    // note's own start, always little-endian.
+    if data.starts_with(b"FUJIFILM") {
+        let start = u32::from_le_bytes(data.get(8..12)?.try_into().ok()?);
+        return IFD::new(r, at + start, 0, at as i32, Endian::Little, &[]).ok();
+    }
+    // Olympus (since about 2004) and OM System: a name and a byte order, then
+    // the directory, its camera settings a directory of their own; offsets
+    // from the note's own start.
+    let sub = [crate::focus::OLYMPUS_CAMERA_SETTINGS];
+    if data.starts_with(b"OLYMPUS\0") {
+        return IFD::new(r, at + 12, 0, at as i32, order(data.get(8..10)?)?, &sub).ok();
+    }
+    if data.starts_with(b"OM SYSTEM\0") {
+        return IFD::new(r, at + 16, 0, at as i32, order(data.get(12..14)?)?, &sub).ok();
     }
     if data.starts_with(b"AOC\0") {
         return IFD::new(r, at + 6, 0, corr, order(data.get(4..6)?).unwrap_or(endian), &[]).ok();
@@ -573,7 +693,13 @@ fn rawler_meta(path: &Path) -> Result<Meta> {
         meta.focal = ex.focal_length.as_ref().and_then(|r| ratio(r.n, r.d));
         meta.orientation = ex.orientation.unwrap_or(0);
     }
-    meta.lens = raw_lens(&src, table_lens);
+    let (clues, focus) = if src.buf().get(6..14) == Some(b"HEAPCCDR") {
+        (ciff_clues(src.buf()), ciff_focus(src.buf()).map(|f| f.upright(meta.orientation)))
+    } else {
+        with_notes(&src, |n| (clues(n.make, n.ifds, n.note), note_focus(n, None)))
+    };
+    meta.lens = raw_lens(clues, table_lens);
+    meta.focus = focus;
     Ok(meta)
 }
 
@@ -641,6 +767,7 @@ pub(crate) fn meta_of(ex: &exif::Exif) -> Meta {
         }
     };
     let uint = |t: Tag| field(t).and_then(|f| f.value.get_uint(0));
+    let picture = uint(Tag::PixelXDimension).zip(uint(Tag::PixelYDimension));
 
     Meta {
         taken: ascii(Tag::DateTimeOriginal)
@@ -661,6 +788,7 @@ pub(crate) fn meta_of(ex: &exif::Exif) -> Meta {
         orientation: uint(Tag::Orientation).unwrap_or(0) as u16,
         width: uint(Tag::PixelXDimension),
         height: uint(Tag::PixelYDimension),
+        focus: exif_notes(ex, |n| note_focus(n, picture)),
     }
 }
 
@@ -974,8 +1102,40 @@ mod tests {
 
     fn lens_in(buf: &[u8]) -> Option<String> {
         let t = GenericTiffReader::new_with_buffer(buf, 0, 0, Some(0)).unwrap();
-        let c = tiff_clues(&t, &mut Cursor::new(buf));
+        let c = tiff_notes(&t, &mut Cursor::new(buf), |n| clues(n.make, n.ifds, n.note));
         c.name.or(c.spec)
+    }
+
+    #[test]
+    fn focus_points_turn_upright_with_the_picture() {
+        // A Canon note with AFInfo2: two points, the one right of the middle in
+        // focus, on a photo taken upright (orientation 6: turned a quarter clockwise).
+        let mut af: Vec<u16> = vec![0, 2, 2, 2, 6000, 4000, 6000, 4000, 100, 100, 100, 100, 0, 1500, 0, 0, 0b10, 0b10];
+        af[0] = (af.len() * 2) as u16;
+        let af_bytes: Vec<u8> = af.iter().flat_map(|v| v.to_le_bytes()).collect();
+        // The note sits after the directories and the maker's name; its values'
+        // offsets count from the file's start, as Canon writes them.
+        let at = 8 + (2 + 3 * 12 + 4) + (2 + 12 + 4) + 6;
+        let mut note = 1u16.to_le_bytes().to_vec();
+        note.extend(0x26u16.to_le_bytes());
+        note.extend(3u16.to_le_bytes());
+        note.extend((af.len() as u32).to_le_bytes());
+        note.extend(((at + 18) as u32).to_le_bytes());
+        note.extend(0u32.to_le_bytes());
+        note.extend(af_bytes);
+        let file = tiff(
+            &[text(MAKE, "Canon"), (ORIENTATION, 3, 1, 6u16.to_le_bytes().to_vec())],
+            &[(MAKER_NOTE, 7, note.len() as u32, note)],
+        );
+        let t = GenericTiffReader::new_with_buffer(&file, 0, 0, Some(0)).unwrap();
+        let focus = tiff_notes(&t, &mut Cursor::new(&file[..]), |n| note_focus(n, None)).unwrap();
+        assert_eq!(focus.points.len(), 2);
+        // Right of the middle (x +1500 of 6000) becomes below it once upright.
+        let p = focus.points.iter().find(|p| p.state == crate::focus::State::InFocus).unwrap();
+        let (cx, cy) = (p.x + p.w / 2.0, p.y + p.h / 2.0);
+        assert!((cx - 0.5).abs() < 1e-3 && (cy - 0.75).abs() < 1e-3, "{cx} {cy}");
+        // A JPEG cropped to another shape since: its points would land wrong, so none.
+        assert!(tiff_notes(&t, &mut Cursor::new(&file[..]), |n| note_focus(n, Some((4000, 4000)))).is_none());
     }
 
     #[test]

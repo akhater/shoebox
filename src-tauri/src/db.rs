@@ -340,8 +340,30 @@ fn migrate(conn: &Connection) -> Result<()> {
         };
         conn.execute_batch(&format!("BEGIN; {columns} {SCHEMA_V17} PRAGMA user_version = 17; COMMIT;"))?;
     }
+    if version < 18 {
+        // Safe to run again on a catalog that already has them (its version set back by hand).
+        let has_focus = conn.prepare("SELECT 1 FROM pragma_table_info('photos') WHERE name = 'focus'")?.exists([])?;
+        let columns = if has_focus {
+            ""
+        } else {
+            "ALTER TABLE photos ADD COLUMN focus BLOB;
+             ALTER TABLE photos ADD COLUMN focus_read INTEGER NOT NULL DEFAULT 0;"
+        };
+        conn.execute_batch(&format!("BEGIN; {columns} {SCHEMA_V18} PRAGMA user_version = 18; COMMIT;"))?;
+    }
     Ok(())
 }
+
+/// Where the camera focused (see focus.rs). `photos.focus`: the points a
+/// photo used, and which layout of points its camera has: each layout once
+/// here, by its points. `photos.focus_read`: which focus reader last read the
+/// photo, so photos read before it learned more are read again (metadata only).
+const SCHEMA_V18: &str = r#"
+CREATE TABLE IF NOT EXISTS focus_grids (
+    id          INTEGER PRIMARY KEY,
+    points      BLOB    NOT NULL UNIQUE
+);
+"#;
 
 /// Turning photos (see `Catalog::turn`). `turn`: quarter turns clockwise the
 /// user asked for, on top of what the file says - the user's work, kept with
