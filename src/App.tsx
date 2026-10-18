@@ -1089,6 +1089,14 @@ export default function App() {
   // ...and "Only new" there: just those photos.
   const newOnlyHere = scope.kind === "person" && !!scope.newOnly;
   const viewerIndex = useMemo(() => (viewerId == null ? -1 : shown.ids.indexOf(viewerId)), [viewerId, shown]);
+  // Sideways is a review: a photo turned or left there leaves the list, and the
+  // viewer goes on to the one that took its place (closing after the last).
+  const viewerAt = useRef(-1);
+  useEffect(() => {
+    if (viewerIndex >= 0) viewerAt.current = viewerIndex;
+    else if (viewerId != null && sidewaysView && current)
+      setViewerId(shown.ids.length ? shown.ids[Math.min(viewerAt.current, shown.ids.length - 1)] : null);
+  }, [viewerIndex, viewerId, sidewaysView, current, shown]);
   // Selected photos that are missing everywhere: "Remove from catalog" takes them.
   const missingSelected = useMemo(
     () => (current && selected.size > 0 ? shown.ids.filter((id, i) => shown.state[i] === 0 && selected.has(id)) : []),
@@ -1782,6 +1790,8 @@ export default function App() {
           onForget={() => forgetMissing([shown.ids[viewerIndex]])}
           onTagsChanged={refreshSoon}
           onTurn={(by) => turnPhotos([shown.ids[viewerIndex]], by)}
+          suggested={turnedShown}
+          onLeave={() => leaveUpright([shown.ids[viewerIndex]])}
           onPerson={(id) => drill({ kind: "person", id })}
           onFolder={goToFolder}
           everyone={peopleList}

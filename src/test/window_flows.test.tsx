@@ -127,15 +127,25 @@ describe("turning photos", () => {
     expect(viewer(host)).not.toBeNull(); // a click on the control doesn't close the viewer
   });
 
-  test("pointing at Turn shows the selected photos turned that way before the click; Undo turns them back", async () => {
+  test("resting on Turn shows the selected photos turned that way before the click; Undo turns them back", async () => {
     const be = fakeBackend();
     const host = await renderApp();
     await click(tile(host, 201));
     const right = host.querySelector('.toolbar .turn-control [aria-label="Turn right"]')!;
-    await act(async () => {
-      right.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }));
-    });
     const img = (id: number) => tile(host, id).querySelector("img")!;
+    // Landing on it (or a window opening under the pointer) shows nothing...
+    await act(async () => {
+      right.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body, clientX: 5, clientY: 5 }));
+    });
+    await wait(400);
+    expect(img(201).style.transform).toBe("");
+    // ...moving onto it and resting there does.
+    await act(async () => {
+      right.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 7, clientY: 6 }));
+    });
+    await wait(100);
+    expect(img(201).style.transform).toBe("");
+    await wait(300);
     expect(img(201).style.transform).toContain("rotate(90deg)");
     expect(img(202).style.transform).toBe(""); // not selected
     await act(async () => {
@@ -150,6 +160,45 @@ describe("turning photos", () => {
     await wait(100);
     expect(turnsAsked(be).at(-1)).toEqual({ ids: [201], by: -1 });
     expect(be.turns.get(201)).toBe(0);
+  });
+
+  test("Sideways in the viewer: each photo as Shoebox would turn it, Turn it or Leave it, then the next", async () => {
+    const be = fakeBackend();
+    be.sideways.set(102, 1);
+    be.sideways.set(203, 3);
+    const host = await renderApp();
+    await click(sidebarItem(host, "Sideways"));
+    await wait(100);
+    await doubleClick(tile(host, 102));
+    await wait(50);
+    const label = () => host.querySelector(".viewer-preview")?.textContent ?? "";
+    const answer = (text: string) => byText(host, ".turn-decision button", text);
+    const film = () => [...host.querySelectorAll<HTMLImageElement>(".filmstrip .film img")].map((i) => i.style.transform);
+    expect(label()).toBe("Shown as Shoebox would turn it: a quarter turn right. Not turned yet.");
+    expect(film()).toEqual(["translate(-50%, -50%) rotate(90deg)", "translate(-50%, -50%) rotate(270deg)"]);
+    await click(answer("Turn it right"));
+    await wait(100);
+    expect(turnsAsked(be, "sideways_accept")).toEqual([{ ids: [102] }]);
+    // On to the next one.
+    expect(host.querySelector(".viewer-info h2")!.textContent).toBe("IMG_203.jpg");
+    expect(label()).toBe("Shown as Shoebox would turn it: a quarter turn left. Not turned yet.");
+    await click(answer("Leave it as it is"));
+    await wait(100);
+    expect(turnsAsked(be, "sideways_leave")).toEqual([{ ids: [203] }]);
+    expect(viewer(host)).toBeNull(); // that was the last one
+  });
+
+  test("everywhere else the viewer shows the photo as it is", async () => {
+    const be = fakeBackend();
+    be.sideways.set(102, 1);
+    const host = await renderApp();
+    await doubleClick(tile(host, 102));
+    await wait(50);
+    expect(host.querySelector(".viewer-preview")).toBeNull();
+    expect(host.querySelector(".turn-decision")).toBeNull();
+    expect(host.querySelector<HTMLElement>(".viewer-turn")!.style.transform).toBe("");
+    // Its suggestion is offered in words, with the direction.
+    expect(byText(host, ".viewer-info .turn-note .link", "Turn it right")).toBeTruthy();
   });
 
   test("Sideways shows each photo turned the way Shoebox suggests: leave the wrong ones, turn the rest", async () => {

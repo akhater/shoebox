@@ -3,6 +3,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type Keybo
 import { BIN, fmtDeleted, fmtNum, problemsOf, thumbUrl, type MissingPhoto, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
 import { TimelineRail } from "./TimelineRail";
+import { turnedStyle } from "./TurnControl";
 
 const GAP = 4;
 const PAD = 20;
@@ -52,16 +53,6 @@ interface Props {
 type PhotosRow = Extract<Row, { kind: "photos" }>;
 const centre = (t: Tile) => t.left + t.width / 2;
 
-/** A thumbnail drawn turned clockwise by `turn` quarter turns in a tile `w` x `h`: a quarter
- *  turn lays it out the other way round first, so once turned it fills the tile. */
-function turnedStyle(turn: number, w: number, h: number) {
-  const odd = turn % 2 === 1;
-  return {
-    width: odd ? h : w,
-    height: odd ? w : h,
-    transform: `translate(-50%, -50%) rotate(${turn * 90}deg)`,
-  };
-}
 
 /** Drawn again only when what it shows changes (not for every update of the window). */
 export const PhotoGrid = memo(function PhotoGrid(p: Props) {

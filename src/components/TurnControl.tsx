@@ -1,4 +1,41 @@
-import type { MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useRef, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent } from "react";
+
+/** How long the pointer rests on a turn before the photo is shown turned. */
+const DWELL_MS = 300;
+
+/**
+ * Handlers that show a turn before it is made (`onPreview(by)`, then 0). Only
+ * when the pointer moves onto it and rests there, or the keyboard reaches it:
+ * passing over it, or a photo opening under the pointer, shows nothing.
+ */
+export function usePreviewHandlers(onPreview?: (by: number) => void) {
+  const timer = useRef<number | undefined>(undefined);
+  const entered = useRef<{ x: number; y: number } | null>(null);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const stop = () => {
+    window.clearTimeout(timer.current);
+    timer.current = undefined;
+    entered.current = null;
+  };
+  return (by: number) => ({
+    onMouseEnter: (e: ReactMouseEvent) => {
+      entered.current = { x: e.clientX, y: e.clientY };
+    },
+    onMouseMove: (e: ReactMouseEvent) => {
+      const at = entered.current;
+      if (!onPreview || timer.current !== undefined || (at && at.x === e.clientX && at.y === e.clientY)) return;
+      timer.current = window.setTimeout(() => onPreview(by), DWELL_MS);
+    },
+    onMouseLeave: () => {
+      stop();
+      onPreview?.(0);
+    },
+    onFocus: (e: ReactFocusEvent) => {
+      if (e.currentTarget.matches(":focus-visible")) onPreview?.(by);
+    },
+    onBlur: () => onPreview?.(0),
+  });
+}
 
 /** A photo with an arrow going round its corner, turning it: the way photo
  *  apps draw a turn. Never a closed circle of arrows (reads "reload"), a bare
@@ -24,6 +61,17 @@ export function TurnIcon({ dir = "right", size = 17, className }: { dir?: "left"
       {parts.map((p) => (typeof p === "string" ? <path key={p} d={p} /> : p))}
     </svg>
   );
+}
+
+/** A thumbnail drawn turned clockwise by `turn` quarter turns in a tile `w` x `h`: a quarter
+ *  turn lays it out the other way round first, so once turned it fills the tile. */
+export function turnedStyle(turn: number, w: number, h: number) {
+  const odd = turn % 2 === 1;
+  return {
+    width: odd ? h : w,
+    height: odd ? w : h,
+    transform: `translate(-50%, -50%) rotate(${turn * 90}deg)`,
+  };
 }
 
 /** Sideways (sidebar, AI models): the turn, as a lucide-sized icon. */
@@ -53,12 +101,7 @@ export function TurnControl({
     e.stopPropagation(); // on the photo, a click elsewhere closes the viewer
     onTurn(by);
   };
-  const preview = (by: number) => ({
-    onMouseEnter: () => onPreview?.(by),
-    onMouseLeave: () => onPreview?.(0),
-    onFocus: () => onPreview?.(by),
-    onBlur: () => onPreview?.(0),
-  });
+  const preview = usePreviewHandlers(onPreview);
   return (
     <div className={`turn-control on-${on}`} role="group" aria-label="Turn" onClick={(e) => e.stopPropagation()}>
       <button onClick={turn(-1)} {...preview(-1)} aria-label="Turn left" title={`Turn ${what} left (Shift+R)`}>

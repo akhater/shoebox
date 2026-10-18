@@ -32,7 +32,7 @@ import {
   type PhotoList,
 } from "../api";
 import { TagEditor } from "./Tags";
-import { TurnControl } from "./TurnControl";
+import { TurnControl, turnedStyle, usePreviewHandlers } from "./TurnControl";
 import { WhoIsIt } from "./WhoIsIt";
 
 /** Where in the photo a zoom is centred, 0..1 of its width and height. */
@@ -63,6 +63,11 @@ interface Props {
   /** Turns the photo: quarter turns clockwise (-1 counter-clockwise), back to how its file
    *  shows it, or the way the upright model suggests. Shoebox's copies only, never the file. */
   onTurn: (by: number | "back" | "suggested") => Promise<boolean>;
+  /** In Sideways: each photo's suggested turn (quarter turns clockwise). The
+   *  viewer then shows it as it would end up, as the grid does, to turn or leave. */
+  suggested?: Map<number, number> | null;
+  /** Sideways: this photo is fine as it is. */
+  onLeave?: () => void;
 }
 
 /** The button that makes a turn: "Turn it left", "Turn it upside down"... */
@@ -93,6 +98,8 @@ export function Viewer({
   everyone,
   onFacesChanged,
   onTurn,
+  suggested,
+  onLeave,
 }: Props) {
   const tagBox = useRef<HTMLInputElement>(null);
   const id = list.ids[index];
@@ -134,29 +141,44 @@ export function Viewer({
   // Pointing at a turn shows the photo turned that way, before the click; after
   // it, the photo stays so until its turned picture is in (`waitingFor`: the
   // revision it had then). `instant`: no animation (the new picture replacing it).
-  const [turnView, setTurnView] = useState<{ transform: string; instant?: boolean } | null>(null);
+  const [turnView, setTurnView] = useState<{ q: number; transform: string; instant?: boolean } | null>(null);
   const waitingFor = useRef<number | null>(null);
 
-  useEffect(() => {
-    waitingFor.current = null;
-    setTurnView(null);
-  }, [id]);
+  // In Sideways the photo is shown as Shoebox would turn it, as in the grid.
+  const proposal = suggested?.get(id) ?? 0;
 
   /** The photo as it would stand after `q` quarter turns clockwise, fitted to the stage. */
   const turnedLook = (q: number) => {
     const el = stage.current;
-    if (!el || !previewSize || q % 4 === 0) return null;
+    // Its preview's shape; until that is in, its thumbnail's (the same).
+    const size = previewSize ?? (list.w[index] && list.h[index] ? { w: list.w[index], h: list.h[index] } : null);
+    if (!el || !size || q % 4 === 0) return null;
     let k = 1;
     if (Math.abs(q) % 2 === 1) {
       const [bw, bh] = [el.clientWidth - 48, el.clientHeight - 48];
-      const s0 = Math.min(bw / previewSize.w, bh / previewSize.h);
-      k = Math.min(bw / (previewSize.h * s0), bh / (previewSize.w * s0));
+      const s0 = Math.min(bw / size.w, bh / size.h);
+      k = Math.min(bw / (size.h * s0), bh / (size.w * s0));
     }
-    return { transform: `rotate(${q * 90}deg) scale(${k.toFixed(4)})` };
+    return { q, transform: `rotate(${q * 90}deg) scale(${k.toFixed(4)})` };
   };
+  /** How the photo is shown when no turn is pointed at: as it is, or (Sideways) as suggested. */
+  const restingLook = () => (proposal ? { ...turnedLook(proposal)!, instant: true } : null);
+
+  // Another photo: shown as it is, or as suggested - before it is drawn, never
+  // the other way first. The photo being turned stays as it is shown until its
+  // turned picture is in.
+  const shownFor = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (shownFor.current === id && waitingFor.current != null) return;
+    shownFor.current = id;
+    waitingFor.current = null;
+    setTurnView(restingLook());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, proposal]);
+
   /** Pointing at a turn (0: pointing away). */
   const previewTurn = (q: number) => {
-    if (waitingFor.current == null) setTurnView(q ? turnedLook(q) : null);
+    if (waitingFor.current == null) setTurnView(q ? turnedLook(q) : restingLook());
   };
   /** How many quarter turns a turn is. */
   const quarters = (by: number | "back" | "suggested") =>
@@ -168,16 +190,11 @@ export function Viewer({
     onTurn(by).then((ok) => {
       if (ok) return;
       waitingFor.current = null;
-      setTurnView(null);
+      setTurnView(restingLook());
     });
   };
   /** Hover and focus handlers that show a turn before it is made. */
-  const showing = (q: number) => ({
-    onMouseEnter: () => previewTurn(q),
-    onMouseLeave: () => previewTurn(0),
-    onFocus: () => previewTurn(q),
-    onBlur: () => previewTurn(0),
-  });
+  const showing = usePreviewHandlers(previewTurn);
 
   // Another photo, or this one turned (a new revision): its pictures again.
   useEffect(() => {
@@ -241,6 +258,8 @@ export function Viewer({
   /** Click on the fitted photo: zoom in where it was clicked. */
   const onPhotoClick = (e: ReactMouseEvent<HTMLImageElement>) => {
     e.stopPropagation();
+    // Shown as it would be turned (Sideways): 100% is of the photo as it is.
+    if (proposal) return;
     const img = e.currentTarget;
     const r = img.getBoundingClientRect();
     const s = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
@@ -346,7 +365,7 @@ export function Viewer({
                 // The turned picture is in: it replaces the one shown turned.
                 if (waitingFor.current != null && waitingFor.current !== rev) {
                   waitingFor.current = null;
-                  setTurnView({ transform: "none", instant: true });
+                  setTurnView({ q: 0, transform: "none", instant: true });
                 }
               }}
               onClick={onPhotoClick}
@@ -377,12 +396,30 @@ export function Viewer({
           </button>
         )}
         {list.preview[index] === 1 && !zoom && (
-          <TurnControl on="photo" what="this photo" onTurn={turnNow} onPreview={previewTurn} />
+          proposal ? (
+            <div className="turn-decision" onClick={(e) => e.stopPropagation()}>
+              <button className="btn small primary" onClick={() => turnNow("suggested")}>
+                {turnItWords(proposal)}
+              </button>
+              <button className="btn small" onClick={onLeave} title="It stands right as it is: never suggested again">
+                Leave it as it is
+              </button>
+            </div>
+          ) : (
+            <TurnControl on="photo" what="this photo" onTurn={turnNow} onPreview={previewTurn} />
+          )
+        )}
+        {turnView && turnView.q !== 0 && waitingFor.current == null && (
+          <span className="viewer-preview">
+            {proposal && turnView.q === proposal
+              ? `Shown as Shoebox would turn it: ${turnWords(proposal)}. Not turned yet.`
+              : `Preview: ${turnWords(turnView.q)}. Click to turn it; nothing is turned yet.`}
+          </span>
         )}
         {zoom && <span className="viewer-badge">{full ? "100%" : "Loading full size…"}</span>}
         {hint && <span className="viewer-hint">{hint}</span>}
       </div>
-      <Filmstrip list={list} index={index} onIndex={onIndex} />
+      <Filmstrip list={list} index={index} onIndex={onIndex} turned={suggested} />
       </div>
 
       <aside className="viewer-info">
@@ -746,7 +783,18 @@ function FaceSpot({ face, ref }: { face: PhotoFace; ref?: RefObject<HTMLDivEleme
 
 /** Thumbnails under the photo; the current one stays in the middle. Only a
  *  window of them is drawn, so a list of 100k costs nothing. */
-function Filmstrip({ list, index, onIndex }: { list: PhotoList; index: number; onIndex: (i: number) => void }) {
+function Filmstrip({
+  list,
+  index,
+  onIndex,
+  turned,
+}: {
+  list: PhotoList;
+  index: number;
+  onIndex: (i: number) => void;
+  /** Drawn turned this way (Sideways: as suggested, as in the grid). */
+  turned?: Map<number, number> | null;
+}) {
   const strip = useRef<HTMLDivElement>(null);
   const n = list.ids.length;
   // The window moves in steps of 40, so it doesn't jump on every photo.
@@ -759,17 +807,27 @@ function Filmstrip({ list, index, onIndex }: { list: PhotoList; index: number; o
 
   const items = [];
   for (let i = from; i < to; i++) {
-    const aspect = list.w[i] && list.h[i] ? Math.min(2.5, Math.max(0.5, list.w[i] / list.h[i])) : 1.5;
+    const q = turned?.get(list.ids[i]) ?? 0;
+    const [w, h] = q % 2 ? [list.h[i], list.w[i]] : [list.w[i], list.h[i]];
+    const aspect = w && h ? Math.min(2.5, Math.max(0.5, w / h)) : 1.5;
+    const width = Math.round(60 * aspect);
     items.push(
       <button
         key={list.ids[i]}
         className={`film ${i === index ? "current" : ""} ${list.marked[i] === 1 ? "is-marked" : ""}`}
-        style={{ width: Math.round(60 * aspect) }}
+        style={{ width }}
         onClick={() => onIndex(i)}
         tabIndex={-1}
       >
         {list.preview[i] === 1 ? (
-          <img src={thumbUrl(list.ids[i], list.rev[i])} alt="" loading="lazy" draggable={false} />
+          <img
+            src={thumbUrl(list.ids[i], list.rev[i])}
+            alt=""
+            loading="lazy"
+            draggable={false}
+            className={q ? "turned" : undefined}
+            style={q ? turnedStyle(q, width - 4, 56) : undefined}
+          />
         ) : (
           <span className="tile-empty" />
         )}
