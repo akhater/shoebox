@@ -24,6 +24,9 @@
 //!                                The flags try other catalog memory for this run only
 //!   shoebox-cli version          this version and the latest published release (JSON; asks
 //!                                GitHub - a commit on a branch never counts)
+//!   shoebox-cli logs [lines]     the log folder, its files newest first (a log a day, everything
+//!                                there removed after 14 days) and the newest log's last lines
+//!                                (50 unless given) (JSON)
 //!   shoebox-cli photo <id>       one photo's details; each copy's volumeId and folder make the
 //!                                scope of its folder ("Go to folder") for list:
 //!                                {"kind":"folder","volumeId":3,"relPath":"<folder>"}
@@ -249,6 +252,19 @@ fn main() -> anyhow::Result<()> {
         Some("bench") => bench(&cat, &args[1..])?,
         Some("version") => {
             println!("{}", serde_json::to_string_pretty(&shoebox_lib::updates::check(None))?);
+        }
+        Some("logs") => {
+            let lines = match args.get(1) {
+                Some(n) => n.parse().map_err(|_| anyhow::anyhow!("logs [lines]"))?,
+                None => 50,
+            };
+            let logs = serde_json::json!({
+                "folder": cat.data.log_dir(),
+                "keptDays": shoebox_lib::paths::LOGS_KEPT_DAYS,
+                "files": cat.data.log_files(),
+                "lines": cat.data.log_tail(lines)?,
+            });
+            println!("{}", serde_json::to_string_pretty(&logs)?);
         }
         Some("backup") => {
             // Consistent copies of the databases in backup\ - Kopia's before-snapshot action.

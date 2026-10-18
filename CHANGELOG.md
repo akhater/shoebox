@@ -55,6 +55,12 @@ Newest first. Same format and versioning as Argentum.
   photo marked for deletion whose file was deleted elsewhere used to wait
   for its disk forever; the delete now takes it out of the catalog.
 
+- **A log a day, kept two weeks.** The log was one file that grew forever.
+  Shoebox now writes one per day, `logs\shoebox-<date>.log`, and at each
+  start removes anything in the `logs` folder that hasn't been written to
+  for 14 days. `shoebox-cli logs` lists the files and shows the newest
+  log's last lines.
+
 ## 26.42.4 - 2026-10-17
 
 ### Added

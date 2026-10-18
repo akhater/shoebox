@@ -447,11 +447,10 @@ pub fn tidy_old_catalog(data: &DataDir) {
     }
 }
 
+/// Logs to stderr and to the day's file in `logs/`, every Shoebox (the
+/// window, the CLI) appending to the same one; files older than
+/// [`paths::LOGS_KEPT_DAYS`] are removed.
 pub fn setup_logging(data: &DataDir) {
-    let file = match fern::log_file(data.log_path()) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
     let _ = fern::Dispatch::new()
         .format(|out, msg, rec| {
             out.finish(format_args!(
@@ -467,8 +466,14 @@ pub fn setup_logging(data: &DataDir) {
         .level_for("rawler", log::LevelFilter::Error)
         // stderr: shoebox-cli's stdout is its JSON, nothing else.
         .chain(std::io::stderr())
-        .chain(file)
+        // Opened for appending, a new one past midnight: nothing is renamed,
+        // which Windows refuses while another Shoebox has the file open.
+        .chain(fern::DateBased::new(data.log_dir().join("shoebox-"), "%Y-%m-%d.log"))
         .apply();
+    let n = data.remove_old_logs();
+    if n > 0 {
+        log::info!("{n} files in logs older than {} days removed", paths::LOGS_KEPT_DAYS);
+    }
 }
 
 fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQueue>, lenses: Arc<Kick>) {

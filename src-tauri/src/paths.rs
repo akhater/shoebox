@@ -107,8 +107,9 @@ impl DataDir {
         self.root.join("settings.json")
     }
 
-    pub fn log_path(&self) -> PathBuf {
-        self.root.join("logs").join("shoebox.log")
+    /// The log: a file a day, `shoebox-<date>.log`, kept [`LOGS_KEPT_DAYS`].
+    pub fn log_dir(&self) -> PathBuf {
+        self.root.join("logs")
     }
 
     pub fn thumb_path(&self, photo_id: i64) -> PathBuf {
@@ -402,19 +403,73 @@ impl DataDir {
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("shoebox.")));
-        let old = |p: &Path| {
-            p.metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|a| a >= STRAY_AFTER)
-        };
         in_catalog
             .chain(pointer)
             .filter(|p| p.file_name().is_some_and(|n| is_write_temp(&n.to_string_lossy())))
-            .filter(|p| old(p) && std::fs::remove_file(p).is_ok())
+            .filter(|p| unchanged_for(p, STRAY_AFTER) && std::fs::remove_file(p).is_ok())
             .count()
     }
+
+    /// Deletes everything in `logs/` not written to for [`LOGS_KEPT_DAYS`]:
+    /// the daily logs and anything else left there, then the folders that
+    /// leaves empty. Returns how many files.
+    pub fn remove_old_logs(&self) -> usize {
+        let kept = std::time::Duration::from_secs(LOGS_KEPT_DAYS * 24 * 3600);
+        let mut removed = 0;
+        for e in walkdir::WalkDir::new(self.log_dir()).min_depth(1).contents_first(true).into_iter().flatten() {
+            if e.file_type().is_dir() {
+                let _ = std::fs::remove_dir(e.path()); // only goes if empty
+            } else if unchanged_for(e.path(), kept) && std::fs::remove_file(e.path()).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    /// The files in `logs/`, newest first.
+    pub fn log_files(&self) -> Vec<LogFile> {
+        let mut files: Vec<(std::time::SystemTime, LogFile)> = std::fs::read_dir(self.log_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let m = e.metadata().ok().filter(|m| m.is_file())?;
+                let modified = m.modified().ok()?;
+                let name = e.file_name().to_string_lossy().into_owned();
+                let shown = chrono::DateTime::<chrono::Local>::from(modified).format("%Y-%m-%d %H:%M:%S");
+                Some((modified, LogFile { name, bytes: m.len(), modified: shown.to_string() }))
+            })
+            .collect();
+        files.sort_by_key(|f| std::cmp::Reverse(f.0));
+        files.into_iter().map(|(_, f)| f).collect()
+    }
+
+    /// The last `n` lines of the newest log.
+    pub fn log_tail(&self, n: usize) -> io::Result<Vec<String>> {
+        let newest = self.log_files().into_iter().find(|f| f.name.starts_with("shoebox") && f.name.ends_with(".log"));
+        let Some(newest) = newest else { return Ok(Vec::new()) };
+        let text = String::from_utf8_lossy(&std::fs::read(self.log_dir().join(newest.name))?).into_owned();
+        let lines: Vec<&str> = text.lines().collect();
+        Ok(lines[lines.len().saturating_sub(n)..].iter().map(|l| l.to_string()).collect())
+    }
+}
+
+/// How long the log files are kept ([`DataDir::remove_old_logs`]).
+pub const LOGS_KEPT_DAYS: u64 = 14;
+
+/// One file in `logs/` ([`DataDir::log_files`]).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFile {
+    pub name: String,
+    pub bytes: u64,
+    /// Last written, local time.
+    pub modified: String,
+}
+
+/// `path` was last written at least `age` ago.
+fn unchanged_for(path: &Path, age: std::time::Duration) -> bool {
+    path.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a >= age)
 }
 
 /// A catalog move under way, written down in the folder it leaves until it is
@@ -875,6 +930,48 @@ mod tests {
         assert!(kept.iter().all(|p| p.exists()));
         assert!(is_write_temp(".kopiaignore.12-0.tmp") && !is_write_temp("catalog.db.tmp"));
         assert!(!is_write_temp("x.12-.tmp") && !is_write_temp("x.a1-2.tmp") && !is_write_temp("12-3.tmp"));
+        let _ = std::fs::remove_dir_all(&data.root);
+    }
+
+    /// Whatever sits in `logs/` goes once nothing has written to it for
+    /// [`LOGS_KEPT_DAYS`], the old single `shoebox.log` and other files too;
+    /// newer ones and the rest of the catalog stay.
+    #[test]
+    fn old_logs_are_removed() {
+        let data = DataDir { root: std::env::temp_dir().join("shoebox-old-logs") };
+        let _ = std::fs::remove_dir_all(&data.root);
+        let now = std::time::SystemTime::now();
+        let day = std::time::Duration::from_secs(24 * 3600);
+        let file = |rel: &str, days_ago: u32, text: &str| {
+            let p = data.root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, text).unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(now - day * days_ago).unwrap();
+            p
+        };
+        let gone = [
+            file("logs/shoebox-2026-09-01.log", 30, "x"),
+            file("logs/shoebox.log", 15, "x"),
+            file("logs/face-moves-2026-09-01.json", 15, "x"),
+            file("logs/old/notes.txt", 20, "x"),
+        ];
+        let kept = [
+            file("logs/shoebox-2026-10-05.log", 13, "x"),
+            file("logs/shoebox-2026-10-18.log", 0, "one\ntwo\nthree\n"),
+            file("logs/notes.txt", 1, "x"),
+            file("settings.json", 30, "x"),
+        ];
+        assert_eq!(data.remove_old_logs(), 4);
+        assert!(gone.iter().all(|p| !p.exists()));
+        assert!(!data.log_dir().join("old").exists());
+        assert!(kept.iter().all(|p| p.exists()));
+
+        let names: Vec<String> = data.log_files().into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["shoebox-2026-10-18.log", "notes.txt", "shoebox-2026-10-05.log"]);
+        // The newest log, not the newest file.
+        std::fs::write(data.log_dir().join("notes.txt"), "y").unwrap();
+        assert_eq!(data.log_tail(2).unwrap(), ["two", "three"]);
+        assert_eq!(data.log_tail(9).unwrap().len(), 3);
         let _ = std::fs::remove_dir_all(&data.root);
     }
 
