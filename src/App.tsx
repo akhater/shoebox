@@ -14,9 +14,6 @@ import {
   FolderPlus,
   FolderX,
   RefreshCw,
-  RotateCcw,
-  RotateCw,
-  RotateCwSquare,
   Search,
   Sparkles,
   Tag as TagIcon,
@@ -81,6 +78,7 @@ import { PhotoGrid } from "./components/PhotoGrid";
 import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
 import { Sidebar, type FolderTarget } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
+import { TurnControl, TurnPhotoIcon } from "./components/TurnControl";
 import { turnWords, Viewer } from "./components/Viewer";
 import { WhoIsIt } from "./components/WhoIsIt";
 
@@ -1444,24 +1442,11 @@ export default function App() {
               </button>
             )}
             {view === "photos" && selected.size > 0 && !sidewaysView && (
-              <>
-                <button
-                  className="icon-btn"
-                  onClick={() => turnPhotos(shown.ids.filter((id) => selected.has(id)), -1)}
-                  title={`Turn ${selected.size === 1 ? "it" : `the ${fmtNum(selected.size)} selected`} left (Shift+R). Only Shoebox's copies change, never the files.`}
-                  aria-label="Turn left"
-                >
-                  <RotateCcw size={16} />
-                </button>
-                <button
-                  className="icon-btn"
-                  onClick={() => turnPhotos(shown.ids.filter((id) => selected.has(id)), 1)}
-                  title={`Turn ${selected.size === 1 ? "it" : `the ${fmtNum(selected.size)} selected`} right (R). Only Shoebox's copies change, never the files.`}
-                  aria-label="Turn right"
-                >
-                  <RotateCw size={16} />
-                </button>
-              </>
+              <TurnControl
+                on="toolbar"
+                what={selected.size === 1 ? "the selected photo" : `the ${fmtNum(selected.size)} selected photos`}
+                onTurn={(by) => turnPhotos(shown.ids.filter((id) => selected.has(id)), by)}
+              />
             )}
             {view === "photos" && selected.size > 0 && personHere && (
               <button
@@ -1622,7 +1607,7 @@ export default function App() {
         )}
         {sidewaysView && (
           <div className="banner">
-            <RotateCwSquare size={15} />
+            <TurnPhotoIcon size={15} />
             <span>
               These photos look sideways or upside down, and are shown turned the way Shoebox suggests. Turning changes
               only Shoebox's copies, never your files. Select the ones it got wrong and leave them as they are.
@@ -1650,7 +1635,7 @@ export default function App() {
             )}
             {shown.ids.length > 0 && (
               <button className="btn small primary" disabled={!current} onClick={() => turnPhotos(shown.ids, "suggested")}>
-                <RotateCw size={14} /> Turn {shown.ids.length === 1 ? "it" : `all ${fmtNum(shown.ids.length)}`}
+                Turn {shown.ids.length === 1 ? "it" : `all ${fmtNum(shown.ids.length)}`}
               </button>
             )}
           </div>

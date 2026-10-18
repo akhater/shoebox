@@ -1019,7 +1019,7 @@ button {
   right: 16px;
 }
 .viewer-hint {
-  bottom: 18px;
+  bottom: 72px;
   left: 50%;
   transform: translateX(-50%);
   max-width: 80%;
@@ -1103,6 +1103,69 @@ button {
 }
 .viewer-stage:hover .nav {
   opacity: 1;
+}
+/* Turning: "Turn" between a left and a right arrow. On the photo it floats
+   at the bottom like the arrows to the next photo, shown when the mouse is
+   over the photo; in the toolbar it sits with the other buttons. */
+.turn-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  user-select: none;
+}
+.turn-control button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.turn-control button:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.turn-label {
+  padding: 0 3px;
+  color: var(--text);
+  font-size: 13px;
+}
+.turn-control.on-toolbar {
+  height: 32px;
+  padding: 0 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.turn-control.on-toolbar button {
+  width: 28px;
+  height: 26px;
+  border-radius: 5px;
+}
+.turn-control.on-photo {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px;
+  border-radius: 22px;
+  background: rgba(30, 32, 36, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.viewer-stage:hover .turn-control.on-photo,
+.turn-control.on-photo:focus-within {
+  opacity: 1;
+}
+.turn-control.on-photo button {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  color: var(--text);
+}
+.turn-control.on-photo button:hover {
+  background: rgba(255, 255, 255, 0.12);
 }
 .nav.prev {
   left: 16px;

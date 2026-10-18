@@ -1,12 +1,13 @@
 import { listen } from "@tauri-apps/api/event";
-import { CircleStop, Cpu, Download, FolderOpen, Gpu, Package, RotateCwSquare, ScanFace, Search, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { CircleStop, Cpu, Download, FolderOpen, Gpu, Package, ScanFace, Search, Trash2 } from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
 import { fmtBytes, modelsApi, type ModelProgress, type ModelStatus, type ModelsOverview } from "../api";
+import { TurnPhotoIcon } from "./TurnControl";
 
-const ICONS: Record<string, typeof Search> = {
+const ICONS: Record<string, (p: { size?: number; className?: string }) => ReactNode> = {
   clip: Search,
   faces: ScanFace,
-  upright: RotateCwSquare,
+  upright: TurnPhotoIcon,
   "runtime-gpu": Gpu,
   "runtime-cpu": Cpu,
 };

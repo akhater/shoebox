@@ -13,7 +13,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
-  RotateCwSquare,
   Settings,
   Trash2,
   TriangleAlert,
@@ -42,6 +41,7 @@ import {
   type VolumeInfo,
 } from "../api";
 import boxLogo from "../assets/shoebox-box.png";
+import { TurnPhotoIcon } from "./TurnControl";
 
 interface Props {
   overview: Overview | null;
@@ -486,7 +486,7 @@ export function Sidebar(p: Props) {
                 className={cls({ kind: "sideways" })}
                 onClick={() => onScope({ kind: "sideways" })}
               >
-                <RotateCwSquare size={16} />
+                <TurnPhotoIcon size={16} />
               </RailItem>
             )}
           </div>
@@ -625,7 +625,7 @@ export function Sidebar(p: Props) {
               onClick={() => onScope({ kind: "sideways" })}
               title="Photos that look sideways or upside down: turn them, or leave them as they are"
             >
-              <RotateCwSquare size={16} />
+              <TurnPhotoIcon size={16} />
               <span className="grow">Sideways</span>
               <span className="count">{fmtNum(overview?.sideways ?? 0)}</span>
             </button>

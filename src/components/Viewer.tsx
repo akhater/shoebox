@@ -6,8 +6,6 @@ import {
   FolderInput,
   FolderOpen,
   ImageOff,
-  RotateCcw,
-  RotateCw,
   Trash2,
   Undo2,
   UserX,
@@ -34,6 +32,7 @@ import {
   type PhotoList,
 } from "../api";
 import { TagEditor } from "./Tags";
+import { TurnControl } from "./TurnControl";
 import { WhoIsIt } from "./WhoIsIt";
 
 /** Where in the photo a zoom is centred, 0..1 of its width and height. */
@@ -316,6 +315,7 @@ export function Viewer({
             <ChevronRight size={28} />
           </button>
         )}
+        {list.preview[index] === 1 && !zoom && <TurnControl on="photo" what="this photo" onTurn={onTurn} />}
         {zoom && <span className="viewer-badge">{full ? "100%" : "Loading full size…"}</span>}
         {hint && <span className="viewer-hint">{hint}</span>}
       </div>
@@ -328,12 +328,6 @@ export function Viewer({
             {index + 1} of {list.ids.length}
           </span>
           <span className="viewer-top-actions">
-            <button className="icon-btn" onClick={() => onTurn(-1)} aria-label="Turn left" title="Turn left (Shift+R)">
-              <RotateCcw size={16} />
-            </button>
-            <button className="icon-btn" onClick={() => onTurn(1)} aria-label="Turn right" title="Turn right (R)">
-              <RotateCw size={16} />
-            </button>
             <button
               className={`btn small ${marked ? "" : "ghost"}`}
               onClick={onToggleMark}

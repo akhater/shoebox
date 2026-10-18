@@ -109,6 +109,24 @@ describe("turning photos", () => {
     expect(be.turns.get(201)).toBe(0);
   });
 
+  test("Turn in the toolbar turns the selected photos; on the photo in the viewer, that photo", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(tile(host, 201));
+    await click(host.querySelector('.toolbar .turn-control [aria-label="Turn left"]')!);
+    await wait(100);
+    expect(turnsAsked(be)).toEqual([{ ids: [201], by: -1 }]);
+
+    await doubleClick(tile(host, 202));
+    await wait(50);
+    // On the photo, not among the photo's details.
+    expect(host.querySelector(".viewer-info .turn-control, .viewer-info [aria-label='Turn right']")).toBeNull();
+    await click(host.querySelector('.viewer-stage .turn-control [aria-label="Turn right"]')!);
+    await wait(100);
+    expect(turnsAsked(be).at(-1)).toEqual({ ids: [202], by: 1 });
+    expect(viewer(host)).not.toBeNull(); // a click on the control doesn't close the viewer
+  });
+
   test("Sideways shows each photo turned the way Shoebox suggests: leave the wrong ones, turn the rest", async () => {
     const be = fakeBackend();
     be.sideways.set(102, 1);
