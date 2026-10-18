@@ -1,11 +1,12 @@
 import { listen } from "@tauri-apps/api/event";
-import { CircleStop, Cpu, Download, FolderOpen, Gpu, Package, ScanFace, Search, Trash2 } from "lucide-react";
+import { CircleStop, Cpu, Download, FolderOpen, Gpu, Package, RotateCwSquare, ScanFace, Search, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { fmtBytes, modelsApi, type ModelProgress, type ModelStatus, type ModelsOverview } from "../api";
 
 const ICONS: Record<string, typeof Search> = {
   clip: Search,
   faces: ScanFace,
+  upright: RotateCwSquare,
   "runtime-gpu": Gpu,
   "runtime-cpu": Cpu,
 };
@@ -93,11 +94,13 @@ export function ModelsTab() {
       return "Word search stops until it's downloaded again. Photos already described keep their descriptions: nothing is redone.";
     if (m.id === "faces")
       return "New photos won't get faces until it's downloaded again. Your people and their names stay.";
+    if (m.id === "upright")
+      return "New photos aren't looked at for being sideways until it's downloaded again. Photos you turned stay turned.";
     if (ready(other(m.id)))
       return m.id === "runtime-gpu"
         ? "Shoebox then runs the models on the processor, which is slower."
         : "Nothing changes: the graphics-card runtime is used while it's here.";
-    return "Word search and faces stop until an AI runtime is downloaded again.";
+    return "Word search, faces and sideways photos stop until an AI runtime is downloaded again.";
   };
 
   const row = (m: ModelStatus) => {
@@ -195,7 +198,7 @@ export function ModelsTab() {
         Shoebox's AI runs on this computer, never in the cloud. The models don't come with the app: download the ones
         you want from their publishers. Each file is checked (SHA-256) before it's used.
       </small>
-      {!o.runtimeReady && <p className="note warn">Word search and faces need an AI runtime: download one below.</p>}
+      {!o.runtimeReady && <p className="note warn">Word search, faces and sideways photos need an AI runtime: download one below.</p>}
 
       <div className="model-group">
         <span className="field-label">Features</span>

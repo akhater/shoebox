@@ -81,9 +81,9 @@ export async function doubleClick(el: Element) {
   });
 }
 
-export async function key(el: Element, k: string) {
+export async function key(el: Element, k: string, init: KeyboardEventInit = {}) {
   await act(async () => {
-    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...init }));
   });
 }
 

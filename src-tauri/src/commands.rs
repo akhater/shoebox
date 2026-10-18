@@ -17,6 +17,8 @@ use crate::organize::{self, DeletePlan, DeleteReport};
 use crate::scan::Progress;
 use crate::settings::Settings;
 use crate::tags;
+use crate::turn::{self, TurnReport};
+use crate::upright;
 use anyhow::bail;
 use serde::Serialize;
 use std::panic::AssertUnwindSafe;
@@ -208,6 +210,42 @@ pub async fn forget_missing(app: AppHandle, state: State<'_, AppState>, ids: Vec
     let report = in_order(move || cat.forget_missing(&ids)).await?;
     let _ = app.emit("catalog-changed", ());
     Ok(report)
+}
+
+/// Turns photos clockwise by quarter turns (negative: counter-clockwise).
+/// Only the catalog and Shoebox's copies change, never a file. Faces and word
+/// search look at them again in the background.
+#[tauri::command]
+pub async fn turn_photos(state: State<'_, AppState>, ids: Vec<i64>, by: i64) -> Res<TurnReport> {
+    let (cat, ai) = (state.cat.clone(), state.ai.clone());
+    let report = in_order(move || turn::turn(&cat, &ids.iter().map(|id| (*id, by)).collect::<Vec<_>>())).await?;
+    ai.kick();
+    Ok(report)
+}
+
+/// Turns photos back to how their files show them.
+#[tauri::command]
+pub async fn turn_back(state: State<'_, AppState>, ids: Vec<i64>) -> Res<TurnReport> {
+    let (cat, ai) = (state.cat.clone(), state.ai.clone());
+    let report = in_order(move || turn::back(&cat, &ids)).await?;
+    ai.kick();
+    Ok(report)
+}
+
+/// Turns photos the way the upright model suggests.
+#[tauri::command]
+pub async fn sideways_accept(state: State<'_, AppState>, ids: Vec<i64>) -> Res<TurnReport> {
+    let (cat, ai) = (state.cat.clone(), state.ai.clone());
+    let report = in_order(move || upright::accept(&cat, &ids)).await?;
+    ai.kick();
+    Ok(report)
+}
+
+/// Photos fine as they are: the upright model never suggests turning them again.
+#[tauri::command]
+pub async fn sideways_leave(state: State<'_, AppState>, ids: Vec<i64>) -> Res<usize> {
+    let cat = state.cat.clone();
+    in_order(move || upright::leave(&cat, &ids)).await
 }
 
 #[tauri::command]
@@ -848,15 +886,18 @@ pub async fn model_delete(state: State<'_, AppState>, id: String) -> Res<u64> {
     if state.models.busy_with(&id) {
         return Err("It's downloading. Stop the download first.".into());
     }
-    let (search, faces, ai) = (state.search.clone(), state.faces.clone(), state.ai.clone());
+    let (search, faces, upright, ai) =
+        (state.search.clone(), state.faces.clone(), state.upright.clone(), state.ai.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        let in_use = id == models::CLIP || id == models::FACES;
+        let in_use = id == models::CLIP || id == models::FACES || id == models::UPRIGHT;
         if in_use {
             ai.cancel.store(true, Ordering::Relaxed); // it lets go after the photo it's on
             if id == models::CLIP {
                 search.unload();
-            } else {
+            } else if id == models::FACES {
                 faces.unload();
+            } else {
+                upright.unload();
             }
         }
         let freed = models::delete(&id);

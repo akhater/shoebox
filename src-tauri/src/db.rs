@@ -125,6 +125,15 @@ pub const PREVIEW_PENDING: i64 = 0;
 pub const PREVIEW_OK: i64 = 1;
 pub const PREVIEW_FAILED: i64 = 2;
 
+/// `photos.sideways`: the user decided how the photo stands (turned it, or
+/// said it's fine as it is). The upright model never suggests turning it again.
+pub const SIDEWAYS_DECIDED: i64 = -1;
+
+/// What a photo's preview shows, on photo alias `p`: its content as the user
+/// turned it. What is worked out from the preview (word search's descriptions,
+/// Cull's measures) is kept with it, and worked out again once it changes.
+pub const SHOWN_SQL: &str = "p.fingerprint || CASE WHEN p.turn > 0 THEN '@' || p.turn ELSE '' END";
+
 pub fn open(path: &Path, memory: Memory) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(30))?;
@@ -318,8 +327,36 @@ fn migrate(conn: &Connection) -> Result<()> {
         // Catalogs that got it keep it, unused; the version stays in step.
         conn.execute_batch("PRAGMA user_version = 16;")?;
     }
+    if version < 17 {
+        // Safe to run again on a catalog that already has them (its version set back by hand).
+        let has_turn = conn.prepare("SELECT 1 FROM pragma_table_info('photos') WHERE name = 'turn'")?.exists([])?;
+        let columns = if has_turn {
+            ""
+        } else {
+            "ALTER TABLE photos ADD COLUMN turn INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE photos ADD COLUMN turning INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE photos ADD COLUMN sideways INTEGER;
+             ALTER TABLE photos ADD COLUMN sideways_p REAL;"
+        };
+        conn.execute_batch(&format!("BEGIN; {columns} {SCHEMA_V17} PRAGMA user_version = 17; COMMIT;"))?;
+    }
     Ok(())
 }
+
+/// Turning photos (see `Catalog::turn`). `turn`: quarter turns clockwise the
+/// user asked for, on top of what the file says - the user's work, kept with
+/// the catalog; the photo file is never touched. `turning`: the previews may
+/// not show `turn` yet (a turn cut short; finished at the next start).
+/// `sideways`: what the upright model found (see upright.rs): NULL not looked
+/// at yet, 0 upright, 1-3 the quarter turns clockwise it suggests, -1 the
+/// user has decided (turned it, or said it's fine): never suggested again.
+/// `sideways_p`: how sure the model was. The indexes keep each look-up as
+/// small as what it finds: the photos being turned, suggested, or not looked at.
+const SCHEMA_V17: &str = r#"
+CREATE INDEX IF NOT EXISTS photos_turning ON photos (id) WHERE turning = 1;
+CREATE INDEX IF NOT EXISTS photos_sideways ON photos (sideways) WHERE sideways > 0;
+CREATE INDEX IF NOT EXISTS photos_unchecked ON photos (id) WHERE sideways IS NULL;
+"#;
 
 /// People check findings the user looked at and kept ("Leave as is", see
 /// faces.rs): left out of the check from then on. Keyed by what each is

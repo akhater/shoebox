@@ -17,7 +17,9 @@ pub mod search;
 pub mod settings;
 pub mod tags;
 pub mod trash_bin;
+pub mod turn;
 pub mod updates;
+pub mod upright;
 pub mod volumes;
 #[cfg(windows)]
 pub mod wic;
@@ -123,6 +125,7 @@ pub struct AppState {
     pub search: Arc<search::SearchIndex>,
     pub faces: Arc<faces::FaceIndex>,
     pub quality: Arc<cull::QualityIndex>,
+    pub upright: Arc<upright::Upright>,
     pub closer: Arc<CloserQueue>,
     pub ai: Arc<AiQueue>,
     /// A folder being moved to another disk (one at a time), and its Stop.
@@ -376,7 +379,8 @@ fn model_worker(app: AppHandle, q: Arc<ModelQueue>, ai: Arc<AiQueue>) {
     }
 }
 
-/// Describes new photos for word search, then finds and groups their faces,
+/// Looks for sideways photos first (the turns it suggests wait for the user),
+/// describes new photos for word search, then finds and groups their faces,
 /// on the GPU, from Shoebox's previews; then measures them for Cull (no
 /// model needed). A feature whose model isn't here (Settings > AI models) is
 /// skipped.
@@ -386,6 +390,7 @@ fn ai_worker(
     index: Arc<search::SearchIndex>,
     faces: Arc<faces::FaceIndex>,
     quality: Arc<cull::QualityIndex>,
+    upright: Arc<upright::Upright>,
     q: Arc<AiQueue>,
 ) {
     loop {
@@ -396,16 +401,17 @@ fn ai_worker(
             let _ = app.emit("ai-progress", p);
         };
         let usable = |id| models::ready(id) && models::runtime_ready();
+        let checked = if usable(models::UPRIGHT) { upright.check_pending(&cat, &q.cancel, &report) } else { Ok(()) };
         let searched = if usable(models::CLIP) { index.index_pending(&cat, &q.cancel, &report) } else { Ok(()) };
         let found = if usable(models::FACES) { faces.index_pending(&cat, &q.cancel, &report) } else { Ok(()) };
         // After faces: a face's sharpness is measured where it was found.
         let measured = quality.index_pending(&cat, &q.cancel, &report);
-        let result = searched.and(found).and(measured);
+        let result = checked.and(searched).and(found).and(measured);
         let last = q.current.lock().unwrap().take();
         let mut done = last.unwrap_or_else(|| search::AiProgress { task: "search".into(), ..Default::default() });
         done.finished = true;
         if let Err(e) = result {
-            log::warn!("search indexing failed: {e:#}");
+            log::warn!("{} failed: {e:#}", done.task);
             done.error = Some(format!("{e:#}"));
         }
         let _ = app.emit("ai-progress", done);
@@ -620,7 +626,7 @@ fn serve_full(cat: &Catalog, path: &str, query: &str) -> tauri::http::Response<V
     let bytes = id
         .ok_or_else(|| anyhow::anyhow!("bad photo id"))
         .and_then(|id| cat.original(id))
-        .and_then(|(file, kind)| imaging::sharp(&file, kind, long));
+        .and_then(|(file, kind, turn)| imaging::sharp(&file, kind, long, turn));
     match bytes {
         Ok(bytes) => {
             log::info!("viewer: photo {} at {long} px in {} ms", id.unwrap_or(0), started.elapsed().as_millis());
@@ -673,6 +679,10 @@ pub fn run() {
     if let Err(e) = scan::heal_saved_previews(&cat) {
         log::warn!("checking previews of unreadable photos: {e:#}");
     }
+    // Turns a stop cut short: previews brought to the turn the catalog says.
+    if let Err(e) = turn::settle(&cat) {
+        log::warn!("finishing turns cut short: {e:#}");
+    }
     let opened = data.clone();
     std::thread::spawn(move || {
         tidy_old_catalog(&opened);
@@ -694,6 +704,7 @@ pub fn run() {
     let index = search::SearchIndex::open_in_background(&cat).expect("open search index");
     let face_index = faces::FaceIndex::open_in_background(cat.clone()).expect("open face index");
     let quality = cull::QualityIndex::open_in_background(&cat).expect("open Cull's measures");
+    let upright = Arc::new(upright::Upright::default());
     let closer = Arc::new(CloserQueue::default());
     let ai = Arc::new(AiQueue::default());
     let model_queue = Arc::new(ModelQueue::default());
@@ -738,6 +749,7 @@ pub fn run() {
             search: index.clone(),
             faces: face_index.clone(),
             quality: quality.clone(),
+            upright: upright.clone(),
             closer: closer.clone(),
             ai: ai.clone(),
             moving: Arc::default(),
@@ -750,8 +762,9 @@ pub fn run() {
             let (c, q, a, l) = (cat.clone(), scans.clone(), ai.clone(), lens_kick.clone());
             std::thread::Builder::new().name("scan".into()).spawn(move || scan_worker(handle, c, q, a, l))?;
             let handle = app.handle().clone();
-            let (c, i, f, qi, a) = (cat.clone(), index.clone(), face_index.clone(), quality.clone(), ai.clone());
-            std::thread::Builder::new().name("ai".into()).spawn(move || ai_worker(handle, c, i, f, qi, a))?;
+            let (c, i, f, qi, u, a) =
+                (cat.clone(), index.clone(), face_index.clone(), quality.clone(), upright.clone(), ai.clone());
+            std::thread::Builder::new().name("ai".into()).spawn(move || ai_worker(handle, c, i, f, qi, u, a))?;
             // Describe whatever isn't yet, from the start.
             ai.kick();
             let handle = app.handle().clone();
@@ -843,6 +856,10 @@ pub fn run() {
             commands::delete_marked,
             commands::missing_photos,
             commands::forget_missing,
+            commands::turn_photos,
+            commands::turn_back,
+            commands::sideways_accept,
+            commands::sideways_leave,
             commands::models_list,
             commands::model_download,
             commands::model_stop,

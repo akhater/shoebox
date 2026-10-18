@@ -706,19 +706,15 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
 
     // New content: read it (the slow part, outside the lock).
     let loaded = imaging::load(&job.path, job.kind, preview_size);
-    let rendered = match &loaded.image {
-        Ok(img) => imaging::render(img, preview_size, s.preview_quality, thumb_h).map_err(|e| e.to_string()),
-        Err(e) => Err(e.clone()),
-    };
-    let meta = loaded.meta;
+    let meta = &loaded.meta;
     let (taken_ts, taken_exif) = match meta.taken {
         Some(t) => (t.and_utc().timestamp(), 1),
         None => (local_naive_ts(job.mtime), 0),
     };
-    let ckey = capture_key(&meta, &job.ext);
-    let error = rendered.as_ref().err().cloned();
+    let ckey = capture_key(meta, &job.ext);
+    let error = loaded.image.as_ref().err().cloned();
 
-    let (pid, outcome) = {
+    let (pid, outcome, turn) = {
         let db = cat.db();
         let tx = db.unchecked_transaction()?;
         let others_present = |pid: i64| -> rusqlite::Result<bool> {
@@ -750,18 +746,23 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
         };
 
         let result = if let Some(pid) = same_fp.or(edited).or(recaptured) {
+            // New content is looked at again by the upright model, unless the
+            // user has decided how the photo stands.
             tx.execute(
                 "UPDATE photos SET fingerprint = ?1, capture_key = ?2, taken_ts = ?3, taken_exif = ?4, make = ?5,
                         model = ?6, lens = COALESCE(?7, lens), width = ?8, height = ?9, iso = ?10, fnumber = ?11, exposure = ?12,
-                        focal = ?13, preview_state = ?14, error = ?15, lens_read = ?17
+                        focal = ?13, preview_state = ?14, error = ?15, lens_read = ?17,
+                        sideways = CASE WHEN ?18 AND COALESCE(sideways, 0) <> ?19 THEN NULL ELSE sideways END
                   WHERE id = ?16",
                 params![
                     fp, ckey, taken_ts, taken_exif, meta.make, meta.model, meta.lens, meta.width, meta.height,
                     meta.iso, meta.fnumber, meta.exposure, meta.focal, PREVIEW_PENDING, error, pid,
-                    imaging::LENS_READER
+                    imaging::LENS_READER, same_fp.is_none(), db::SIDEWAYS_DECIDED
                 ],
             )?;
-            (pid, Outcome::Updated)
+            // The user's turn stays with the photo.
+            let turn: i64 = tx.query_row("SELECT turn FROM photos WHERE id = ?1", [pid], |r| r.get(0))?;
+            (pid, Outcome::Updated, turn)
         } else {
             tx.execute(
                 "INSERT INTO photos (fingerprint, capture_key, kind, taken_ts, taken_exif, make, model, lens, width,
@@ -788,14 +789,23 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
                     imaging::LENS_READER
                 ],
             )?;
-            (tx.last_insert_rowid(), Outcome::Added)
+            (tx.last_insert_rowid(), Outcome::Added, 0)
         };
         link(&tx, job.file_id, result.0)?;
         tx.commit()?;
         result
     };
 
-    // Write the two JPEGs, then mark the photo ready.
+    // Write the two JPEGs, turned as the user turned the photo, then mark it ready.
+    let rendered = match &loaded.image {
+        Ok(img) if turn == 0 => imaging::render(img, preview_size, s.preview_quality, thumb_h, 0),
+        Ok(img) => {
+            let t = turn.rem_euclid(4) as u8;
+            imaging::render(&imaging::turned(img.clone(), t), preview_size, s.preview_quality, thumb_h, t)
+        }
+        Err(e) => Err(anyhow!("{e}")),
+    }
+    .map_err(|e| e.to_string());
     let saved = rendered.and_then(|r| {
         cat.data
             .write(&cat.data.preview_path(pid), &r.preview)
@@ -811,6 +821,11 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
                         error = NULL, given_up = NULL WHERE id = ?4",
                 params![PREVIEW_OK, tw, th, pid],
             )?;
+            // Turned while it was being read (the window): its files follow.
+            let now: i64 = db.query_row("SELECT turn FROM photos WHERE id = ?1", [pid], |r| r.get(0))?;
+            if now != turn {
+                crate::turn::turn_files(cat, &db, pid, now, s.preview_quality)?;
+            }
             Ok(outcome)
         }
         Err(e) => {

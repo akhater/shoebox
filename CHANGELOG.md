@@ -6,6 +6,30 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **Turn photos.** R turns the selected photos a quarter turn right, Shift+R
+  left, in the grid or the viewer (also buttons in the toolbar and the
+  viewer), with Undo. Only the catalog and Shoebox's own copies change: the
+  photo files are never touched, and photos on unplugged drives turn too.
+  The turn shows everywhere - thumbnails, previews, the viewer's sharp
+  picture and 100% zoom, Cull - and stays when previews are rebuilt. Faces
+  keep their names, their boxes turned with the photo; the photo is then
+  looked at again for faces missed while it stood the wrong way, and word
+  search describes it again. The viewer says when a photo is turned, with a
+  link back to how its file shows it.
+- **Sideways photos.** An AI model (Duarte Barbosa's image orientation
+  detector, MIT, 80 MB, in Settings > AI models like the others) looks at
+  every photo before faces, and finds those that are sideways or upside down:
+  a camera without an orientation sensor, or one pointed up or down. They
+  wait in **Sideways** in the sidebar, shown turned the way it suggests:
+  **Turn all**, or select the ones it got wrong and leave them as they are.
+  Nothing is turned until you say so, and a photo you turned or left is
+  never suggested again. On previews of a real catalog turned four ways it
+  found 96% of the turned ones and suggested turning 0.2% of the upright ones
+  (it takes a second look at each photo turned the way it suggests).
+- `shoebox-cli turn right|left|half|back`, `sideways`, `upright-check`,
+  `sideways-accept`, `sideways-leave`, and `upright-eval` (how the model does
+  on a folder of upright JPEGs).
+
 - **Cull's assistant.** A **Cull** button above the photos opens the folder
   or day shown as a shoot, one shot at a time (its hover text says how many
   photos, and that a folder includes its subfolders). The frames of a burst (taken

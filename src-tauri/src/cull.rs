@@ -962,13 +962,14 @@ impl QualityIndex {
 /// A photo's original, read at half its size (whole when small, read-only),
 /// and measured; or why it couldn't be.
 fn closer_look(cat: &Catalog, id: i64, faces: &[FaceBox]) -> std::result::Result<Measures, String> {
-    let (path, kind) = cat.original(id).map_err(|e| format!("{e:#}"))?;
+    let (path, kind, turn) = cat.original(id).map_err(|e| format!("{e:#}"))?;
     let full = cat.full_size(id);
     let long = full.map_or(3000, |l| if l <= CLOSE_WHOLE { l } else { l / 2 });
     let loaded = crate::imaging::load(&path, kind, long);
     let full = full.or(loaded.meta.width.max(loaded.meta.height));
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let img = loaded.image.map_err(|e| format!("{name}: {e}"))?.to_rgb8();
+    // Turned as its preview is: the faces' boxes are on the photo as it stands.
+    let img = crate::imaging::turned(loaded.image.map_err(|e| format!("{name}: {e}"))?, turn).to_rgb8();
     let mut m = measure(&img, faces);
     m.full = full.filter(|&f| f >= m.long);
     Ok(m)
@@ -1000,9 +1001,11 @@ fn faces_of(db: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<FaceBox>>> 
     Ok(out)
 }
 
+/// What each photo's preview shows, as `Catalog::preview_ready` says it.
 fn fingerprints_of(db: &Connection, ids: &[i64]) -> Result<HashMap<i64, String>> {
     let mut stmt = db.prepare(&format!(
-        "SELECT id, fingerprint FROM photos WHERE preview_state = {PREVIEW_OK} AND id IN (SELECT value FROM json_each(?1))"
+        "SELECT p.id, {} FROM photos p WHERE p.preview_state = {PREVIEW_OK} AND p.id IN (SELECT value FROM json_each(?1))",
+        crate::db::SHOWN_SQL
     ))?;
     let out = stmt
         .query_map([serde_json::to_string(ids)?], |r| Ok((r.get(0)?, r.get(1)?)))?

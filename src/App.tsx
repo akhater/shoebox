@@ -14,6 +14,9 @@ import {
   FolderPlus,
   FolderX,
   RefreshCw,
+  RotateCcw,
+  RotateCw,
+  RotateCwSquare,
   Search,
   Sparkles,
   Tag as TagIcon,
@@ -61,6 +64,8 @@ import {
   type Scope,
   SORTS,
   type Sort,
+  turnApi,
+  type TurnReport,
   type UpdateStatus,
   updatesApi,
 } from "./api";
@@ -76,7 +81,7 @@ import { PhotoGrid } from "./components/PhotoGrid";
 import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
 import { Sidebar, type FolderTarget } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
-import { Viewer } from "./components/Viewer";
+import { turnWords, Viewer } from "./components/Viewer";
 import { WhoIsIt } from "./components/WhoIsIt";
 
 const EMPTY: PhotoList = {
@@ -92,7 +97,20 @@ const EMPTY: PhotoList = {
   raw: [],
   fresh: [],
   flags: [],
+  sideways: [],
 };
+
+/** What a turn did, for the status bar. `how`: the words for the turn, when all turned alike. */
+function turnedText(r: TurnReport, how: string | null) {
+  const what = r.turned === 1 ? "the photo" : `${fmtNum(r.turned)} photos`;
+  const turned = r.turned
+    ? `Turned ${what}${how ? ` ${how}` : ""}. Only Shoebox's ${r.turned === 1 ? "copy" : "copies"} changed: the files stay as they are.`
+    : "Nothing to turn.";
+  const again = r.toReadAgain.length
+    ? ` ${fmtNum(r.toReadAgain.length)} couldn't be turned from Shoebox's copy: ${r.toReadAgain.length === 1 ? "it is" : "they are"} read again, turned, when ${r.toReadAgain.length === 1 ? "its disk is" : "their disks are"} plugged in.`
+    : "";
+  return turned + again;
+}
 
 /** A per-viewer on/off remembered between sessions (convenience only). */
 function useRemembered(key: string, initial: boolean) {
@@ -626,6 +644,48 @@ export default function App() {
     [refresh],
   );
 
+  // Turning: only Shoebox's copies change, never a file. A quarter or half turn has Undo
+  // (the opposite turn); the grid and viewer show the new pictures once reloaded.
+  const turnPhotos = useLatest((ids: number[], by: number | "back" | "suggested") => {
+    if (!ids.length) return;
+    // A few hundred take a while (each preview is turned): say so meanwhile.
+    if (ids.length > 20) setMessage({ text: `Turning ${fmtNum(ids.length)} photos…` });
+    const call = by === "back" ? turnApi.back(ids) : by === "suggested" ? turnApi.accept(ids) : turnApi.turn(ids, by);
+    run(
+      call.then((r) => {
+        const how = typeof by === "number" ? turnWords(by) : by === "back" ? "back to how the file shows it" : null;
+        setMessage({
+          text: turnedText(r, how),
+          warn: r.toReadAgain.length > 0,
+          action:
+            typeof by === "number" && r.turned
+              ? {
+                  label: "Undo",
+                  run: () =>
+                    run(
+                      turnApi.turn(ids, -by).then(() => {
+                        setMessage({ text: ids.length === 1 ? "The photo stands as before." : "The photos stand as before." });
+                        refresh();
+                      }),
+                    ),
+                }
+              : undefined,
+        });
+        refresh();
+      }),
+    );
+  });
+
+  // Sideways: the photos you say are fine as they are leave it, never suggested again.
+  const leaveUpright = (ids: number[]) =>
+    run(
+      turnApi.leave(ids).then((n) => {
+        setSelected(new Set());
+        setMessage({ text: `${n === 1 ? "That photo stays" : `${fmtNum(n)} photos stay`} as ${n === 1 ? "it is" : "they are"}: not suggested again.` });
+        refresh();
+      }),
+    );
+
   // Cull's decisions change what the sidebar counts (marked for deletion).
   const cullChanged = useLatest(() => {
     api
@@ -983,6 +1043,24 @@ export default function App() {
     () => (loaded.query && !showPossible ? headOf(list, clearCount) : list),
     [list, loaded.query, showPossible, clearCount],
   );
+  // Sideways: each photo drawn turned the way the model suggests (laid out at that shape),
+  // to look them over before turning them.
+  const sidewaysView = scope.kind === "sideways" && view === "photos";
+  const turnedShown = useMemo(
+    () => (sidewaysView ? new Map(shown.ids.map((id, i) => [id, shown.sideways[i]] as const).filter(([, t]) => t > 0)) : null),
+    [sidewaysView, shown],
+  );
+  const gridList = useMemo(
+    () =>
+      turnedShown
+        ? {
+            ...shown,
+            w: shown.w.map((w, i) => (shown.sideways[i] % 2 ? shown.h[i] : w)),
+            h: shown.h.map((h, i) => (shown.sideways[i] % 2 ? shown.w[i] : h)),
+          }
+        : shown,
+    [shown, turnedShown],
+  );
   // On a person's page: photos they were found in since you last looked at them.
   const freshHere = useMemo(() => (current ? shown.fresh.filter((f) => f === 1).length : 0), [shown, current]);
   // ...and "Only new" there: just those photos.
@@ -1060,6 +1138,7 @@ export default function App() {
     if (scope.kind === "all") return { title: "All photos" };
     if (scope.kind === "missing") return { title: "Missing" };
     if (scope.kind === "marked") return { title: "Marked for deletion" };
+    if (scope.kind === "sideways") return { title: "Sideways" };
     if (scope.kind === "date") return { title: fmtDateKey(scope.key) };
     if (scope.kind === "camera" || scope.kind === "lens") {
       const items = (scope.kind === "camera" ? browse?.gear.cameras : browse?.gear.lenses) ?? [];
@@ -1107,7 +1186,9 @@ export default function App() {
                   ? "marked for deletion"
                   : scope.kind === "missing"
                     ? "missing"
-                    : "in the catalog";
+                    : scope.kind === "sideways"
+                      ? "that look sideways"
+                      : "in the catalog";
     const filtered = filtersOn(filters) ? ", as the filters narrow them" : "";
     if (current && n > CULL_MAX)
       return `Cull works on up to ${fmtNum(CULL_MAX)} photos at once; this view has ${fmtNum(n)}: pick a folder or a day, or narrow it with the filters`;
@@ -1362,6 +1443,26 @@ export default function App() {
                 <TagIcon size={15} /> Tag{selected.size > 1 ? ` ${fmtNum(selected.size)}` : ""}…
               </button>
             )}
+            {view === "photos" && selected.size > 0 && !sidewaysView && (
+              <>
+                <button
+                  className="icon-btn"
+                  onClick={() => turnPhotos(shown.ids.filter((id) => selected.has(id)), -1)}
+                  title={`Turn ${selected.size === 1 ? "it" : `the ${fmtNum(selected.size)} selected`} left (Shift+R). Only Shoebox's copies change, never the files.`}
+                  aria-label="Turn left"
+                >
+                  <RotateCcw size={16} />
+                </button>
+                <button
+                  className="icon-btn"
+                  onClick={() => turnPhotos(shown.ids.filter((id) => selected.has(id)), 1)}
+                  title={`Turn ${selected.size === 1 ? "it" : `the ${fmtNum(selected.size)} selected`} right (R). Only Shoebox's copies change, never the files.`}
+                  aria-label="Turn right"
+                >
+                  <RotateCw size={16} />
+                </button>
+              </>
+            )}
             {view === "photos" && selected.size > 0 && personHere && (
               <button
                 className="btn ghost"
@@ -1519,6 +1620,41 @@ export default function App() {
             )}
           </div>
         )}
+        {sidewaysView && (
+          <div className="banner">
+            <RotateCwSquare size={15} />
+            <span>
+              These photos look sideways or upside down, and are shown turned the way Shoebox suggests. Turning changes
+              only Shoebox's copies, never your files. Select the ones it got wrong and leave them as they are.
+            </span>
+            <span className="grow" />
+            {selected.size > 0 && (
+              <>
+                <button
+                  className="btn small ghost"
+                  onClick={() => leaveUpright(shown.ids.filter((id) => selected.has(id)))}
+                  title="These stand right as they are: never suggested again"
+                >
+                  Leave {selected.size === 1 ? "it" : fmtNum(selected.size)} as {selected.size === 1 ? "it is" : "they are"}
+                </button>
+                <button
+                  className="btn small ghost"
+                  onClick={() => {
+                    turnPhotos(shown.ids.filter((id) => selected.has(id)), "suggested");
+                    setSelected(new Set());
+                  }}
+                >
+                  Turn {selected.size === 1 ? "it" : fmtNum(selected.size)}
+                </button>
+              </>
+            )}
+            {shown.ids.length > 0 && (
+              <button className="btn small primary" disabled={!current} onClick={() => turnPhotos(shown.ids, "suggested")}>
+                <RotateCw size={14} /> Turn {shown.ids.length === 1 ? "it" : `all ${fmtNum(shown.ids.length)}`}
+              </button>
+            )}
+          </div>
+        )}
         {scope.kind === "marked" && view === "photos" && (
           <div className="banner">
             <Trash2 size={15} /> Nothing is deleted until you confirm. Press Delete on a photo to unmark it.
@@ -1573,12 +1709,14 @@ export default function App() {
           <div className={`grid-stack ${current ? "" : "stale"} ${slow ? "slow" : ""}`}>
             <PhotoGrid
               key={loaded.key}
-              list={shown}
+              list={gridList}
               rowHeight={gridRowHeight}
               onOpen={openPhoto}
               onSelect={selectPhotos}
               onMark={setMarked}
               onTag={setTagging}
+              onTurn={sidewaysView ? undefined : turnPhotos}
+              turned={turnedShown}
               selected={selected}
               binned={inBin}
               keyboard={
@@ -1631,6 +1769,7 @@ export default function App() {
           onToggleMark={() => setMarked([shown.ids[viewerIndex]], shown.marked[viewerIndex] !== 1)}
           onForget={() => forgetMissing([shown.ids[viewerIndex]])}
           onTagsChanged={refreshSoon}
+          onTurn={(by) => turnPhotos([shown.ids[viewerIndex]], by)}
           onPerson={(id) => drill({ kind: "person", id })}
           onFolder={goToFolder}
           everyone={peopleList}

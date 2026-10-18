@@ -37,6 +37,7 @@ mod search_reused_id;
 mod stored_gear_names;
 mod suggestions_by_date;
 mod suggestions_replay;
+mod turns;
 mod view_cost;
 mod window_never_waits;
 

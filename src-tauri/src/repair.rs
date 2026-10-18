@@ -191,8 +191,11 @@ pub fn check_files(cat: &Catalog, all: bool) -> Result<Checkup> {
 
 /// A photo's thumbnail made again from its preview, as a scan makes it.
 fn thumb_from_preview(cat: &Catalog, id: i64, thumb_h: u32) -> Result<()> {
-    let img = image::open(cat.data.preview_path(id))?;
-    let r = crate::imaging::render(&img, img.width().max(img.height()), 80, thumb_h)?;
+    let bytes = std::fs::read(cat.data.preview_path(id))?;
+    let img = image::load_from_memory(&bytes)?;
+    // It shows what the preview shows, turn included.
+    let turn = crate::imaging::turn_mark(&bytes);
+    let r = crate::imaging::render(&img, img.width().max(img.height()), 80, thumb_h, turn)?;
     cat.data.write(&cat.data.thumb_path(id), &r.thumb)?;
     // A new revision: the window asks for the new thumbnail.
     cat.db().execute(

@@ -704,6 +704,78 @@ pub fn orient(img: DynamicImage, o: u16) -> DynamicImage {
     }
 }
 
+/// The photo turned clockwise by `turn` quarter turns: how the user asked to
+/// see it, on top of what its file says (see `Catalog::turn`).
+pub fn turned(img: DynamicImage, turn: u8) -> DynamicImage {
+    match turn % 4 {
+        1 => img.rotate90(),
+        2 => img.rotate180(),
+        3 => img.rotate270(),
+        _ => img,
+    }
+}
+
+/// Each preview and thumbnail of a turned photo says, in a JPEG comment, which
+/// turn it shows: a turn cut short is finished from the files as they are,
+/// never turned twice. No comment: not turned.
+const TURN_MARK: &[u8] = b"shoebox turn=";
+
+/// `jpeg` saying it shows `turn` (0 adds nothing: files of photos never
+/// turned stay as they always were). The comment goes after the JFIF header.
+pub fn mark_turn(jpeg: Vec<u8>, turn: u8) -> Vec<u8> {
+    let turn = turn % 4;
+    if turn == 0 || !jpeg.starts_with(&[0xFF, 0xD8]) {
+        return jpeg;
+    }
+    let mut at = 2;
+    if jpeg.get(2..4) == Some(&[0xFF, 0xE0]) && jpeg.len() >= 6 {
+        at = (4 + u16::from_be_bytes([jpeg[4], jpeg[5]]) as usize).min(jpeg.len());
+    }
+    let text = [TURN_MARK, &[b'0' + turn]].concat();
+    let mut out = Vec::with_capacity(jpeg.len() + text.len() + 4);
+    out.extend_from_slice(&jpeg[..at]);
+    out.extend_from_slice(&[0xFF, 0xFE]);
+    out.extend_from_slice(&(text.len() as u16 + 2).to_be_bytes());
+    out.extend_from_slice(&text);
+    out.extend_from_slice(&jpeg[at..]);
+    out
+}
+
+/// The turn a preview or thumbnail says it shows (see [`mark_turn`]): read
+/// from its header, before the picture itself.
+pub fn turn_mark(jpeg: &[u8]) -> u8 {
+    let mut i = 2;
+    while i + 4 <= jpeg.len() && jpeg[i] == 0xFF {
+        let kind = jpeg[i + 1];
+        let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+        // The picture starts: no comment comes after.
+        if kind == 0xDA || len < 2 {
+            break;
+        }
+        if kind == 0xFE
+            && let Some(rest) = jpeg.get(i + 4..i + 2 + len).and_then(|b| b.strip_prefix(TURN_MARK))
+            && let [d @ b'0'..=b'3', ..] = rest
+        {
+            return d - b'0';
+        }
+        i += 2 + len;
+    }
+    0
+}
+
+/// A preview or thumbnail turned from the turn it shows to `to`, encoded
+/// again at `quality`, with its new size. None when it shows `to` already.
+pub fn turn_jpeg(jpeg: &[u8], to: u8, quality: u8) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    let (from, to) = (turn_mark(jpeg), to % 4);
+    if from == to {
+        return Ok(None);
+    }
+    let img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg)?;
+    let img = DynamicImage::ImageRgb8(turned(img, (to + 4 - from) % 4).to_rgb8());
+    let (w, h) = img.dimensions();
+    Ok(Some((mark_turn(encode(&img, quality)?, to), w, h)))
+}
+
 pub struct Rendered {
     pub preview: Vec<u8>,
     pub thumb: Vec<u8>,
@@ -712,8 +784,9 @@ pub struct Rendered {
 }
 
 /// The two JPEGs Shoebox keeps: a preview (long edge `preview_long`) and a grid
-/// thumbnail (height `thumb_h`). Never upscales.
-pub fn render(img: &DynamicImage, preview_long: u32, quality: u8, thumb_h: u32) -> Result<Rendered> {
+/// thumbnail (height `thumb_h`). Never upscales. `turn`: what `img`, already
+/// turned, shows (see [`mark_turn`]).
+pub fn render(img: &DynamicImage, preview_long: u32, quality: u8, thumb_h: u32, turn: u8) -> Result<Rendered> {
     let preview = shrink(img, preview_long);
     let (pw, ph) = preview.dimensions();
     let th = thumb_h.min(ph);
@@ -726,8 +799,16 @@ pub fn render(img: &DynamicImage, preview_long: u32, quality: u8, thumb_h: u32) 
         tw = max_w;
     }
     let thumb = resize(&preview, tw, th);
-    Ok(Rendered { preview: encode(&preview, quality)?, thumb: encode(&thumb, 80)?, thumb_w: tw, thumb_h: th })
+    Ok(Rendered {
+        preview: mark_turn(encode(&preview, quality)?, turn),
+        thumb: mark_turn(encode(&thumb, THUMB_QUALITY)?, turn),
+        thumb_w: tw,
+        thumb_h: th,
+    })
 }
+
+/// JPEG quality of the grid thumbnails.
+pub const THUMB_QUALITY: u8 = 80;
 
 fn shrink(img: &DynamicImage, long: u32) -> DynamicImage {
     let (w, h) = img.dimensions();
@@ -760,12 +841,13 @@ pub fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>> {
 
 /// The viewer's sharp picture, read from the original (read-only) when its
 /// disk is plugged in: long edge `long`, or full size for 0. Never upscaled,
-/// never stored - previews stay the only pictures Shoebox keeps.
-pub fn sharp(path: &Path, kind: Kind, long: u32) -> Result<Vec<u8>> {
+/// never stored - previews stay the only pictures Shoebox keeps. Turned as
+/// the user turned the photo (`turn`).
+pub fn sharp(path: &Path, kind: Kind, long: u32, turn: u8) -> Result<Vec<u8>> {
     // Up to 15% short of the asked size is fine on screen, and lets a JPEG be
     // decoded at a cheaper scale (1/2, 1/4) instead of full size then shrunk.
     let loaded = load(path, kind, if long == 0 { u32::MAX } else { long * 85 / 100 });
-    let img = loaded.image.map_err(|e| anyhow!(e))?;
+    let img = turned(loaded.image.map_err(|e| anyhow!(e))?, turn);
     let img = if long == 0 { DynamicImage::ImageRgb8(img.to_rgb8()) } else { shrink(&img, long) };
     encode(&img, 90)
 }

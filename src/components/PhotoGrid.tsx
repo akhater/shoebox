@@ -26,6 +26,11 @@ interface Props {
   onMark: (ids: number[], marked: boolean) => void;
   /** T: tag these photos. */
   onTag: (ids: number[]) => void;
+  /** R / Shift+R: turn these photos a quarter turn clockwise (1) or counter-clockwise (-1). */
+  onTurn?: (ids: number[], by: number) => void;
+  /** Drawn turned by this many quarter turns clockwise (the turns suggested, to look them over);
+   *  the list's sizes are already those of the photos turned. */
+  turned?: Map<number, number> | null;
   /** False while something covers the grid (viewer, dialog): keys are theirs. */
   keyboard: boolean;
   /** Changes when the grid should take the keyboard back (viewer closed). */
@@ -44,6 +49,17 @@ interface Props {
 
 type PhotosRow = Extract<Row, { kind: "photos" }>;
 const centre = (t: Tile) => t.left + t.width / 2;
+
+/** A thumbnail drawn turned clockwise by `turn` quarter turns in a tile `w` x `h`: a quarter
+ *  turn lays it out the other way round first, so once turned it fills the tile. */
+function turnedStyle(turn: number, w: number, h: number) {
+  const odd = turn % 2 === 1;
+  return {
+    width: odd ? h : w,
+    height: odd ? w : h,
+    transform: `translate(-50%, -50%) rotate(${turn * 90}deg)`,
+  };
+}
 
 /** Drawn again only when what it shows changes (not for every update of the window). */
 export const PhotoGrid = memo(function PhotoGrid(p: Props) {
@@ -232,6 +248,15 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
         p.onTag(ids);
         break;
       }
+      case "r":
+      case "R": {
+        if (ctrl || e.altKey || !p.onTurn) return;
+        const ids = list.ids.filter((id) => selected.has(id));
+        if (!ids.length && cur >= 0) ids.push(list.ids[cur]);
+        if (!ids.length) return;
+        p.onTurn(ids, e.shiftKey ? -1 : 1);
+        break;
+      }
       case "Delete": {
         const ids = list.ids.filter((id) => selected.has(id));
         if (!ids.length && cur >= 0) ids.push(list.ids[cur]);
@@ -283,6 +308,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                 const marked = list.marked[t.index] === 1;
                 const inBin = state === 0 ? p.binned?.get(id) : undefined;
                 const problems = problemsOf(list.flags[t.index] ?? 0);
+                const turn = p.turned?.get(id) ?? 0;
                 return (
                   <button
                     key={id}
@@ -309,7 +335,15 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                     }
                   >
                     {preview === 1 ? (
-                      <img src={thumbUrl(id, list.rev[t.index])} loading="lazy" decoding="async" draggable={false} alt="" />
+                      <img
+                        src={thumbUrl(id, list.rev[t.index])}
+                        loading="lazy"
+                        decoding="async"
+                        draggable={false}
+                        alt=""
+                        className={turn ? "turned" : undefined}
+                        style={turn ? turnedStyle(turn, t.width, row.height) : undefined}
+                      />
                     ) : preview === 2 ? (
                       <span className="tile-empty">
                         <ImageOff size={22} />

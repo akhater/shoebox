@@ -687,7 +687,7 @@ pub fn find_lenses(cat: &Catalog, cancel: &AtomicBool) -> Result<LensReport> {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let Ok((path, kind)) = cat.original(id) else {
+        let Ok((path, kind, _)) = cat.original(id) else {
             report.waiting += 1;
             continue;
         };

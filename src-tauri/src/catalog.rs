@@ -591,6 +591,7 @@ impl Catalog {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
+        let sideways: i64 = db.query_row("SELECT COUNT(*) FROM photos WHERE sideways > 0", [], |r| r.get(0))?;
 
         Ok(Overview {
             volumes,
@@ -599,6 +600,7 @@ impl Catalog {
             offline: off,
             missing,
             marked,
+            sideways,
             data_dir: self.data.root.to_string_lossy().into_owned(),
         })
     }
@@ -636,7 +638,7 @@ impl Catalog {
             "SELECT p.id, COALESCE(p.taken_ts, 0), {state},
                     COALESCE(p.thumb_w, 0), COALESCE(p.thumb_h, 0), p.preview_rev, p.preview_state, p.marked,
                     COALESCE((SELECT {EXT_SQL} FROM files f WHERE f.photo_id = p.id ORDER BY f.state LIMIT 1), ''),
-                    p.kind = 'raw', {fresh}
+                    p.kind = 'raw', {fresh}, MAX(COALESCE(p.sideways, 0), 0)
                FROM photos p
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
                 AND (?10 IS NULL OR p.id IN (SELECT value FROM json_each(?10)))
@@ -660,6 +662,7 @@ impl Catalog {
             out.ext.push(r.get(8)?);
             out.raw.push(r.get(9)?);
             out.fresh.push(r.get(10)?);
+            out.sideways.push(r.get(11)?);
         }
         Ok(out)
     }
@@ -824,16 +827,19 @@ impl Catalog {
                 String::new(),
             ),
             Scope::Marked => ("p.marked = 1".into(), 0, String::new()),
+            Scope::Sideways => ("p.sideways > 0".into(), 0, String::new()),
         };
         Ok((filter, p1, p2))
     }
 
-    /// Photos whose preview is ready (what the AI reads), with their fingerprints.
+    /// Photos whose preview is ready (what the AI reads), with what each
+    /// preview shows ([`db::SHOWN_SQL`]: its content, as the user turned it).
     pub fn preview_ready(&self) -> Result<Vec<(i64, String)>> {
         let db = self.db();
         let ids = db
             .prepare(&format!(
-                "SELECT id, fingerprint FROM photos WHERE preview_state = {PREVIEW_OK} ORDER BY taken_ts DESC"
+                "SELECT p.id, {} FROM photos p WHERE p.preview_state = {PREVIEW_OK} ORDER BY p.taken_ts DESC",
+                db::SHOWN_SQL
             ))?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
@@ -858,6 +864,7 @@ impl Catalog {
                 out.ext.push(all.ext[i].clone());
                 out.raw.push(all.raw[i]);
                 out.fresh.push(all.fresh[i]);
+                out.sideways.push(all.sideways[i]);
             }
         }
         Ok(out)
@@ -931,7 +938,8 @@ impl Catalog {
         let mut d = db
             .query_row(
                 "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
-                        exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown
+                        exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown, p.turn,
+                        MAX(COALESCE(p.sideways, 0), 0)
                    FROM photos p WHERE id = ?1",
                 [id],
                 |r| {
@@ -954,6 +962,8 @@ impl Catalog {
                         error: r.get(15)?,
                         camera: r.get::<_, Option<String>>(16)?.filter(|c| c != Kind::Camera.unknown()),
                         lens: r.get::<_, Option<String>>(17)?.filter(|l| l != Kind::Lens.unknown()),
+                        turn: r.get(18)?,
+                        sideways: r.get(19)?,
                         files: Vec::new(),
                     })
                 },
@@ -1156,16 +1166,18 @@ impl Catalog {
         Ok(())
     }
 
-    /// A copy of the photo that can be read now (disk plugged in, file there), and its kind.
-    pub fn original(&self, photo_id: i64) -> Result<(PathBuf, crate::formats::Kind)> {
-        let (kind, files): (String, Vec<i64>) = {
+    /// A copy of the photo that can be read now (disk plugged in, file there),
+    /// its kind, and how the user turned it (quarter turns clockwise).
+    pub fn original(&self, photo_id: i64) -> Result<(PathBuf, crate::formats::Kind, u8)> {
+        let (kind, turn, files): (String, i64, Vec<i64>) = {
             let db = self.read()?;
-            let kind = db.query_row("SELECT kind FROM photos WHERE id = ?1", [photo_id], |r| r.get(0))?;
+            let (kind, turn) = db
+                .query_row("SELECT kind, turn FROM photos WHERE id = ?1", [photo_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
             let files = db
                 .prepare(&format!("SELECT id FROM files WHERE photo_id = ?1 AND state = {FILE_PRESENT}"))?
                 .query_map([photo_id], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
-            (kind, files)
+            (kind, turn, files)
         };
         let kind = if kind == crate::formats::Kind::Raw.as_str() {
             crate::formats::Kind::Raw
@@ -1176,7 +1188,7 @@ impl Catalog {
             if let Ok(p) = self.file_path(f).map(PathBuf::from)
                 && p.is_file()
             {
-                return Ok((p, kind));
+                return Ok((p, kind, turn.rem_euclid(4) as u8));
             }
         }
         bail!("No copy of this photo is plugged in")
@@ -1513,6 +1525,9 @@ pub enum Scope {
     },
     /// Marked for deletion.
     Marked,
+    /// Photos the upright model finds sideways or upside down, waiting for the
+    /// user to turn them or leave them as they are.
+    Sideways,
 }
 
 /// Narrows any view. Within a filter any ticked value matches, except where a
@@ -1863,6 +1878,8 @@ pub struct PhotoList {
     /// What Cull found wrong with each photo, as bits of [`crate::cull::Problem`]
     /// (0: nothing, or not measured yet). Filled by whoever asks with Cull's measures at hand.
     pub flags: Vec<u32>,
+    /// The quarter turns clockwise the upright model suggests (0: none).
+    pub sideways: Vec<i64>,
 }
 
 /// Photos per day, for the calendar.
@@ -1891,6 +1908,8 @@ pub struct Overview {
     pub missing: i64,
     /// Marked for deletion.
     pub marked: i64,
+    /// Suggested for turning by the upright model, waiting for the user.
+    pub sideways: i64,
     pub data_dir: String,
 }
 
@@ -1942,6 +1961,10 @@ pub struct PhotoDetail {
     pub preview_state: i64,
     pub preview_rev: i64,
     pub error: Option<String>,
+    /// Quarter turns clockwise the user turned it, on top of what its file says.
+    pub turn: i64,
+    /// Quarter turns clockwise the upright model suggests (0: none).
+    pub sideways: i64,
     pub files: Vec<FileLoc>,
 }
 
