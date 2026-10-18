@@ -505,7 +505,8 @@ export interface CullFrame {
   /** Why, the first one the main reason. */
   reasons: string[];
   problems: Problem[];
-  /** Edge blur compared between frames, thousandths of the long edge (lower is sharper). */
+  /** Edge blur compared between frames, thousandths of the long edge (lower is sharper):
+   *  where the stack's `compared` says. */
   blur: number | null;
   /** Measured from the original, not only the preview. */
   closer: boolean;
@@ -524,6 +525,12 @@ export interface CullFrame {
 export interface CullStack {
   frames: CullFrame[];
   keeper: number;
+  /** Where the frames' sharpness was compared: around the eyes of the largest face (every
+   *  frame has one), where the camera focused (every file says, and the point is sharp in one
+   *  frame at least), else the sharpest part. */
+  compared: "face" | "focusPoint" | "sharpest";
+  /** Compared on what the originals showed: every frame was looked at closer. */
+  closer: boolean;
 }
 export interface Shoot {
   photos: number;

@@ -172,7 +172,10 @@
 //!   shoebox-cli cull [filters] [scope] [--closer]   a view as a shoot, as Cull shows it (up to
 //!                                         5,000 photos: a folder or a day): bursts gathered in
 //!                                         stacks, each frame's problems, and Cull's suggestion
-//!                                         (keep, reject, none) with the reasons; "focus" is where
+//!                                         (keep, reject, none) with the reasons; "keeper" is the
+//!                                         sharpest frame, "compared" where: "face", else
+//!                                         "focusPoint" (where the camera focused, when it is sharp
+//!                                         in one frame at least), else "sharpest"; "focus" is where
 //!                                         to look at 100% first: on "focusPoints", where the
 //!                                         camera focused (when its file says), else on the
 //!                                         largest face; "focusMissed" = soft there while

@@ -241,10 +241,16 @@ export function fakeBackend() {
         prev.frames.push(frame(p, "keep", ["The best of these 2 frames"]));
         prev.keeper = 1;
       } else if (n === 4) {
-        stacks.push({ frames: [frame(p, "reject", ["Blurry everywhere: shake, motion or focus missed"], ["blurry"])], keeper: 0 });
+        stacks.push({ frames: [frame(p, "reject", ["Blurry everywhere: shake, motion or focus missed"], ["blurry"])], keeper: 0, compared: "sharpest", closer: false });
       } else {
-        stacks.push({ frames: [frame(p, "keep", [])], keeper: 0 });
+        stacks.push({ frames: [frame(p, "keep", [])], keeper: 0, compared: "sharpest", closer: false });
       }
+    }
+    // Compared where the camera focused when every frame's file says and the point is sharp
+    // in one of them at least (no faces measured here).
+    for (const s of stacks) {
+      const atPoint = s.frames.every((f) => f.focusPoints.length) && s.frames.some((f) => !f.problems.includes("focusMissed"));
+      s.compared = atPoint ? "focusPoint" : "sharpest";
     }
     return { photos: ps.length, measured: ps.length, closer: 0, described: ps.length, canLookCloser: ps.map((p) => p.id), unreadable, stacks };
   };

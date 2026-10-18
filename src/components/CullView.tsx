@@ -35,6 +35,13 @@ type Spot = { x: number; y: number };
 /** Where Z looks at 100% first, in words. */
 const firstLook = (f: CullFrame) => (f.focusPoints.length ? "where the camera focused" : f.focus ? "on the face" : "the middle");
 
+/** Where a shot's frames were compared, in words: what a frame's `blur` measures. */
+const comparedAt: Record<CullStack["compared"], string> = {
+  face: "edges at the face",
+  focusPoint: "edges at the focus point",
+  sharpest: "sharpest edges",
+};
+
 /** The camera's points, drawn on a frame whose focus missed them: where "the camera focused here" is. */
 const missedPoints = (f: CullFrame): Focus | null =>
   f.problems.includes("focusMissed") && f.focusPoints.length ? { mode: null, points: f.focusPoints } : null;
@@ -520,7 +527,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
               Frame {at.frame + 1} of {stack.frames.length}
               {frame.name && ` · ${frame.name}`}
               {frame.blur != null &&
-                ` · edges ${frame.blur.toFixed(2)}‰ of the width${frame.closer ? " (original)" : " (preview)"}`}
+                ` · ${comparedAt[stack.compared]} ${frame.blur.toFixed(2)}‰ of the width${stack.closer ? " (original)" : " (preview)"}`}
             </div>
             <div className="cull-actions">
               <button
