@@ -255,7 +255,28 @@ export interface PhotoDetail {
   turn: number;
   /** Quarter turns clockwise the upright model suggests (0 = none). */
   sideways: number;
+  /** Where the camera focused, as the photo is shown; null when its file doesn't say. */
+  focus: Focus | null;
   files: FileLoc[];
+}
+
+/** What an autofocus point was in a photo: where focus was found, chosen
+ *  (focus not confirmed there), the zone the camera was given, or one of its other points. */
+export type FocusState = "inFocus" | "chosen" | "area" | "other";
+
+export interface FocusPoint {
+  /** Top-left corner and size, fractions (0..1) of the picture as shown. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  state: FocusState;
+}
+
+export interface Focus {
+  /** How the camera was set to focus: "Single point", "Zone", "Whole area"... */
+  mode: string | null;
+  points: FocusPoint[];
 }
 
 export interface Progress {

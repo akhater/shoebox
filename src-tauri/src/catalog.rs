@@ -935,41 +935,51 @@ impl Catalog {
     pub fn photo_detail(&self, id: i64) -> Result<PhotoDetail> {
         let online = self.online.read().unwrap().clone();
         let db = self.read()?;
-        let mut d = db
+        let (focus, mut d) = db
             .query_row(
                 "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
                         exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown, p.turn,
-                        MAX(COALESCE(p.sideways, 0), 0)
+                        MAX(COALESCE(p.sideways, 0), 0), p.focus
                    FROM photos p WHERE id = ?1",
                 [id],
                 |r| {
-                    Ok(PhotoDetail {
-                        id: r.get(0)?,
-                        kind: r.get(1)?,
-                        taken_ts: r.get(2)?,
-                        taken_from_camera: r.get::<_, i64>(3)? != 0,
-                        make: r.get(4)?,
-                        model: r.get(5)?,
-                        lens_in_file: r.get(6)?,
-                        width: r.get(7)?,
-                        height: r.get(8)?,
-                        iso: r.get(9)?,
-                        fnumber: r.get(10)?,
-                        exposure: r.get(11)?,
-                        focal: r.get(12)?,
-                        preview_state: r.get(13)?,
-                        preview_rev: r.get(14)?,
-                        error: r.get(15)?,
-                        camera: r.get::<_, Option<String>>(16)?.filter(|c| c != Kind::Camera.unknown()),
-                        lens: r.get::<_, Option<String>>(17)?.filter(|l| l != Kind::Lens.unknown()),
-                        turn: r.get(18)?,
-                        sideways: r.get(19)?,
-                        files: Vec::new(),
-                    })
+                    let focus: Option<Vec<u8>> = r.get(20)?;
+                    Ok((
+                        focus,
+                        PhotoDetail {
+                            id: r.get(0)?,
+                            kind: r.get(1)?,
+                            taken_ts: r.get(2)?,
+                            taken_from_camera: r.get::<_, i64>(3)? != 0,
+                            make: r.get(4)?,
+                            model: r.get(5)?,
+                            lens_in_file: r.get(6)?,
+                            width: r.get(7)?,
+                            height: r.get(8)?,
+                            iso: r.get(9)?,
+                            fnumber: r.get(10)?,
+                            exposure: r.get(11)?,
+                            focal: r.get(12)?,
+                            preview_state: r.get(13)?,
+                            preview_rev: r.get(14)?,
+                            error: r.get(15)?,
+                            camera: r.get::<_, Option<String>>(16)?.filter(|c| c != Kind::Camera.unknown()),
+                            lens: r.get::<_, Option<String>>(17)?.filter(|l| l != Kind::Lens.unknown()),
+                            turn: r.get(18)?,
+                            sideways: r.get(19)?,
+                            focus: None,
+                            files: Vec::new(),
+                        },
+                    ))
                 },
             )
             .optional()?
             .ok_or_else(|| anyhow!("Unknown photo {id}"))?;
+        // As the photo is shown: turned as the user turned it.
+        d.focus = match focus {
+            Some(blob) => crate::focus::decode(&db, &blob)?.map(|f| f.turned(d.turn)),
+            None => None,
+        };
         d.files = db
             .prepare(
                 "SELECT f.id, f.name, f.size, f.state, f.error, fo.rel_path, v.id, v.label, v.last_mount
@@ -1965,6 +1975,8 @@ pub struct PhotoDetail {
     pub turn: i64,
     /// Quarter turns clockwise the upright model suggests (0: none).
     pub sideways: i64,
+    /// Where the camera focused, as the photo is shown; None when its file doesn't say.
+    pub focus: Option<crate::focus::Focus>,
     pub files: Vec<FileLoc>,
 }
 

@@ -545,6 +545,68 @@ describe("the viewer", () => {
     expect(viewer(host)!.querySelector("h2")!.textContent).toBe("IMG_202.jpg");
     expect(backButton(host)).toBeNull();
   });
+
+  /** The viewer's picture has arrived (jsdom loads none): 1500 x 1000. */
+  const pictureIn = async (host: HTMLElement) => {
+    const img = viewer(host)!.querySelector<HTMLImageElement>(".viewer-img")!;
+    Object.defineProperty(img, "naturalWidth", { configurable: true, value: 1500 });
+    Object.defineProperty(img, "naturalHeight", { configurable: true, value: 1000 });
+    await act(async () => {
+      img.dispatchEvent(new Event("load"));
+    });
+  };
+  const focusToggle = (host: HTMLElement) => viewer(host)!.querySelector<HTMLButtonElement>(".focus-toggle")!;
+  const focusLine = (host: HTMLElement) =>
+    [...viewer(host)!.querySelectorAll("dt")].find((dt) => dt.textContent === "Focus")?.nextElementSibling?.textContent;
+
+  test("focus points: off until F, then on every photo and the next time; a photo whose file says nothing says so", async () => {
+    const be = fakeBackend();
+    be.focusOf.set(202, {
+      mode: "Single point",
+      points: [
+        { x: 0.1, y: 0.4, w: 0.02, h: 0.03, state: "other" },
+        { x: 0.6, y: 0.3, w: 0.02, h: 0.03, state: "inFocus" },
+        { x: 0.5, y: 0.5, w: 0.02, h: 0.03, state: "other" },
+      ],
+    });
+    const host = await renderApp();
+    await doubleClick(tile(host, 202));
+    await wait(50);
+    await pictureIn(host);
+    // Off until asked for; the panel says it anyway.
+    expect(viewer(host)!.querySelector(".focus-points")).toBeNull();
+    expect(focusToggle(host).getAttribute("aria-pressed")).toBe("false");
+    expect(focusLine(host)).toBe("1 of 3 in focus · Single point");
+
+    await key(document.body, "f");
+    expect(focusToggle(host).getAttribute("aria-pressed")).toBe("true");
+    const drawn = viewer(host)!.querySelectorAll(".focus-points .af");
+    expect([...drawn].map((g) => g.getAttribute("class"))).toEqual(["af other", "af other", "af inFocus"]);
+    expect(viewer(host)!.querySelector(".focus-points .af.inFocus rect")!.getAttribute("x")).toBe("60%");
+    // With the points shown, the panel's line is their legend.
+    expect(viewer(host)!.querySelector(".focus-summary .af-swatch.inFocus")).not.toBeNull();
+
+    // The next photo's file says nothing: no points, and the switch says so.
+    await key(document.body, "ArrowRight");
+    await wait(50);
+    await pictureIn(host);
+    expect(viewer(host)!.querySelector("h2")!.textContent).toBe("IMG_203.jpg");
+    expect(viewer(host)!.querySelector(".focus-points")).toBeNull();
+    expect(focusToggle(host).textContent).toBe("Focus not recorded");
+    expect(focusLine(host)).toBeUndefined();
+
+    // Still on the next time the viewer opens.
+    await key(document.body, "Escape");
+    await doubleClick(tile(host, 202));
+    await wait(50);
+    await pictureIn(host);
+    expect(viewer(host)!.querySelectorAll(".focus-points .af")).toHaveLength(3);
+
+    // Off again: the photo as it is.
+    await click(focusToggle(host));
+    expect(viewer(host)!.querySelector(".focus-points")).toBeNull();
+    expect(focusToggle(host).getAttribute("aria-pressed")).toBe("false");
+  });
 });
 
 describe("People", () => {

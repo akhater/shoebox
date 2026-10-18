@@ -55,6 +55,12 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   catalog updates in the same step, with no rescan.
 - **Full-screen viewer**, sharp from the original when its drive is connected,
   with 100% zoom and a filmstrip.
+- **Focus points.** Press F in the viewer to see where the camera focused, as
+  the camera makers' own software shows it: the points that found focus in
+  red, over the camera's other points. Read from the files of Canon, Nikon
+  (Z and live view), Sony, Fujifilm, Olympus and OM System, Panasonic and
+  Leica, Pentax (live view) cameras, and phones; shown for photos on unplugged
+  drives too.
 - **Scriptable.** Everything the window does is also available from
   `shoebox-cli`, with JSON output, for scripts and AI agents.
 
@@ -166,6 +172,7 @@ shoebox-cli people               # everyone found, with their names
 shoebox-cli people-check         # likely mix-ups among named people
 shoebox-cli turn right 42        # a quarter turn clockwise, in Shoebox only
 shoebox-cli sideways             # photos that look sideways or upside down
+shoebox-cli focus "D:\Photos\IMG_0001.CR3"   # where the camera focused, as Shoebox reads it
 shoebox-cli cull '{}' '{"kind":"root","id":1}'   # a folder as Cull shows it: bursts, problems, suggestions
 shoebox-cli models               # which AI models are installed
 shoebox-cli bench                # how fast the main views are on this catalog and computer

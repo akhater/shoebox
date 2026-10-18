@@ -107,6 +107,12 @@
 //!   shoebox-cli find-lenses       photos without a lens: read again from their originals
 //!                                 (metadata only, plugged-in disks), or from the same shot's other file
 //!   shoebox-cli lens <file>       the lens Shoebox reads in a file
+//!   shoebox-cli find-focus        photos read before Shoebox knew their camera's focus points:
+//!                                 read again from their originals (metadata only, plugged-in disks)
+//!   shoebox-cli focus <file>      where the camera focused, as Shoebox reads it in a file: each
+//!                                 point a fraction of the upright picture (x, y its top-left
+//!                                 corner), "inFocus", "chosen", "area" (the zone given) or
+//!                                 "other" (the camera's other points); also in `photo <id>`
 //!
 //! Folders (on the disk and in the catalog in one step; JSON out):
 //!   shoebox-cli rename-folder <volume-id> <folder> <new name>
@@ -176,7 +182,7 @@
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::{self, Progress};
-use shoebox_lib::{cull, gear, organize, tags, upright};
+use shoebox_lib::{cull, focus, gear, organize, tags, upright};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -654,6 +660,14 @@ fn main() -> anyhow::Result<()> {
             let t = std::time::Instant::now();
             let lens = shoebox_lib::imaging::read_lens(Path::new(file), kind);
             println!("{}", serde_json::json!({ "file": file, "lens": lens, "ms": t.elapsed().as_millis() as u64 }));
+        }
+        Some("find-focus") => println!("{}", serde_json::to_string_pretty(&focus::find(&cat, &cancel)?)?),
+        Some("focus") => {
+            let file = args.get(1).ok_or_else(|| anyhow::anyhow!("focus <file>"))?;
+            let kind = shoebox_lib::formats::kind_of(file).ok_or_else(|| anyhow::anyhow!("{file}: not a photo"))?;
+            let t = std::time::Instant::now();
+            let focus = shoebox_lib::imaging::read_focus(Path::new(file), kind);
+            println!("{}", serde_json::json!({ "file": file, "focus": focus, "ms": t.elapsed().as_millis() as u64 }));
         }
         Some("facets") => {
             // What each filter offers, with counts: shoebox-cli facets [filters JSON]

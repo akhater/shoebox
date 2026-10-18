@@ -4,6 +4,29 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.43.1 - unreleased
 
+### Added
+
+- **Focus points.** F in the viewer, or the Focus points switch on the photo,
+  shows where the camera focused, drawn over the photo the way the camera
+  makers' own software draws it: the camera's points faint, those that found
+  focus in red, a point chosen without focus confirmed in white, a zone it was
+  given dashed. Off until turned on, then kept on for the next photos and the
+  next time. With the points shown, Z zooms to 100% where the camera focused.
+  The info panel says what was in focus and how the camera was set ("1 of 9
+  in focus · Single point"), or that it was focused by hand, with no point
+  drawn; a photo whose file says nothing says so.
+  Read from the maker's note of Canon cameras (EOS DSLRs and mirrorless,
+  PowerShots, CRW files), Nikon Z cameras and Nikon DSLRs in live view, Sony,
+  Fujifilm, Olympus and OM System, Panasonic and Leica's Panasonic-made
+  cameras, Pentax and Ricoh in live view, and from the standard EXIF subject
+  area that phones write. DSLRs that only name their points through the
+  viewfinder (older Nikon, Pentax and Sony A-mount bodies) have nothing to
+  show yet. Read with the rest of the metadata when a photo is scanned, so the
+  points show for photos on unplugged drives too; photos already in the
+  catalog are read again, metadata only, when their drive is plugged in. Kept
+  small: a few bytes per photo, each camera's layout of points once.
+- `shoebox-cli focus <file>` and `find-focus`; `photo <id>` gives the focus points.
+
 ## 26.42.5 - 2026-10-18
 
 ### Added

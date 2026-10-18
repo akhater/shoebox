@@ -11,6 +11,7 @@
 
 use crate::catalog::Catalog;
 use crate::db::{self, FILE_MISSING, FILE_PRESENT, PREVIEW_FAILED, PREVIEW_OK, PREVIEW_PENDING, under_sql};
+use crate::focus;
 use crate::formats::{self, Kind};
 use crate::imaging::{self, Meta};
 use crate::organize;
@@ -745,6 +746,7 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
             _ => None,
         };
 
+        let focus = focus::stored(&tx, meta.focus.as_ref())?;
         let result = if let Some(pid) = same_fp.or(edited).or(recaptured) {
             // New content is looked at again by the upright model, unless the
             // user has decided how the photo stands.
@@ -752,12 +754,13 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
                 "UPDATE photos SET fingerprint = ?1, capture_key = ?2, taken_ts = ?3, taken_exif = ?4, make = ?5,
                         model = ?6, lens = COALESCE(?7, lens), width = ?8, height = ?9, iso = ?10, fnumber = ?11, exposure = ?12,
                         focal = ?13, preview_state = ?14, error = ?15, lens_read = ?17,
-                        sideways = CASE WHEN ?18 AND COALESCE(sideways, 0) <> ?19 THEN NULL ELSE sideways END
+                        sideways = CASE WHEN ?18 AND COALESCE(sideways, 0) <> ?19 THEN NULL ELSE sideways END,
+                        focus = ?20, focus_read = ?21
                   WHERE id = ?16",
                 params![
                     fp, ckey, taken_ts, taken_exif, meta.make, meta.model, meta.lens, meta.width, meta.height,
                     meta.iso, meta.fnumber, meta.exposure, meta.focal, PREVIEW_PENDING, error, pid,
-                    imaging::LENS_READER, same_fp.is_none(), db::SIDEWAYS_DECIDED
+                    imaging::LENS_READER, same_fp.is_none(), db::SIDEWAYS_DECIDED, focus, focus::FOCUS_READER
                 ],
             )?;
             // The user's turn stays with the photo.
@@ -766,8 +769,8 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
         } else {
             tx.execute(
                 "INSERT INTO photos (fingerprint, capture_key, kind, taken_ts, taken_exif, make, model, lens, width,
-                        height, iso, fnumber, exposure, focal, preview_state, error, added_at, lens_read)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                        height, iso, fnumber, exposure, focal, preview_state, error, added_at, lens_read, focus, focus_read)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     fp,
                     ckey,
@@ -786,7 +789,9 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
                     PREVIEW_PENDING,
                     error,
                     db::now(),
-                    imaging::LENS_READER
+                    imaging::LENS_READER,
+                    focus,
+                    focus::FOCUS_READER
                 ],
             )?;
             (tx.last_insert_rowid(), Outcome::Added, 0)
