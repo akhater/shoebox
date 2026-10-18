@@ -114,7 +114,7 @@ export const title = (host: ParentNode) => one(host, ".toolbar .title h1").textC
 /** The count next to the title ("12 photos", "Loading…"). */
 export const subtitle = (host: ParentNode) => one(host, ".toolbar .title > .muted").textContent!.trim();
 export const searchBox = (host: ParentNode) => one(host, ".toolbar .search input") as HTMLInputElement;
-export const sortSelect = (host: ParentNode) => one(host, ".toolbar .sort-select") as HTMLSelectElement;
+export const sortSelect = (host: ParentNode) => one(host, ".viewbar .sort-select") as HTMLSelectElement;
 export const scroller = (host: ParentNode) => one(host, ".grid-scroller");
 export const viewer = (host: ParentNode) => host.querySelector<HTMLElement>(".viewer");
 export const backButton = (host: ParentNode) => host.querySelector<HTMLElement>(".toolbar .back-btn");

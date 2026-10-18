@@ -99,6 +99,9 @@ fn a_turn_changes_shoebox_copies_and_never_the_file() {
     // A quarter turn clockwise.
     let r = turn::turn(&cat, &[(id, 1)]).unwrap();
     assert_eq!((r.turned, r.faces), (1, 1), "{r:?}");
+    let t = &r.photos[0];
+    assert_eq!((t.id, t.by, t.turn, t.w, t.h), (id, 1, 1, 240, 320), "the window shows it as it stands now");
+    assert!(t.rev > rev);
     assert_eq!(std::fs::read(&file).unwrap(), original, "the photo file is never touched");
     let p = image::open(&preview).unwrap();
     assert_eq!(p.dimensions(), (240, 320));

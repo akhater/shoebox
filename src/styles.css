@@ -305,6 +305,10 @@ button {
   min-width: 0;
   min-height: 0;
 }
+/* The top bar: where you are, the search, and what to do here. What changes
+   how the photos are shown (filters, order, size) is in the bar under it, and
+   what applies to the selected photos floats over the grid: selecting never
+   changes this bar. */
 .toolbar {
   display: flex;
   align-items: center;
@@ -312,28 +316,44 @@ button {
   gap: 16px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
+  /* Its buttons drop their words when it is narrow (the @container rules below). */
+  container: toolbar / inline-size;
 }
+/* One line, never wrapped: a long name or path is cut short, the count never. */
 .title {
   display: flex;
   align-items: baseline;
   gap: 12px;
+  flex: 0 1 auto;
   min-width: 0;
+  white-space: nowrap;
+}
+.title > * {
+  flex: none;
 }
 .title h1 {
+  flex: 0 1 auto;
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 18px;
   font-weight: 600;
   white-space: nowrap;
 }
 .title .path {
+  flex: 0 1000 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Gives way before the title does, down to its smallest: more of the toolbar
+   when it is wide, so a long name is cut short rather than the search box. */
 .search {
-  flex: 1;
+  flex: 1 100 320px;
   max-width: 520px;
-  min-width: 200px;
+  min-width: max(240px, 22cqi);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -394,25 +414,147 @@ button {
 }
 .tools {
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
 }
-.tools input[type="range"] {
-  width: 120px;
+/* A narrow toolbar: buttons keep their icon, their words are still read out
+   and in the hover text. Scan first, then the person's tools, then Ignore. */
+@container toolbar (max-width: 1290px) {
+  .tool-scan .btn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .btn.tool-scan {
+    padding-inline: 9px;
+  }
+}
+@container toolbar (max-width: 1080px) {
+  .tool-person .btn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .btn.tool-person {
+    padding-inline: 9px;
+  }
+}
+@container toolbar (max-width: 880px) {
+  .tool-ignore .btn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  /* The name before the end of the search box's example. */
+  .search {
+    min-width: 200px;
+  }
+}
+
+/* Under the toolbar, in every photo view: filters on the left; order, overlays
+   and thumbnail size on the right. Long filters wrap, never these. */
+.viewbar {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--border);
+  container: viewbar / inline-size;
+}
+/* Narrower: filters not in use lose their arrow, to stay on one line longer. */
+@container viewbar (max-width: 1180px) {
+  .filter-chip:not(.on) > .lucide-chevron-down {
+    display: none;
+  }
+}
+.view-tools {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+}
+.view-tools input[type="range"] {
+  width: 92px;
+  margin: 0 0 0 6px;
   accent-color: var(--accent);
 }
+.vsep {
+  flex: none;
+  width: 1px;
+  height: 18px;
+  margin: 0 8px;
+  background: var(--border);
+}
 .sort-select {
-  padding: 6px 8px;
+  height: 28px;
+  padding: 0 6px;
   border-radius: 7px;
   border: 1px solid var(--border);
   background: var(--raised);
   color: var(--text);
   font: inherit;
+  font-size: 12px;
   cursor: pointer;
 }
 .sort-select:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* What can be done with the selected photos: floating over the bottom of the
+   grid while any are selected, so nothing above moves. */
+.selection-bar {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  /* Over the photos, under the viewer (20), the filter lists and dialogs. */
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 32px);
+  padding: 5px 6px 5px 14px;
+  border: 1px solid #3a3f48;
+  border-radius: 10px;
+  background: #24272d;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  animation: selection-in 0.12s ease-out;
+}
+@keyframes selection-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+}
+.selection-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.selection-bar .btn,
+.selection-bar .turn-control.on-toolbar {
+  border-color: transparent;
+}
+.selection-bar .btn {
+  padding: 6px 10px;
+}
+.selection-bar .btn:hover:not(:disabled) {
+  background: #31353d;
+}
+.selection-bar .vsep {
+  margin: 0 6px 0 2px;
 }
 .banner {
   display: flex;
@@ -933,6 +1075,18 @@ button {
 .viewer-img {
   cursor: zoom-in;
 }
+/* The photo, turned while a turn is pointed at (and until its turned picture is in). */
+.viewer-turn {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease;
+}
+.viewer-turn.instant {
+  transition: none;
+}
 .viewer-main {
   display: flex;
   flex-direction: column;
@@ -1019,7 +1173,7 @@ button {
   right: 16px;
 }
 .viewer-hint {
-  bottom: 18px;
+  bottom: 72px;
   left: 50%;
   transform: translateX(-50%);
   max-width: 80%;
@@ -1055,11 +1209,25 @@ button {
   border-color: var(--accent);
   opacity: 1;
 }
+/* Selected with it (Shift or Ctrl+click): turned together. */
+.film.picked {
+  border-color: rgba(232, 163, 61, 0.55);
+  opacity: 1;
+}
 .film img {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+/* Drawn turned (Sideways: as suggested), like the grid's tiles. */
+.film {
+  position: relative;
+}
+.film img.turned {
+  position: absolute;
+  left: 50%;
+  top: 50%;
 }
 .film.is-marked img {
   filter: grayscale(0.7) brightness(0.45);
@@ -1103,6 +1271,136 @@ button {
 }
 .viewer-stage:hover .nav {
   opacity: 1;
+}
+/* Turning: "Turn" between a left and a right arrow. On the photo it floats
+   at the bottom like the arrows to the next photo, shown when the mouse is
+   over the photo; in the toolbar it sits with the other buttons. */
+.turn-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  user-select: none;
+}
+.turn-control button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.turn-control button:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.turn-label {
+  padding: 0 3px;
+  color: var(--text);
+  font-size: 13px;
+}
+.turn-control.on-toolbar {
+  height: 32px;
+  padding: 0 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.turn-control.on-toolbar button {
+  width: 28px;
+  height: 26px;
+  border-radius: 5px;
+}
+.turn-control.on-photo {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px;
+  border-radius: 22px;
+  background: rgba(30, 32, 36, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.viewer-stage:hover .turn-control.on-photo,
+.turn-control.on-photo:focus-within {
+  opacity: 1;
+}
+.turn-control.on-photo button {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  color: var(--text);
+}
+.turn-control.on-photo button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+/* Sideways in the viewer: the photo shown as Shoebox would turn it, and the
+   two answers, always there (the review is the task). */
+.turn-decision {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 10px;
+  background: rgba(30, 32, 36, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+/* Sideways: as they are, or as Shoebox would turn them (V). On the photo at the
+   top, and in the banner over the grid. */
+.view-switch {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 9px;
+  background: rgba(30, 32, 36, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+.viewer-stage .view-switch {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.view-switch.in-banner {
+  flex: 0 0 auto;
+  background: var(--raised);
+  border-color: var(--border);
+}
+.view-switch button {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.view-switch button:hover {
+  color: var(--text);
+}
+.view-switch button.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+/* Above the photo: what is shown is not how it stands yet. */
+.viewer-preview {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 80%;
+  padding: 5px 12px;
+  border-radius: 14px;
+  background: rgba(10, 10, 12, 0.82);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
 }
 .nav.prev {
   left: 16px;
@@ -2078,14 +2376,19 @@ button.link:hover {
   color: var(--text);
 }
 
-/* Filters: one bar above the grid */
+/* Filters: the left of the bar above the grid (.viewbar) */
 .filterbar {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 8px 20px;
-  border-bottom: 1px solid var(--border);
+  min-width: 0;
+  min-height: 28px;
+}
+/* A person's "Only new", before the filters it works with. */
+.filterbar .vsep {
+  margin: 0 4px;
 }
 .filter-chip-wrap {
   position: relative;
@@ -2274,7 +2577,11 @@ button.link:hover {
   font: inherit;
   cursor: pointer;
 }
+.title-name {
+  max-width: 100%;
+}
 .title-name svg {
+  flex: none;
   opacity: 0.4;
 }
 .title-name:hover svg {

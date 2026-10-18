@@ -64,12 +64,15 @@ export function fakeBackend() {
   const turns = new Map<number, number>();
   const revs = new Map<number, number>();
   const turn = (ids: number[], by: (id: number) => number) => {
-    for (const id of ids) {
-      turns.set(id, ((((turns.get(id) ?? 0) + by(id)) % 4) + 4) % 4);
+    const photos = ids.map((id) => {
+      const q = ((by(id) % 4) + 4) % 4;
+      turns.set(id, ((turns.get(id) ?? 0) + q) % 4);
       revs.set(id, (revs.get(id) ?? 1) + 1);
       sideways.delete(id);
-    }
-    return { turned: ids.length, faces: 0, toReadAgain: [] };
+      const odd = turns.get(id)! % 2 === 1;
+      return { id, by: q, turn: turns.get(id)!, rev: revs.get(id)!, w: odd ? 1000 : 1500, h: odd ? 1500 : 1000 };
+    });
+    return { turned: photos.length, faces: 0, toReadAgain: [], photos };
   };
   /** Originals Cull couldn't read for a closer look (a test sets them). */
   let unreadable: Shoot["unreadable"] = [];

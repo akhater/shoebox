@@ -6,14 +6,12 @@ import {
   FolderInput,
   FolderOpen,
   ImageOff,
-  RotateCcw,
-  RotateCw,
   Trash2,
   Undo2,
   UserX,
   X,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import {
   api,
   BIN,
@@ -34,6 +32,7 @@ import {
   type PhotoList,
 } from "../api";
 import { TagEditor } from "./Tags";
+import { TurnControl, turnedStyle, usePreviewHandlers } from "./TurnControl";
 import { WhoIsIt } from "./WhoIsIt";
 
 /** Where in the photo a zoom is centred, 0..1 of its width and height. */
@@ -46,7 +45,8 @@ interface Props {
   list: PhotoList;
   index: number;
   onIndex: (i: number) => void;
-  onClose: () => void;
+  /** `picked`: the photos selected in the filmstrip, to keep selected in the grid. */
+  onClose: (picked?: number[]) => void;
   /** Marks the photo for deletion, or unmarks it. */
   onToggleMark: () => void;
   /** A missing photo: takes it out of the catalog (asks first). */
@@ -61,10 +61,22 @@ interface Props {
   everyone: Person[];
   /** A face went to someone else. */
   onFacesChanged: () => void;
-  /** Turns the photo: quarter turns clockwise (-1 counter-clockwise), back to how its file
-   *  shows it, or the way the upright model suggests. Shoebox's copies only, never the file. */
-  onTurn: (by: number | "back" | "suggested") => void;
+  /** Turns photos (those selected in the filmstrip, the one shown among them):
+   *  quarter turns clockwise (-1 counter-clockwise), back to how their files show
+   *  them, or the way the upright model suggests. Shoebox's copies only, never a file. */
+  onTurn: (ids: number[], by: number | "back" | "suggested") => Promise<boolean>;
+  /** In Sideways: each photo's suggested turn (quarter turns clockwise), to turn or leave. */
+  suggested?: Map<number, number> | null;
+  /** Sideways: photos shown as they would be turned (else as they are), as in the grid, and its switch. */
+  showTurned?: boolean;
+  onShowTurned?: (on: boolean) => void;
+  /** Sideways: these photos are fine as they are. */
+  onLeave?: (ids: number[]) => void;
 }
+
+/** The button that makes a turn: "Turn it left", "Turn it upside down"... */
+export const turnItWords = (turn: number) =>
+  ["Leave it", "Turn it right", "Turn it upside down", "Turn it left"][((turn % 4) + 4) % 4];
 
 /** "a quarter turn right", "upside down"... for quarter turns clockwise. */
 export const turnWords = (turn: number) =>
@@ -90,6 +102,10 @@ export function Viewer({
   everyone,
   onFacesChanged,
   onTurn,
+  suggested,
+  showTurned = true,
+  onShowTurned,
+  onLeave,
 }: Props) {
   const tagBox = useRef<HTMLInputElement>(null);
   const id = list.ids[index];
@@ -128,6 +144,106 @@ export function Viewer({
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const [full, setFull] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
+  // Pointing at a turn shows the photo turned that way, before the click; after
+  // it, the photo stays so until its turned picture is in (`waitingFor`: the
+  // revision it had then). `instant`: no animation (the new picture replacing it).
+  const [turnView, setTurnView] = useState<{ q: number; transform: string; instant?: boolean } | null>(null);
+  const waitingFor = useRef<number | null>(null);
+
+  // In Sideways the photo is shown as Shoebox would turn it (or as it is), as in the grid.
+  const proposal = suggested?.get(id) ?? 0;
+  const proposing = proposal !== 0 && showTurned;
+
+  // Photos selected in the filmstrip (Shift+click a range, Ctrl+click one,
+  // Shift+arrows): turning acts on all of them. The one shown is always among them.
+  const [picked, setPicked] = useState<Set<number>>(() => new Set([list.ids[index]]));
+  const anchor = useRef(index);
+  const selection = useMemo(() => list.ids.filter((x) => x === id || picked.has(x)), [list.ids, picked, id]);
+  const many = selection.length > 1;
+  /** Goes to photo `i`: alone, extending a range from the anchor, or adding or removing it. */
+  const go = (i: number, how: "only" | "range" | "toggle" = "only") => {
+    if (i < 0 || i >= list.ids.length) return;
+    const to = list.ids[i];
+    if (how === "range") {
+      const [a, b] = [Math.min(anchor.current, i), Math.max(anchor.current, i)];
+      setPicked(new Set(list.ids.slice(a, b + 1)));
+      onIndex(i);
+    } else if (how === "toggle") {
+      if (!selection.includes(to)) {
+        setPicked(new Set([...selection, to]));
+        anchor.current = i;
+        onIndex(i);
+      } else if (many) {
+        const rest = selection.filter((x) => x !== to);
+        setPicked(new Set(rest));
+        // The one shown left the selection: show the nearest one still in it.
+        if (to === id) {
+          const near = rest.map((x) => list.ids.indexOf(x)).sort((a, b) => Math.abs(a - i) - Math.abs(b - i))[0];
+          onIndex(near);
+        }
+      }
+    } else {
+      setPicked(new Set([to]));
+      anchor.current = i;
+      onIndex(i);
+    }
+  };
+  const close = () => onClose(selection);
+  // Pointing at a turn in a normal view: the selected photos in the filmstrip are drawn turned too.
+  const [hoverQ, setHoverQ] = useState(0);
+
+  /** The photo as it would stand after `q` quarter turns clockwise, fitted to the stage. */
+  const turnedLook = (q: number) => {
+    const el = stage.current;
+    // Its preview's shape; until that is in, its thumbnail's (the same).
+    const size = previewSize ?? (list.w[index] && list.h[index] ? { w: list.w[index], h: list.h[index] } : null);
+    if (!el || !size || q % 4 === 0) return null;
+    let k = 1;
+    if (Math.abs(q) % 2 === 1) {
+      const [bw, bh] = [el.clientWidth - 48, el.clientHeight - 48];
+      const s0 = Math.min(bw / size.w, bh / size.h);
+      k = Math.min(bw / (size.h * s0), bh / (size.w * s0));
+    }
+    return { q, transform: `rotate(${q * 90}deg) scale(${k.toFixed(4)})` };
+  };
+  /** How the photo is shown when no turn is pointed at: as it is, or (Sideways) as suggested. */
+  const restingLook = () => (proposing ? { ...turnedLook(proposal)!, instant: true } : null);
+
+  // Another photo: shown as it is, or as suggested - before it is drawn, never
+  // the other way first. The photo being turned stays as it is shown until its
+  // turned picture is in.
+  const shownFor = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (shownFor.current === id && waitingFor.current != null) return;
+    shownFor.current = id;
+    waitingFor.current = null;
+    setTurnView(restingLook());
+    setHoverQ(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, proposal, showTurned]);
+
+  /** Pointing at a turn (0: pointing away). */
+  const previewTurn = (q: number) => {
+    if (waitingFor.current != null) return;
+    setTurnView(q ? turnedLook(q) : restingLook());
+    if (!suggested) setHoverQ(q);
+  };
+  /** How many quarter turns a turn is. */
+  const quarters = (by: number | "back" | "suggested") =>
+    by === "back" ? -(detail?.turn ?? 0) : by === "suggested" ? (detail?.sideways ?? 0) : by;
+  const turnNow = (by: number | "back" | "suggested") => {
+    if (zoom) setZoom(null);
+    waitingFor.current = rev;
+    setTurnView(turnedLook(quarters(by)));
+    setHoverQ(0);
+    onTurn(selection, by).then((ok) => {
+      if (ok) return;
+      waitingFor.current = null;
+      setTurnView(restingLook());
+    });
+  };
+  /** Hover and focus handlers that show a turn before it is made. */
+  const showing = usePreviewHandlers(previewTurn);
 
   // Another photo, or this one turned (a new revision): its pictures again.
   useEffect(() => {
@@ -191,6 +307,8 @@ export function Viewer({
   /** Click on the fitted photo: zoom in where it was clicked. */
   const onPhotoClick = (e: ReactMouseEvent<HTMLImageElement>) => {
     e.stopPropagation();
+    // Shown as it would be turned (Sideways): 100% is of the photo as it is.
+    if (proposing) return;
     const img = e.currentTarget;
     const r = img.getBoundingClientRect();
     const s = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
@@ -230,7 +348,10 @@ export function Viewer({
       if (who) return; // "Who is this?" is open
       if (e.key === "Escape") {
         if (zoom) setZoom(null);
-        else onClose();
+        else if (many) setPicked(new Set([id])); // first the selection, then the viewer
+        else close();
+      } else if ((e.key === "v" || e.key === "V") && suggested && onShowTurned) {
+        onShowTurned(!showTurned);
       } else if (e.key === "z" || e.key === "Z") {
         if (zoom) setZoom(null);
         else zoomAt({ fx: 0.5, fy: 0.5 });
@@ -238,13 +359,13 @@ export function Viewer({
         e.preventDefault(); // don't type the "t"
         tagBox.current?.focus();
       } else if ((e.key === "r" || e.key === "R") && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        onTurn(e.shiftKey ? -1 : 1);
-      } else if (e.key === "ArrowLeft" && index > 0) onIndex(index - 1);
-      else if (e.key === "ArrowRight" && index < list.ids.length - 1) onIndex(index + 1);
+        turnNow(e.shiftKey ? -1 : 1);
+      } else if (e.key === "ArrowLeft") go(index - 1, e.shiftKey ? "range" : "only");
+      else if (e.key === "ArrowRight") go(index + 1, e.shiftKey ? "range" : "only");
       else if (e.key === "Delete") {
         // Culling: mark and move on; Delete on a marked photo unmarks it and stays.
         onToggleMark();
-        if (!marked && index < list.ids.length - 1) onIndex(index + 1);
+        if (!marked) go(index + 1);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -266,7 +387,7 @@ export function Viewer({
   return (
     <div className="viewer" role="dialog" aria-label="Photo">
       <div className="viewer-main">
-      <div className="viewer-stage" ref={stage} onClick={onClose}>
+      <div className="viewer-stage" ref={stage} onClick={close}>
         {list.preview[index] === 1 && zoom ? (
           <ZoomedPhoto
             src={full ?? sharp ?? previewUrl(id, rev)}
@@ -277,8 +398,13 @@ export function Viewer({
             onExit={() => setZoom(null)}
           />
         ) : list.preview[index] === 1 ? (
-          <>
-            <img className="viewer-under" src={thumbUrl(id, rev)} alt="" style={{ opacity: loaded ? 0 : 1 }} />
+          <div className={`viewer-turn ${turnView?.instant ? "instant" : ""}`} style={turnView ? { transform: turnView.transform } : undefined}>
+            <img
+              className="viewer-under"
+              src={thumbUrl(id, rev)}
+              alt=""
+              style={{ opacity: loaded || waitingFor.current != null ? 0 : 1 }}
+            />
             <img
               className="viewer-img"
               src={previewUrl(id, rev)}
@@ -288,13 +414,18 @@ export function Viewer({
                 setLoaded(true);
                 setPreviewLong(Math.max(w, h));
                 setPreviewSize({ w, h });
+                // The turned picture is in: it replaces the one shown turned.
+                if (waitingFor.current != null && waitingFor.current !== rev) {
+                  waitingFor.current = null;
+                  setTurnView({ q: 0, transform: "none", instant: true });
+                }
               }}
               onClick={onPhotoClick}
               title={reachable ? "Click to zoom to 100% (Z)" : undefined}
             />
             {sharp && <img className="viewer-img sharp" src={sharp} alt="" onClick={onPhotoClick} title="Click to zoom to 100% (Z)" />}
             {spotted && previewSize && <FittedSpot stage={stage} size={previewSize} face={spotted} />}
-          </>
+          </div>
         ) : (
           <div className="viewer-empty">
             <ImageOff size={40} />
@@ -307,33 +438,76 @@ export function Viewer({
           </span>
         )}
         {index > 0 && (
-          <button className="nav prev" onClick={(e) => (e.stopPropagation(), onIndex(index - 1))} aria-label="Previous">
+          <button className="nav prev" onClick={(e) => (e.stopPropagation(), go(index - 1))} aria-label="Previous">
             <ChevronLeft size={28} />
           </button>
         )}
         {index < list.ids.length - 1 && (
-          <button className="nav next" onClick={(e) => (e.stopPropagation(), onIndex(index + 1))} aria-label="Next">
+          <button className="nav next" onClick={(e) => (e.stopPropagation(), go(index + 1))} aria-label="Next">
             <ChevronRight size={28} />
           </button>
+        )}
+        {list.preview[index] === 1 && !zoom && (
+          proposal ? (
+            <div className="turn-decision" onClick={(e) => e.stopPropagation()}>
+              <button className="btn small primary" onClick={() => turnNow("suggested")}>
+                {many ? `Turn ${fmtNum(selection.length)} as Shoebox suggests` : turnItWords(proposal)}
+              </button>
+              <button
+                className="btn small"
+                onClick={() => onLeave?.(selection)}
+                title={many ? "They stand right as they are: never suggested again" : "It stands right as it is: never suggested again"}
+              >
+                {many ? `Leave ${fmtNum(selection.length)} as they are` : "Leave it as it is"}
+              </button>
+            </div>
+          ) : (
+            <TurnControl
+              on="photo"
+              what={many ? `the ${fmtNum(selection.length)} selected photos` : "this photo"}
+              onTurn={turnNow}
+              onPreview={previewTurn}
+            />
+          )
+        )}
+        {proposal !== 0 && onShowTurned && !zoom && (
+          <div className="view-switch" role="group" aria-label="Show" onClick={(e) => e.stopPropagation()}>
+            <button className={showTurned ? "" : "on"} onClick={() => onShowTurned(false)} title="Show it as it is now (V)">
+              As it is
+            </button>
+            <button
+              className={showTurned ? "on" : ""}
+              onClick={() => onShowTurned(true)}
+              title="Show it as Shoebox would turn it; nothing is turned until you say so (V)"
+            >
+              As Shoebox would turn it
+            </button>
+          </div>
+        )}
+        {turnView && turnView.q !== 0 && waitingFor.current == null && !(proposing && turnView.q === proposal) && (
+          <span className="viewer-preview" style={proposal !== 0 ? { top: 56 } : undefined}>
+            Preview: {turnWords(turnView.q)}. Click to turn it; nothing is turned yet.
+          </span>
         )}
         {zoom && <span className="viewer-badge">{full ? "100%" : "Loading full size…"}</span>}
         {hint && <span className="viewer-hint">{hint}</span>}
       </div>
-      <Filmstrip list={list} index={index} onIndex={onIndex} />
+      <Filmstrip
+        list={list}
+        index={index}
+        picked={selection}
+        onPick={(i, e) => go(i, e.shiftKey ? "range" : e.ctrlKey || e.metaKey ? "toggle" : "only")}
+        turnOf={(x) => (showTurned ? (suggested?.get(x) ?? 0) : 0) + (hoverQ && selection.includes(x) ? hoverQ : 0)}
+      />
       </div>
 
       <aside className="viewer-info">
         <div className="viewer-top">
           <span className="muted">
             {index + 1} of {list.ids.length}
+            {many && ` · ${fmtNum(selection.length)} selected`}
           </span>
           <span className="viewer-top-actions">
-            <button className="icon-btn" onClick={() => onTurn(-1)} aria-label="Turn left" title="Turn left (Shift+R)">
-              <RotateCcw size={16} />
-            </button>
-            <button className="icon-btn" onClick={() => onTurn(1)} aria-label="Turn right" title="Turn right (R)">
-              <RotateCw size={16} />
-            </button>
             <button
               className={`btn small ${marked ? "" : "ghost"}`}
               onClick={onToggleMark}
@@ -341,7 +515,7 @@ export function Viewer({
             >
               {marked ? <Undo2 size={14} /> : <Trash2 size={14} />} {marked ? "Unmark" : "Mark for deletion"}
             </button>
-            <button className="icon-btn" onClick={onClose} aria-label="Close" title="Close (Esc)">
+            <button className="icon-btn" onClick={close} aria-label="Close" title="Close (Esc)">
               <X size={18} />
             </button>
           </span>
@@ -396,7 +570,7 @@ export function Viewer({
             {d.turn !== 0 && (
               <p className="note turn-note">
                 Turned {turnWords(d.turn)} in Shoebox; the file is unchanged.{" "}
-                <button className="link" onClick={() => onTurn("back")}>
+                <button className="link" onClick={() => turnNow("back")} {...showing(-d.turn)}>
                   Show it as the file does
                 </button>
               </p>
@@ -404,8 +578,8 @@ export function Viewer({
             {d.sideways > 0 && (
               <p className="note turn-note">
                 It looks sideways: Shoebox would turn it {turnWords(d.sideways)}.{" "}
-                <button className="link" onClick={() => onTurn("suggested")}>
-                  Turn it
+                <button className="link" onClick={() => turnNow("suggested")} {...showing(d.sideways)}>
+                  {turnItWords(d.sideways)}
                 </button>
               </p>
             )}
@@ -689,7 +863,22 @@ function FaceSpot({ face, ref }: { face: PhotoFace; ref?: RefObject<HTMLDivEleme
 
 /** Thumbnails under the photo; the current one stays in the middle. Only a
  *  window of them is drawn, so a list of 100k costs nothing. */
-function Filmstrip({ list, index, onIndex }: { list: PhotoList; index: number; onIndex: (i: number) => void }) {
+function Filmstrip({
+  list,
+  index,
+  picked,
+  onPick,
+  turnOf,
+}: {
+  list: PhotoList;
+  index: number;
+  /** Selected: Shift+click a range, Ctrl+click one. */
+  picked: number[];
+  onPick: (i: number, e: ReactMouseEvent) => void;
+  /** Quarter turns each is drawn turned (Sideways: as suggested, as in the grid; a turn pointed at). */
+  turnOf: (id: number) => number;
+}) {
+  const isPicked = useMemo(() => new Set(picked), [picked]);
   const strip = useRef<HTMLDivElement>(null);
   const n = list.ids.length;
   // The window moves in steps of 40, so it doesn't jump on every photo.
@@ -702,17 +891,28 @@ function Filmstrip({ list, index, onIndex }: { list: PhotoList; index: number; o
 
   const items = [];
   for (let i = from; i < to; i++) {
-    const aspect = list.w[i] && list.h[i] ? Math.min(2.5, Math.max(0.5, list.w[i] / list.h[i])) : 1.5;
+    const q = (((turnOf(list.ids[i]) % 4) + 4) % 4);
+    const [w, h] = q % 2 ? [list.h[i], list.w[i]] : [list.w[i], list.h[i]];
+    const aspect = w && h ? Math.min(2.5, Math.max(0.5, w / h)) : 1.5;
+    const width = Math.round(60 * aspect);
     items.push(
       <button
         key={list.ids[i]}
-        className={`film ${i === index ? "current" : ""} ${list.marked[i] === 1 ? "is-marked" : ""}`}
-        style={{ width: Math.round(60 * aspect) }}
-        onClick={() => onIndex(i)}
+        className={`film ${i === index ? "current" : isPicked.has(list.ids[i]) ? "picked" : ""} ${list.marked[i] === 1 ? "is-marked" : ""}`}
+        style={{ width }}
+        onClick={(e) => onPick(i, e)}
+        title={i === index ? undefined : "Shift+click: select up to here · Ctrl+click: add or remove"}
         tabIndex={-1}
       >
         {list.preview[i] === 1 ? (
-          <img src={thumbUrl(list.ids[i], list.rev[i])} alt="" loading="lazy" draggable={false} />
+          <img
+            src={thumbUrl(list.ids[i], list.rev[i])}
+            alt=""
+            loading="lazy"
+            draggable={false}
+            className={q ? "turned" : undefined}
+            style={q ? turnedStyle(q, width - 4, 56) : undefined}
+          />
         ) : (
           <span className="tile-empty" />
         )}

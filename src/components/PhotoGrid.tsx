@@ -3,12 +3,18 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type Keybo
 import { BIN, fmtDeleted, fmtNum, problemsOf, thumbUrl, type MissingPhoto, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
 import { TimelineRail } from "./TimelineRail";
+import { turnedStyle } from "./TurnControl";
 
 const GAP = 4;
 const PAD = 20;
 const OVERSCAN = 800;
 /** Room kept above/below the current photo when the keyboard scrolls to it. */
 const MARGIN = 24;
+/** Room under the last row, and kept under the current photo: what can be done with
+ *  the selected photos floats there (App's .selection-bar). */
+const BAR = 60;
+/** The empty space after the last row. */
+const END = PAD + BAR;
 
 interface Props {
   list: PhotoList;
@@ -31,6 +37,8 @@ interface Props {
   /** Drawn turned by this many quarter turns clockwise (the turns suggested, to look them over);
    *  the list's sizes are already those of the photos turned. */
   turned?: Map<number, number> | null;
+  /** Quarter turns the selected photos would get: pointing at Turn draws them so, before the click. */
+  previewTurn?: number;
   /** False while something covers the grid (viewer, dialog): keys are theirs. */
   keyboard: boolean;
   /** Changes when the grid should take the keyboard back (viewer closed). */
@@ -50,16 +58,6 @@ interface Props {
 type PhotosRow = Extract<Row, { kind: "photos" }>;
 const centre = (t: Tile) => t.left + t.width / 2;
 
-/** A thumbnail drawn turned clockwise by `turn` quarter turns in a tile `w` x `h`: a quarter
- *  turn lays it out the other way round first, so once turned it fills the tile. */
-function turnedStyle(turn: number, w: number, h: number) {
-  const odd = turn % 2 === 1;
-  return {
-    width: odd ? h : w,
-    height: odd ? w : h,
-    transform: `translate(-50%, -50%) rotate(${turn * 90}deg)`,
-  };
-}
 
 /** Drawn again only when what it shows changes (not for every update of the window). */
 export const PhotoGrid = memo(function PhotoGrid(p: Props) {
@@ -123,8 +121,8 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
     if (!row) return;
     const el = scroller.current;
     if (row.top < el.scrollTop) el.scrollTop = Math.max(0, row.top - MARGIN);
-    else if (row.top + row.height > el.scrollTop + el.clientHeight)
-      el.scrollTop = row.top + row.height - el.clientHeight + MARGIN;
+    else if (row.top + row.height > el.scrollTop + el.clientHeight - BAR)
+      el.scrollTop = row.top + row.height - el.clientHeight + MARGIN + BAR;
   }, [focusIndex, layout, rowOf]);
 
   const frame = useRef(0);
@@ -282,7 +280,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
     () => (flatLabel ? [] : layout.rows.flatMap((r) => (r.kind === "header" ? [{ top: r.top, ts: r.ts }] : []))),
     [layout, flatLabel],
   );
-  const rail = marks.length >= 2 && layout.height + PAD > viewport.height;
+  const rail = marks.length >= 2 && layout.height + END > viewport.height;
 
   return (
     <div className="grid-area">
@@ -293,7 +291,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
         onKeyDown={onKeyDown}
         tabIndex={0}
       >
-        <div className="grid-canvas" style={{ height: layout.height + PAD }}>
+        <div className="grid-canvas" style={{ height: layout.height + END }}>
           {visible.map((row) =>
             row.kind === "header" ? (
               <div key={`h${row.top}`} className="grid-header" style={{ top: row.top, left: PAD, right: PAD }}>
@@ -308,7 +306,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                 const marked = list.marked[t.index] === 1;
                 const inBin = state === 0 ? p.binned?.get(id) : undefined;
                 const problems = problemsOf(list.flags[t.index] ?? 0);
-                const turn = p.turned?.get(id) ?? 0;
+                const turn = ((((p.turned?.get(id) ?? 0) + (p.previewTurn && selected.has(id) ? p.previewTurn : 0)) % 4) + 4) % 4;
                 return (
                   <button
                     key={id}
@@ -394,7 +392,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
       {rail && (
         <TimelineRail
           marks={marks}
-          content={layout.height + PAD}
+          content={layout.height + END}
           viewport={viewport.height}
           scrollTop={viewport.top}
           onScrollTo={(top) => scroller.current && (scroller.current.scrollTop = top)}

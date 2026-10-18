@@ -87,23 +87,25 @@ fn descriptions_made_before_keep_their_photo() {
     add(&cat, &base.join("photos").join("a"));
     let (a, _) = photo(&cat, "IMG_A.JPG");
     // An index from before descriptions carried their photo's fingerprint,
-    // also holding a photo that has left since.
+    // also holding photos that have left since, listed before and after it.
     let db = search_db(&cat);
     db.execute_batch("CREATE TABLE clip (photo_id INTEGER PRIMARY KEY, model TEXT NOT NULL, vec BLOB NOT NULL);")
         .unwrap();
-    for id in [a, a + 1] {
+    for (id, v) in [(0, 1.0f32), (a, 2.0), (a + 1, 3.0)] {
+        let vec: Vec<u8> = std::iter::repeat_n(v.to_le_bytes(), CLIP_DIM).flatten().collect();
         db.execute(
             "INSERT INTO clip (photo_id, model, vec) VALUES (?1, ?2, ?3)",
-            rusqlite::params![id, CLIP_MODEL, vec![0u8; CLIP_DIM * 4]],
+            rusqlite::params![id, CLIP_MODEL, vec],
         )
         .unwrap();
     }
     drop(db);
 
     let index = SearchIndex::open(&cat).unwrap();
-    assert_eq!(index.indexed(), 2);
-    assert_eq!(index.tidy(&cat).unwrap(), 1);
+    assert_eq!(index.indexed(), 3);
+    assert_eq!(index.tidy(&cat).unwrap(), 2);
     assert_eq!(index.indexed(), 1, "the photo still here keeps its description");
+    assert_eq!(index.vectors(&[a])[&a], vec![2.0; CLIP_DIM], "its own");
 
     drop((index, cat));
     let _ = std::fs::remove_dir_all(&base);

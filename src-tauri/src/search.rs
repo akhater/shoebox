@@ -248,17 +248,24 @@ impl SearchIndex {
         drop(db);
         let n = gone.len();
         let gone: HashSet<i64> = gone.into_iter().collect();
+        // Closed up in place: a few turned photos don't copy every description
+        // (hundreds of MB on a big catalog), and those described again fit in
+        // the room left.
         let mut ids = self.ids.write().unwrap();
         let mut vecs = self.vecs.write().unwrap();
-        let (mut new_ids, mut new_vecs) = (Vec::new(), Vec::new());
-        for (i, id) in ids.iter().enumerate() {
-            if !gone.contains(id) {
-                new_ids.push(*id);
-                new_vecs.extend_from_slice(&vecs[i * CLIP_DIM..(i + 1) * CLIP_DIM]);
+        let mut kept = 0;
+        for i in 0..ids.len() {
+            if gone.contains(&ids[i]) {
+                continue;
             }
+            if kept != i {
+                ids[kept] = ids[i];
+                vecs.copy_within(i * CLIP_DIM..(i + 1) * CLIP_DIM, kept * CLIP_DIM);
+            }
+            kept += 1;
         }
-        *ids = new_ids;
-        *vecs = new_vecs;
+        ids.truncate(kept);
+        vecs.truncate(kept * CLIP_DIM);
         Ok(n)
     }
 

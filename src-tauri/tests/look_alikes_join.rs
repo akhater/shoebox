@@ -144,3 +144,55 @@ fn someone_found_twice_becomes_one_person() {
     drop(cat);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// After a look that found nobody more, the next one compares only who
+/// changed since - and still finds what those changes brought together:
+/// two people made one by hand now look like a third, someone whose name
+/// is taken off may join their namesake.
+#[test]
+fn changes_after_a_join_are_still_joined() {
+    let base = std::env::temp_dir().join("shoebox-look-alikes-later");
+    let _ = std::fs::remove_dir_all(&base);
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data.clone()).unwrap();
+    FaceIndex::open(&cat).unwrap();
+    let emb = rusqlite::Connection::open(data.root.join("faces.db")).unwrap();
+    {
+        let db = cat.db();
+        for photo in 1..=5 {
+            db.execute(
+                "INSERT INTO photos (id, fingerprint, kind, added_at) VALUES (?1, ?2, 'image', 0)",
+                rusqlite::params![photo, format!("f{photo}")],
+            )
+            .unwrap();
+        }
+        db.execute_batch(
+            "INSERT INTO people (id, name, ignored, created_at) VALUES
+                (1, NULL, 0, 0), (2, NULL, 0, 0), (3, NULL, 0, 0),
+                (4, 'Ann', 0, 0), (5, 'Ann', 0, 0);",
+        )
+        .unwrap();
+    }
+    // Leaning either way from the third (1 and 2: 0.45 alike to 3, 0.6 apart
+    // from each other); together, the third's very face.
+    let left = face(&cat, &emb, 1, 1, false, 0, 2.0);
+    let right = face(&cat, &emb, 2, 2, false, 0, -2.0);
+    let third = face(&cat, &emb, 3, 3, false, 0, 0.0);
+    // The same person under two names (4, 5): names never move.
+    let ann = face(&cat, &emb, 4, 4, false, 10, 0.0);
+    let ann_again = face(&cat, &emb, 5, 5, false, 10, 0.9);
+
+    let faces = FaceIndex::open(&cat).unwrap();
+    assert_eq!(faces.join_look_alikes(&cat).unwrap(), 0, "nobody alike enough");
+    faces.merge(&cat, &[1, 2], 1).unwrap();
+    assert_eq!(faces.join_look_alikes(&cat).unwrap(), 1);
+    assert_eq!([left, right, third].map(|f| person_of(&cat, f)), [1, 1, 1], "the third joins the two made one");
+    faces.rename(&cat, 5, "").unwrap();
+    assert_eq!(faces.join_look_alikes(&cat).unwrap(), 1);
+    assert_eq!([ann, ann_again].map(|f| person_of(&cat, f)), [4, 4], "unnamed, they join their namesake");
+    assert_eq!(faces.join_look_alikes(&cat).unwrap(), 0, "nothing left to join");
+
+    drop((faces, emb, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}

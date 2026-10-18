@@ -28,6 +28,23 @@ pub struct TurnReport {
     /// Photos whose preview couldn't be turned (damaged or missing): made
     /// again, turned, from their original when its disk is plugged in.
     pub to_read_again: Vec<i64>,
+    /// Each photo turned, as it stands now: the window shows it turned where
+    /// it is, and can undo exactly this turn.
+    pub photos: Vec<Turned>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Turned {
+    pub id: i64,
+    /// This turn, quarter turns clockwise (1-3).
+    pub by: i64,
+    /// How the user has it turned now, on top of what its file says.
+    pub turn: i64,
+    /// Its preview revision and thumbnail size now.
+    pub rev: i64,
+    pub w: i64,
+    pub h: i64,
 }
 
 /// Turns each photo clockwise by its number of quarter turns (negative:
@@ -71,6 +88,12 @@ pub fn turn(cat: &Catalog, turns: &[(i64, i64)]) -> Result<TurnReport> {
         } else {
             db.execute("UPDATE photos SET turning = 0 WHERE id = ?1", [id])?;
         }
+        let (rev, w, h) = db.query_row(
+            "SELECT preview_rev, COALESCE(thumb_w, 0), COALESCE(thumb_h, 0) FROM photos WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        report.photos.push(Turned { id, by, turn: to, rev, w, h });
         drop(db);
         faces::after_turn(cat, &moved)?;
         report.turned += 1;
