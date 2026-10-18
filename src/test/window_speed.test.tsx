@@ -307,7 +307,7 @@ describe("big catalogs stay smooth", () => {
     const host = await renderApp();
     await wait(100);
     const height = () => parseFloat((host.querySelector(".tile") as HTMLElement).style.height);
-    const slider = host.querySelector('.toolbar input[type="range"]') as HTMLInputElement;
+    const slider = host.querySelector('.viewbar input[type="range"]') as HTMLInputElement;
     const before = height();
     await type(slider, "320");
     await wait(50);

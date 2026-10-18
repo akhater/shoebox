@@ -24,6 +24,8 @@ interface Props {
   onChange: (f: Filters) => void;
   /** Everyone, for the names of people ticked but not in this view. */
   people: Person[];
+  /** Before the filters: a switch of the view that narrows it too (a person's "Only new"). */
+  lead?: ReactNode;
 }
 
 const STATUS_LABEL: Record<string, string> = { online: "Plugged in", offline: "Unplugged", missing: "Missing" };
@@ -37,7 +39,7 @@ function withPicked(values: FacetValue[], picked: string[]): FacetValue[] {
 const toggled = (list: string[], v: string) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
 
 /** One bar above the grid: People, Date, Camera, Lens, File type, Status. Each opens a list to tick. */
-export function FilterBar({ facets, filters, onChange, people }: Props) {
+export function FilterBar({ facets, filters, onChange, people, lead }: Props) {
   const [open, setOpen] = useState<ListKey | null>(null);
   const bar = useRef<HTMLDivElement>(null);
   const set = <K extends keyof Filters>(k: K, v: Filters[K]) => onChange({ ...filters, [k]: v });
@@ -131,6 +133,12 @@ export function FilterBar({ facets, filters, onChange, people }: Props) {
 
   return (
     <div className="filterbar" ref={bar}>
+      {lead && (
+        <>
+          {lead}
+          <span className="vsep" />
+        </>
+      )}
       {chip(
         "people",
         "People",

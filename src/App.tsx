@@ -1371,16 +1371,16 @@ export default function App() {
                       onClick={() => setNamingTitle(true)}
                       title="Name this person"
                     >
-                      {personHere.name ?? "Unnamed person"} <Pencil size={14} />
+                      <span className="ellipsis">{personHere.name ?? "Unnamed person"}</span> <Pencil size={14} />
                     </button>
                   </h1>
                   <button
-                    className="btn small ghost"
+                    className="btn small ghost tool-ignore"
                     onClick={() => ignorePerson(personHere)}
                     title={personHere.ignored ? "Show them in People again" : "A stranger: hide them from People"}
                   >
-                    {personHere.ignored ? <Eye size={14} /> : <EyeOff size={14} />}{" "}
-                    {personHere.ignored ? "Show again" : "Ignore"}
+                    {personHere.ignored ? <Eye size={14} /> : <EyeOff size={14} />}
+                    <span className="btn-label">{personHere.ignored ? "Show again" : "Ignore"}</span>
                   </button>
                 </>
               )
@@ -1400,9 +1400,8 @@ export default function App() {
               {view === "photos" && personHere && freshHere > 0 && !newOnlyHere && (
                 <b className="new-count"> · {fmtNum(freshHere)} new</b>
               )}
-              {view === "photos" && selected.size > 1 && ` · ${fmtNum(selected.size)} selected`}
             </span>
-            {"sub" in scopeInfo && scopeInfo.sub && <span className="muted path">{scopeInfo.sub}</span>}
+            {view !== "people" && "sub" in scopeInfo && scopeInfo.sub && <span className="muted path">{scopeInfo.sub}</span>}
           </div>
           {/* On People the box finds a person by name; elsewhere it searches photos in words. */}
           {view === "people" ? (
@@ -1437,85 +1436,22 @@ export default function App() {
           <div className="tools">
             {view === "photos" && scope.kind === "person" && (
               <button
-                className="btn ghost"
+                className="btn ghost tool-person"
                 onClick={() => setStraysFor(peopleList.find((p) => p.id === scope.id) ?? null)}
                 title="Find faces in this person that don't look like them, and move them out"
               >
-                <UserCog size={15} /> Clean up faces…
+                <UserCog size={15} />
+                <span className="btn-label">Clean up faces…</span>
               </button>
             )}
             {view === "photos" && scope.kind === "person" && (
               <button
-                className="btn ghost"
+                className="btn ghost tool-person"
                 onClick={() => setMoreFor(peopleList.find((p) => p.id === scope.id) ?? null)}
                 title="Find faces in other people that look more like them, and move them here"
               >
-                <UserSearch size={15} /> Find more…
-              </button>
-            )}
-            {view === "photos" && scope.kind === "person" && (freshHere > 0 || newOnlyHere) && (
-              <button
-                className={`btn ghost ${newOnlyHere ? "on" : ""}`}
-                aria-pressed={newOnlyHere}
-                onClick={() => setScope(newOnlyHere ? { kind: "person", id: scope.id } : { ...scope, newOnly: true })}
-                title={
-                  newOnlyHere
-                    ? `Show all their photos (${fmtNum(personHere?.photos ?? 0)})`
-                    : "Only the photos they were found in since you last looked at them, to check them quickly"
-                }
-              >
-                <Sparkles size={15} /> Only new
-              </button>
-            )}
-            {view === "photos" && (
-              <select
-                className="sort-select"
-                value={sort}
-                disabled={!!query}
-                onChange={(e) => setSort(e.target.value as Sort)}
-                title={query ? "Search results are in order of best match" : "Order of the photos"}
-              >
-                {SORTS.map(([s, label]) => (
-                  <option key={s} value={s}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            )}
-            {view === "photos" && selected.size > 0 && (
-              <button
-                className="btn ghost"
-                onClick={() => setTagging(shown.ids.filter((id) => selected.has(id)))}
-                title="Tag the selected photos (T)"
-              >
-                <TagIcon size={15} /> Tag{selected.size > 1 ? ` ${fmtNum(selected.size)}` : ""}…
-              </button>
-            )}
-            {view === "photos" && selected.size > 0 && !sidewaysView && (
-              <TurnControl
-                on="toolbar"
-                what={selected.size === 1 ? "the selected photo" : `the ${fmtNum(selected.size)} selected photos`}
-                onTurn={(by) => turnPhotos(shown.ids.filter((id) => selected.has(id)), by)}
-                onPreview={setTurnPreview}
-              />
-            )}
-            {view === "photos" && selected.size > 0 && personHere && (
-              <button
-                className="btn ghost"
-                onClick={() => notThem(personHere)}
-                title={`Not ${personHere.name ?? "this person"} in ${selected.size === 1 ? "this photo" : "these photos"}: say who it is`}
-              >
-                <UserX size={15} /> Not {personHere.name?.split(" ")[0] ?? "them"}…
-              </button>
-            )}
-            {view === "photos" && missingSelected.length > 0 && (
-              <button
-                className="btn ghost"
-                onClick={() => forgetMissing(missingSelected)}
-                title="Take the selected missing photos out of the catalog: for files deleted outside Shoebox"
-              >
-                <ArchiveX size={15} /> Remove{missingSelected.length > 1 ? ` ${fmtNum(missingSelected.length)}` : ""} from
-                catalog…
+                <UserSearch size={15} />
+                <span className="btn-label">Find more…</span>
               </button>
             )}
             {view === "photos" && !empty && (
@@ -1532,7 +1468,57 @@ export default function App() {
                 <ListChecks size={15} /> Cull
               </button>
             )}
-            {view === "photos" && (
+            <button
+              className="btn ghost tool-scan"
+              onClick={() => run(api.rescanAll())}
+              title="Scan every folder whose disk is plugged in"
+            >
+              <RefreshCw size={15} />
+              <span className="btn-label">Scan plugged-in disks</span>
+            </button>
+          </div>
+        </header>
+
+        {view === "photos" && !empty && (
+          <div className="viewbar">
+            <FilterBar
+              facets={facets}
+              filters={filters}
+              onChange={setFilters}
+              people={peopleList}
+              lead={
+                scope.kind === "person" &&
+                (freshHere > 0 || newOnlyHere) && (
+                  <button
+                    className={`filter-chip ${newOnlyHere ? "on" : ""}`}
+                    aria-pressed={newOnlyHere}
+                    onClick={() => setScope(newOnlyHere ? { kind: "person", id: scope.id } : { ...scope, newOnly: true })}
+                    title={
+                      newOnlyHere
+                        ? `Show all their photos (${fmtNum(personHere?.photos ?? 0)})`
+                        : "Only the photos they were found in since you last looked at them, to check them quickly"
+                    }
+                  >
+                    <Sparkles size={14} /> Only new
+                  </button>
+                )
+              }
+            />
+            <div className="view-tools">
+              <select
+                className="sort-select"
+                value={sort}
+                disabled={!!query}
+                onChange={(e) => setSort(e.target.value as Sort)}
+                title={query ? "Search results are in order of best match" : "Order of the photos"}
+              >
+                {SORTS.map(([s, label]) => (
+                  <option key={s} value={s}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <span className="vsep" />
               <button
                 className={`icon-btn type-toggle ${calendar ? "on" : ""}`}
                 onClick={() => {
@@ -1544,8 +1530,6 @@ export default function App() {
               >
                 <CalendarDays size={16} />
               </button>
-            )}
-            {view === "photos" && (
               <button
                 className={`icon-btn type-toggle ${showType ? "on" : ""}`}
                 onClick={() => setShowType(!showType)}
@@ -1554,8 +1538,6 @@ export default function App() {
               >
                 <FileType size={16} />
               </button>
-            )}
-            {view === "photos" && (
               <button
                 className={`icon-btn type-toggle ${showProblems ? "on" : ""}`}
                 onClick={() => setShowProblems(!showProblems)}
@@ -1568,23 +1550,17 @@ export default function App() {
               >
                 <Focus size={16} />
               </button>
-            )}
-            <input
-              type="range"
-              min={110}
-              max={380}
-              value={rowHeight}
-              onChange={(e) => setRowHeight(+e.target.value)}
-              title="Thumbnail size"
-            />
-            <button className="btn ghost" onClick={() => run(api.rescanAll())} title="Scan every folder whose disk is plugged in">
-              <RefreshCw size={15} /> Scan plugged-in disks
-            </button>
+              <span className="vsep" />
+              <input
+                type="range"
+                min={110}
+                max={380}
+                value={rowHeight}
+                onChange={(e) => setRowHeight(+e.target.value)}
+                title="Thumbnail size"
+              />
+            </div>
           </div>
-        </header>
-
-        {view === "photos" && !empty && (
-          <FilterBar facets={facets} filters={filters} onChange={setFilters} people={peopleList} />
         )}
         {view === "photos" && current && filtersOn(filters) && list.ids.length === 0 && (
           <div className="banner">
@@ -1675,26 +1651,6 @@ export default function App() {
               </button>
             </div>
             <span className="grow" />
-            {selected.size > 0 && (
-              <>
-                <button
-                  className="btn small ghost"
-                  onClick={() => leaveUpright(shown.ids.filter((id) => selected.has(id)))}
-                  title="These stand right as they are: never suggested again"
-                >
-                  Leave {selected.size === 1 ? "it" : fmtNum(selected.size)} as {selected.size === 1 ? "it is" : "they are"}
-                </button>
-                <button
-                  className="btn small ghost"
-                  onClick={() => {
-                    turnPhotos(shown.ids.filter((id) => selected.has(id)), "suggested");
-                    setSelected(new Set());
-                  }}
-                >
-                  Turn {selected.size === 1 ? "it" : fmtNum(selected.size)} as shown
-                </button>
-              </>
-            )}
             {shown.ids.length > 0 && (
               <button className="btn small primary" disabled={!current} onClick={() => turnPhotos(shown.ids, "suggested")}>
                 Turn {shown.ids.length === 1 ? "it" : `all ${fmtNum(shown.ids.length)}`} as shown
@@ -1778,6 +1734,77 @@ export default function App() {
               jump={jump}
               onTopPhoto={topPhoto}
             />
+            {/* What can be done with the selected photos: over the grid, so selecting moves nothing. */}
+            {selected.size > 0 && !calendar && (
+              <div className="selection-bar" role="group" aria-label="Selected photos">
+                <span className="selection-count">{fmtNum(selected.size)} selected</span>
+                <button
+                  className="icon-btn"
+                  onClick={() => {
+                    setSelected(new Set());
+                    setGridFocus((n) => n + 1);
+                  }}
+                  aria-label="Clear selection"
+                  title="Select none (Esc)"
+                >
+                  <X size={15} />
+                </button>
+                <span className="vsep" />
+                <button
+                  className="btn ghost"
+                  onClick={() => setTagging(shown.ids.filter((id) => selected.has(id)))}
+                  title="Tag the selected photos (T)"
+                >
+                  <TagIcon size={15} /> Tag…
+                </button>
+                {sidewaysView ? (
+                  <>
+                    <button
+                      className="btn ghost"
+                      onClick={() => leaveUpright(shown.ids.filter((id) => selected.has(id)))}
+                      title="These stand right as they are: never suggested again"
+                    >
+                      Leave {selected.size === 1 ? "it" : fmtNum(selected.size)} as {selected.size === 1 ? "it is" : "they are"}
+                    </button>
+                    <button
+                      className="btn ghost"
+                      onClick={() => {
+                        turnPhotos(shown.ids.filter((id) => selected.has(id)), "suggested");
+                        setSelected(new Set());
+                      }}
+                    >
+                      <TurnPhotoIcon size={15} /> Turn {selected.size === 1 ? "it" : fmtNum(selected.size)} as shown
+                    </button>
+                  </>
+                ) : (
+                  <TurnControl
+                    on="toolbar"
+                    what={selected.size === 1 ? "the selected photo" : `the ${fmtNum(selected.size)} selected photos`}
+                    onTurn={(by) => turnPhotos(shown.ids.filter((id) => selected.has(id)), by)}
+                    onPreview={setTurnPreview}
+                  />
+                )}
+                {personHere && (
+                  <button
+                    className="btn ghost"
+                    onClick={() => notThem(personHere)}
+                    title={`Not ${personHere.name ?? "this person"} in ${selected.size === 1 ? "this photo" : "these photos"}: say who it is`}
+                  >
+                    <UserX size={15} /> Not {personHere.name?.split(" ")[0] ?? "them"}…
+                  </button>
+                )}
+                {missingSelected.length > 0 && (
+                  <button
+                    className="btn ghost"
+                    onClick={() => forgetMissing(missingSelected)}
+                    title="Take the selected missing photos out of the catalog: for files deleted outside Shoebox"
+                  >
+                    <ArchiveX size={15} /> Remove{missingSelected.length > 1 ? ` ${fmtNum(missingSelected.length)}` : ""} from
+                    catalog…
+                  </button>
+                )}
+              </div>
+            )}
             {calendar && (
               <CalendarView
                 list={shown}

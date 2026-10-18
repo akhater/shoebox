@@ -10,6 +10,11 @@ const PAD = 20;
 const OVERSCAN = 800;
 /** Room kept above/below the current photo when the keyboard scrolls to it. */
 const MARGIN = 24;
+/** Room under the last row, and kept under the current photo: what can be done with
+ *  the selected photos floats there (App's .selection-bar). */
+const BAR = 60;
+/** The empty space after the last row. */
+const END = PAD + BAR;
 
 interface Props {
   list: PhotoList;
@@ -116,8 +121,8 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
     if (!row) return;
     const el = scroller.current;
     if (row.top < el.scrollTop) el.scrollTop = Math.max(0, row.top - MARGIN);
-    else if (row.top + row.height > el.scrollTop + el.clientHeight)
-      el.scrollTop = row.top + row.height - el.clientHeight + MARGIN;
+    else if (row.top + row.height > el.scrollTop + el.clientHeight - BAR)
+      el.scrollTop = row.top + row.height - el.clientHeight + MARGIN + BAR;
   }, [focusIndex, layout, rowOf]);
 
   const frame = useRef(0);
@@ -275,7 +280,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
     () => (flatLabel ? [] : layout.rows.flatMap((r) => (r.kind === "header" ? [{ top: r.top, ts: r.ts }] : []))),
     [layout, flatLabel],
   );
-  const rail = marks.length >= 2 && layout.height + PAD > viewport.height;
+  const rail = marks.length >= 2 && layout.height + END > viewport.height;
 
   return (
     <div className="grid-area">
@@ -286,7 +291,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
         onKeyDown={onKeyDown}
         tabIndex={0}
       >
-        <div className="grid-canvas" style={{ height: layout.height + PAD }}>
+        <div className="grid-canvas" style={{ height: layout.height + END }}>
           {visible.map((row) =>
             row.kind === "header" ? (
               <div key={`h${row.top}`} className="grid-header" style={{ top: row.top, left: PAD, right: PAD }}>
@@ -387,7 +392,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
       {rail && (
         <TimelineRail
           marks={marks}
-          content={layout.height + PAD}
+          content={layout.height + END}
           viewport={viewport.height}
           scrollTop={viewport.top}
           onScrollTo={(top) => scroller.current && (scroller.current.scrollTop = top)}

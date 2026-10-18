@@ -109,11 +109,11 @@ describe("turning photos", () => {
     expect(be.turns.get(201)).toBe(0);
   });
 
-  test("Turn in the toolbar turns the selected photos; on the photo in the viewer, that photo", async () => {
+  test("Turn in the selection bar turns the selected photos; on the photo in the viewer, that photo", async () => {
     const be = fakeBackend();
     const host = await renderApp();
     await click(tile(host, 201));
-    await click(host.querySelector('.toolbar .turn-control [aria-label="Turn left"]')!);
+    await click(host.querySelector('.selection-bar .turn-control [aria-label="Turn left"]')!);
     await wait(100);
     expect(turnsAsked(be)).toEqual([{ ids: [201], by: -1 }]);
 
@@ -131,7 +131,7 @@ describe("turning photos", () => {
     const be = fakeBackend();
     const host = await renderApp();
     await click(tile(host, 201));
-    const right = host.querySelector('.toolbar .turn-control [aria-label="Turn right"]')!;
+    const right = host.querySelector('.selection-bar .turn-control [aria-label="Turn right"]')!;
     const img = (id: number) => tile(host, id).querySelector("img")!;
     // Landing on it (or a window opening under the pointer) shows nothing...
     await act(async () => {
@@ -270,7 +270,7 @@ describe("turning photos", () => {
     await wait(50);
     expect(turnsAsked(be)).toEqual([]);
 
-    await click(byText(host, ".banner button", "Leave it as it is"));
+    await click(byText(host, ".selection-bar button", "Leave it as it is"));
     await wait(100);
     expect(turnsAsked(be, "sideways_leave")).toEqual([{ ids: [203] }]);
     expect(gridIds(host)).toEqual([102]);
@@ -279,6 +279,34 @@ describe("turning photos", () => {
     expect(turnsAsked(be, "sideways_accept")).toEqual([{ ids: [102] }]);
     expect(be.turns.get(102)).toBe(1);
     expect(gridIds(host)).toEqual([]);
+  });
+});
+
+describe("selection bar", () => {
+  test("selecting photos changes nothing above the grid; what applies to them floats in the selection bar", async () => {
+    fakeBackend();
+    const host = await renderApp();
+    await click(sidebarItem(host, "People"));
+    await click(host.querySelector(".person-face")!);
+    await wait(100);
+    expect(title(host)).toBe("Ana");
+    const above = () => [...host.querySelectorAll(".toolbar, .viewbar")].map((e) => e.innerHTML).join("");
+    const before = above();
+    expect(host.querySelector(".selection-bar")).toBeNull();
+
+    await click(tile(host, 101));
+    await click(tile(host, 201), { ctrlKey: true });
+    await wait(100);
+    expect(above()).toBe(before);
+    const bar = host.querySelector(".selection-bar")!;
+    expect(bar.querySelector(".selection-count")!.textContent).toBe("2 selected");
+    const names = [...bar.querySelectorAll("button")].map((b) => b.getAttribute("aria-label") ?? b.textContent?.trim());
+    expect(names).toEqual(["Clear selection", "Tag…", "Turn left", "Turn right", "Not Ana…"]);
+
+    await click(bar.querySelector('[aria-label="Clear selection"]')!);
+    expect(host.querySelector(".selection-bar")).toBeNull();
+    expect(tile(host, 101).classList).not.toContain("is-selected");
+    expect(above()).toBe(before);
   });
 });
 
@@ -468,7 +496,7 @@ describe("Cull", () => {
   test("what Cull found shows on thumbnails only when asked", async () => {
     fakeBackend();
     const host = await renderApp();
-    const toggle = () => host.querySelector<HTMLElement>('.toolbar [aria-pressed][title*="what Cull found"]')!;
+    const toggle = () => host.querySelector<HTMLElement>('.viewbar [aria-pressed][title*="what Cull found"]')!;
     expect(tile(host, 204).querySelector(".badge.problem")).toBeNull();
     await click(toggle());
     expect(toggle().getAttribute("aria-pressed")).toBe("true");
@@ -926,11 +954,11 @@ describe("missing photos", () => {
     expect(gridIds(host)).toEqual([]);
   });
 
-  test("selected missing photos can be removed from the toolbar; photos still on a disk can't", async () => {
+  test("selected missing photos can be removed from the selection bar; photos still on a disk can't", async () => {
     const be = fakeBackend();
     be.missing.add(102);
     const host = await renderApp();
-    const remove = () => [...host.querySelectorAll(".toolbar button")].find((b) => /from\s*catalog/.test(b.textContent ?? ""));
+    const remove = () => [...host.querySelectorAll(".selection-bar button")].find((b) => /from\s*catalog/.test(b.textContent ?? ""));
 
     await click(tile(host, 101));
     expect(remove()).toBeUndefined();
