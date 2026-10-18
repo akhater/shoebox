@@ -2,14 +2,18 @@
 
 Newest first. Same format and versioning as Argentum.
 
-## 26.42.5 - unreleased
+## 26.42.5 - 2026-10-18
 
 ### Added
 
 - **Turn photos.** R turns the selected photos a quarter turn right, Shift+R
-  left, in the grid or the viewer (also buttons in the toolbar and the
-  viewer), with Undo. Only the catalog and Shoebox's own copies change: the
-  photo files are never touched, and photos on unplugged drives turn too.
+  left, in the grid or the viewer, with Undo; so does the Turn control, an
+  arrow either side of the word, over the photo in the viewer and in the bar
+  of the selected photos. Resting the pointer on an arrow shows the photos
+  turned that way before anything turns. In the viewer's filmstrip, Shift
+  and Ctrl clicks and Shift+arrows pick several photos to turn at once.
+  Only the catalog and Shoebox's own copies change: the photo files are
+  never touched, and photos on unplugged drives turn too.
   The turn shows everywhere - thumbnails, previews, the viewer's sharp
   picture and 100% zoom, Cull - and stays when previews are rebuilt. Faces
   keep their names, their boxes turned with the photo; the photo is then
@@ -22,8 +26,11 @@ Newest first. Same format and versioning as Argentum.
   a camera without an orientation sensor, or one pointed up or down. They
   wait in **Sideways** in the sidebar, shown turned the way it suggests:
   **Turn all**, or select the ones it got wrong and leave them as they are.
-  Nothing is turned until you say so, and a photo you turned or left is
-  never suggested again. On previews of a real catalog turned four ways it
+  Opened from there, the viewer shows each photo as it would be turned, with
+  "Turn it" and "Leave it as it is", then moves on to the next; V, or the
+  switch above the photos, shows them as they are, to spot the ones it got
+  wrong. Nothing is turned until you say so, and a photo you turned or left
+  is never suggested again. On previews of a real catalog turned four ways it
   found 96% of the turned ones and suggested turning 0.2% of the upright ones
   (it takes a second look at each photo turned the way it suggests).
 - `shoebox-cli turn right|left|half|back`, `sideways`, `upright-check`,
@@ -84,6 +91,24 @@ Newest first. Same format and versioning as Argentum.
   start removes anything in the `logs` folder that hasn't been written to
   for 14 days. `shoebox-cli logs` lists the files and shows the newest
   log's last lines.
+
+### Changed
+
+- **A toolbar that fits.** The bar above the photos keeps the title and its
+  count on one line and the search box wide, whatever the window's width.
+  The filters, the order, the calendar and the thumbnail size are on a
+  second bar, and what applies to the selected photos (Tag, Turn, Not
+  <name>, Remove from catalog) floats over the photos with their count.
+  Selecting photos no longer moves anything above the grid.
+
+### Fixed
+
+- **No slowdown after turning photos.** After each batch of new faces
+  (turning photos finds some), the look for people found twice compared
+  every person with every other: 7 to 14 s of work each time on a catalog
+  of 5,800 people. It now compares only who changed since its last look,
+  in a tenth of a second; the first look after a start still compares
+  everyone. Word search no longer copies all its descriptions after a turn.
 
 ## 26.42.4 - 2026-10-17
 
