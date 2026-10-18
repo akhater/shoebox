@@ -149,7 +149,8 @@ The catalog can be moved to any folder or drive from **Settings**. It is made
 of a small database plus one preview and one thumbnail file per photo, so
 incremental backups stay small. **Settings > Make backup copies now** (or
 `shoebox-cli backup`) writes consistent copies of the databases while Shoebox
-runs, for backup tools such as Kopia.
+runs, for backup tools such as Kopia. Its `logs` folder holds one log per
+day; anything there is removed after 14 days.
 
 ## Command line
 
@@ -168,6 +169,7 @@ shoebox-cli sideways             # photos that look sideways or upside down
 shoebox-cli cull '{}' '{"kind":"root","id":1}'   # a folder as Cull shows it: bursts, problems, suggestions
 shoebox-cli models               # which AI models are installed
 shoebox-cli bench                # how fast the main views are on this catalog and computer
+shoebox-cli logs                 # the log files and the newest log's last lines
 ```
 
 The full list of commands is documented at the top of
