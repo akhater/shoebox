@@ -17,6 +17,7 @@
 
 use crate::catalog::{Catalog, Filters, Scope, Sort};
 use crate::db::PREVIEW_OK;
+use crate::focus::{Focus, Point, State};
 use anyhow::{Result, bail};
 use image::RgbImage;
 use rayon::prelude::*;
@@ -45,7 +46,8 @@ const BLURRY: f32 = 1.2;
 /// Soft at 100%, px (only an original shows it).
 const SOFT_PX: f32 = 2.5;
 /// A face this blurred, while something else in the photo is much sharper,
-/// is out of focus: the focus landed elsewhere. Small (thousandths), and at 100% (px).
+/// is out of focus: the focus landed elsewhere. The spot the camera focused
+/// on too: the focus missed it. Small (thousandths), and at 100% (px).
 const FACE_SOFT: f32 = 2.4;
 const FACE_SOFT_PX: f32 = 6.0;
 const FACE_VS_SHARPEST: f32 = 2.0;
@@ -53,6 +55,10 @@ const FACE_VS_SHARPEST: f32 = 2.0;
 const CLOSE_WHOLE: u32 = 3200;
 /// A face smaller than this share of the long edge isn't the subject.
 const SUBJECT_FACE: f32 = 0.06;
+/// A camera's focus point is measured over at least this share of the long
+/// edge around its middle: a point is smaller than that on a preview, too
+/// small to hold the edges a measure needs.
+const POINT_AREA: f32 = 0.06;
 
 /// Two frames are the same shot when CLIP finds them this alike, their
 /// layouts this alike (and alike to the first frame of the stack), taken this
@@ -82,6 +88,9 @@ pub struct Measures {
     pub face: Option<f32>,
     /// That face's width, px.
     pub face_w: Option<f32>,
+    /// Edge blur where the camera focused, when its file says: the sharpest
+    /// of its points in focus (else of those it was given).
+    pub focus_point: Option<f32>,
     /// Mean brightness, 0..1.
     pub mean: f32,
     /// Spread of brightness (standard deviation), 0..1.
@@ -200,12 +209,18 @@ pub enum Problem {
     FaceSoft,
     Blown,
     Bright,
+    /// Where the camera focused is soft while something else is sharp: the
+    /// focus missed, or the subject moved.
+    FocusMissed,
 }
 
 impl Problem {
-    /// Enough to suggest rejecting the photo. The others are shown, and left to the user.
+    /// Enough to suggest rejecting the photo. The others are shown, and left
+    /// to the user: a focus missed too, since a photographer who focused,
+    /// then turned the camera to frame the shot leaves the point where the
+    /// subject was, not where it is.
     pub fn major(self) -> bool {
-        !matches!(self, Problem::Blown | Problem::Bright)
+        !matches!(self, Problem::Blown | Problem::Bright | Problem::FocusMissed)
     }
 
     /// Its bit in [`flags`]: the grid's badge (the window knows the same bits).
@@ -218,6 +233,7 @@ impl Problem {
             Problem::FaceSoft => 16,
             Problem::Blown => 32,
             Problem::Bright => 64,
+            Problem::FocusMissed => 128,
         }
     }
 }
@@ -276,6 +292,20 @@ pub fn problems(q: &Quality, shot: &Shot) -> Vec<Found> {
         let soft = if close { face_px >= FACE_SOFT_PX } else { face >= FACE_SOFT };
         if soft && face >= FACE_VS_SHARPEST * sharpest.unwrap_or(0.0) {
             add(Problem::FaceSoft, "Face out of focus: the focus landed elsewhere".into());
+        }
+    }
+    // Without a face to judge by, where the camera focused, as faces are
+    // judged; on the closest look that measured it.
+    let (m, m_close) = if best.focus_point.is_some() { (best, close) } else { (p, false) };
+    if best.face.is_none()
+        && let (Some(point), Some(point_px)) = (m.rel(m.focus_point), m.full_px(m.focus_point))
+    {
+        let soft = if m_close { point_px >= FACE_SOFT_PX } else { point >= FACE_SOFT };
+        if soft && point >= FACE_VS_SHARPEST * m.rel(m.sharpest).unwrap_or(0.0) {
+            add(
+                Problem::FocusMissed,
+                "Focus missed: the camera focused here, but the sharpest part is elsewhere".into(),
+            );
         }
     }
     out
@@ -466,8 +496,9 @@ impl FaceBox {
     }
 }
 
-/// Measures a picture (upright, as shown), with the faces found in it.
-pub fn measure(img: &RgbImage, faces: &[FaceBox]) -> Measures {
+/// Measures a picture (upright, as shown), with the faces found in it and
+/// the points its camera focused on ([`aimed`]).
+pub fn measure(img: &RgbImage, faces: &[FaceBox], points: &[Point]) -> Measures {
     let fine = Plane::luma(img);
     let (w, h) = (fine.w, fine.h);
     let long = w.max(h);
@@ -526,6 +557,24 @@ pub fn measure(img: &RgbImage, faces: &[FaceBox]) -> Measures {
         m.face = blur_in(&fine, &coarse, r, FACE_SLOPE, FACE_EDGES);
         m.face_w = Some(x2 - x1);
     }
+
+    // Where the camera focused, measured as a face is: the sharpest of its
+    // points (focus found on one of them is focus found).
+    let least = POINT_AREA * long as f32;
+    m.focus_point = points
+        .iter()
+        .filter_map(|p| {
+            let (cx, cy) = ((p.x + p.w * 0.5) * fw, (p.y + p.h * 0.5) * fh);
+            let (rx, ry) = ((p.w * fw).max(least) * 0.5, (p.h * fh).max(least) * 0.5);
+            let r = Rect {
+                x0: (cx - rx).max(0.0) as usize,
+                x1: (cx + rx).max(0.0) as usize,
+                y0: (cy - ry).max(0.0) as usize,
+                y1: (cy + ry).max(0.0) as usize,
+            };
+            blur_in(&fine, &coarse, r, FACE_SLOPE, FACE_EDGES)
+        })
+        .min_by(|a, b| a.total_cmp(b));
     m
 }
 
@@ -539,6 +588,9 @@ pub struct QualityIndex {
     /// Photos measured while their faces weren't looked for yet: measured
     /// again once they are.
     without_faces: RwLock<HashSet<i64>>,
+    /// Photos measured while the catalog didn't have their focus points
+    /// (read again from an older photo's file since): measured again once it has.
+    without_focus: RwLock<HashSet<i64>>,
     /// Originals a closer look couldn't read, and why (until Shoebox restarts):
     /// Cull stops offering them and says so.
     unreadable: Mutex<HashMap<i64, String>>,
@@ -593,14 +645,20 @@ impl QualityIndex {
                  version     INTEGER NOT NULL,
                  faces       INTEGER NOT NULL,   -- its faces were looked for when measured
                  preview     TEXT    NOT NULL,   -- Measures (JSON)
-                 close       TEXT                -- Measures from the original, when Cull looked closer
+                 close       TEXT,               -- Measures from the original, when Cull looked closer
+                 focus       INTEGER NOT NULL DEFAULT 0  -- the catalog had its focus points when measured
              );",
         )?;
+        // Measures from before Cull knew focus points: the catalog had none for them.
+        if !conn.prepare("SELECT 1 FROM pragma_table_info('quality') WHERE name = 'focus'")?.exists([])? {
+            conn.execute_batch("ALTER TABLE quality ADD COLUMN focus INTEGER NOT NULL DEFAULT 0")?;
+        }
         let threads = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) / 2).clamp(1, 6);
         Ok(Self {
             db: Mutex::new(conn),
             measured: RwLock::new(HashMap::new()),
             without_faces: RwLock::new(HashSet::new()),
+            without_focus: RwLock::new(HashSet::new()),
             unreadable: Mutex::new(HashMap::new()),
             ready: crate::Ready::default(),
             pool: rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|i| format!("cull-{i}")).build()?,
@@ -612,7 +670,8 @@ impl QualityIndex {
         let conn = self.db.lock().unwrap();
         let mut measured = HashMap::new();
         let mut without_faces = HashSet::new();
-        let mut stmt = conn.prepare("SELECT photo_id, faces, preview, close FROM quality WHERE version = ?1")?;
+        let mut without_focus = HashSet::new();
+        let mut stmt = conn.prepare("SELECT photo_id, faces, preview, close, focus FROM quality WHERE version = ?1")?;
         let mut rows = stmt.query([QUALITY_VERSION])?;
         while let Some(r) = rows.next()? {
             let id: i64 = r.get(0)?;
@@ -624,10 +683,14 @@ impl QualityIndex {
             if !r.get::<_, bool>(1)? {
                 without_faces.insert(id);
             }
+            if !r.get::<_, bool>(4)? {
+                without_focus.insert(id);
+            }
         }
         log::info!("cull: {} photos' measures read in {} ms", measured.len(), started.elapsed().as_millis());
         *self.measured.write().unwrap() = measured;
         *self.without_faces.write().unwrap() = without_faces;
+        *self.without_focus.write().unwrap() = without_focus;
         Ok(())
     }
 
@@ -661,12 +724,22 @@ impl QualityIndex {
             .prepare("SELECT photo_id FROM face_scan")?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
+        let pointed: HashSet<i64> = cat
+            .db()
+            .prepare("SELECT id FROM photos WHERE focus IS NOT NULL")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
         let todo: Vec<(i64, String)> = {
             let measured = self.measured.read().unwrap();
             let without = self.without_faces.read().unwrap();
+            let unpointed = self.without_focus.read().unwrap();
             ready
                 .into_iter()
-                .filter(|(id, _)| !measured.contains_key(id) || (without.contains(id) && looked.contains(id)))
+                .filter(|(id, _)| {
+                    !measured.contains_key(id)
+                        || (without.contains(id) && looked.contains(id))
+                        || (unpointed.contains(id) && pointed.contains(id))
+                })
                 .collect()
         };
         if todo.is_empty() {
@@ -684,7 +757,8 @@ impl QualityIndex {
             }
             let ids: Vec<i64> = chunk.iter().map(|(id, _)| *id).collect();
             let faces = faces_of(&cat.db(), &ids)?;
-            let rows: Vec<(i64, String, bool, Measures)> = self.pool.install(|| {
+            let points = points_of(&cat.db(), &ids)?;
+            let rows: Vec<Measured> = self.pool.install(|| {
                 chunk
                     .par_iter()
                     .filter_map(|(id, fp)| {
@@ -695,8 +769,14 @@ impl QualityIndex {
                                 return None;
                             }
                         };
-                        let m = measure(&img, faces.get(id).map(Vec::as_slice).unwrap_or(&[]));
-                        Some((*id, fp.clone(), looked.contains(id), m))
+                        let m = measure(&img, of(&faces, id), of(&points, id));
+                        Some(Measured {
+                            id: *id,
+                            fingerprint: fp.clone(),
+                            faces: looked.contains(id),
+                            focus: points.contains_key(id),
+                            m,
+                        })
                     })
                     .collect()
             });
@@ -709,33 +789,37 @@ impl QualityIndex {
         Ok(())
     }
 
-    fn store_previews(&self, rows: &[(i64, String, bool, Measures)]) -> Result<()> {
+    fn store_previews(&self, rows: &[Measured]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
         {
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
-            for (id, fp, faces, m) in rows {
+            for r in rows {
                 // A photo's closer look stays: it doesn't depend on its preview.
                 tx.execute(
-                    "INSERT INTO quality (photo_id, fingerprint, version, faces, preview) VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT (photo_id) DO UPDATE SET fingerprint = ?2, version = ?3, faces = ?4, preview = ?5,
-                         close = CASE WHEN fingerprint = ?2 AND version = ?3 THEN close END",
-                    params![id, fp, QUALITY_VERSION, faces, serde_json::to_string(m)?],
+                    "INSERT INTO quality (photo_id, fingerprint, version, faces, focus, preview)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT (photo_id) DO UPDATE SET fingerprint = ?2, version = ?3, faces = ?4, focus = ?5,
+                         preview = ?6, close = CASE WHEN fingerprint = ?2 AND version = ?3 THEN close END",
+                    params![r.id, r.fingerprint, QUALITY_VERSION, r.faces, r.focus, serde_json::to_string(&r.m)?],
                 )?;
             }
             tx.commit()?;
         }
         let mut measured = self.measured.write().unwrap();
         let mut without = self.without_faces.write().unwrap();
-        for (id, _, faces, m) in rows {
-            let close = measured.get(id).and_then(|q| q.close);
-            measured.insert(*id, Quality { preview: *m, close });
-            if *faces {
-                without.remove(id);
-            } else {
-                without.insert(*id);
+        let mut unpointed = self.without_focus.write().unwrap();
+        for r in rows {
+            let close = measured.get(&r.id).and_then(|q| q.close);
+            measured.insert(r.id, Quality { preview: r.m, close });
+            for (set, has) in [(&mut *without, r.faces), (&mut *unpointed, r.focus)] {
+                if has {
+                    set.remove(&r.id);
+                } else {
+                    set.insert(r.id);
+                }
             }
         }
         Ok(())
@@ -768,9 +852,11 @@ impl QualityIndex {
         drop(db);
         let mut measured = self.measured.write().unwrap();
         let mut without = self.without_faces.write().unwrap();
+        let mut unpointed = self.without_focus.write().unwrap();
         for id in &gone {
             measured.remove(id);
             without.remove(id);
+            unpointed.remove(id);
         }
         Ok(gone.len())
     }
@@ -802,12 +888,13 @@ impl QualityIndex {
                 break;
             }
             let faces = faces_of(&cat.db(), chunk)?;
+            let points = points_of(&cat.db(), chunk)?;
             let fingerprints = fingerprints_of(&cat.db(), chunk)?;
             let results: Vec<(i64, std::result::Result<Measures, String>)> = self.pool.install(|| {
                 chunk
                     .par_iter()
                     .with_max_len(1)
-                    .map(|id| (*id, closer_look(cat, *id, faces.get(id).map(Vec::as_slice).unwrap_or(&[]))))
+                    .map(|id| (*id, closer_look(cat, *id, of(&faces, id), of(&points, id))))
                     .collect()
             });
             let mut found = Vec::new();
@@ -827,7 +914,7 @@ impl QualityIndex {
                 }
             }
             looked += found.len();
-            self.store_close(cat, &found, &fingerprints, &faces)?;
+            self.store_close(cat, &found, &fingerprints, &faces, &points)?;
             done += chunk.len() as u64;
             progress(done, total);
         }
@@ -841,17 +928,23 @@ impl QualityIndex {
         found: &[(i64, Measures)],
         fingerprints: &HashMap<i64, String>,
         faces: &HashMap<i64, Vec<FaceBox>>,
+        points: &HashMap<i64, Vec<Point>>,
     ) -> Result<()> {
         // A photo not measured from its preview yet is now, so it has a row.
-        let missing: Vec<(i64, String, bool, Measures)> = {
+        let missing: Vec<Measured> = {
             let measured = self.measured.read().unwrap();
             found
                 .iter()
                 .filter(|(id, _)| !measured.contains_key(id))
                 .filter_map(|(id, _)| {
                     let img = image::open(cat.data.preview_path(*id)).ok()?.to_rgb8();
-                    let m = measure(&img, faces.get(id).map(Vec::as_slice).unwrap_or(&[]));
-                    Some((*id, fingerprints.get(id)?.clone(), faces.contains_key(id), m))
+                    Some(Measured {
+                        id: *id,
+                        fingerprint: fingerprints.get(id)?.clone(),
+                        faces: faces.contains_key(id),
+                        focus: points.contains_key(id),
+                        m: measure(&img, of(faces, id), of(points, id)),
+                    })
                 })
                 .collect()
         };
@@ -897,7 +990,10 @@ impl QualityIndex {
             );
         }
         let info = cat.shot_info(&list.ids)?;
-        let faces = faces_of(&*cat.read()?, &list.ids)?;
+        let (faces, mut points) = {
+            let db = cat.read()?;
+            (faces_of(&db, &list.ids)?, points_of(&db, &list.ids)?)
+        };
         let vectors = search.vectors(&list.ids);
         let measured = self.measured.read().unwrap();
         let frames: Vec<FrameIn> = list
@@ -906,6 +1002,7 @@ impl QualityIndex {
             .enumerate()
             .map(|(i, id)| {
                 let info = info.get(id).cloned().unwrap_or_default();
+                let points = points.remove(id).unwrap_or_default();
                 FrameIn {
                     id: *id,
                     taken: list.taken[i],
@@ -922,7 +1019,8 @@ impl QualityIndex {
                         h: list.h[i],
                         rev: list.rev[i],
                         marked: list.marked[i] == 1,
-                        focus: faces.get(id).and_then(|f| focus_of(f)),
+                        focus: first_look(&points, of(&faces, id)),
+                        focus_points: points,
                         ..Default::default()
                     },
                 }
@@ -961,24 +1059,77 @@ impl QualityIndex {
 
 /// A photo's original, read at half its size (whole when small, read-only),
 /// and measured; or why it couldn't be.
-fn closer_look(cat: &Catalog, id: i64, faces: &[FaceBox]) -> std::result::Result<Measures, String> {
+fn closer_look(cat: &Catalog, id: i64, faces: &[FaceBox], points: &[Point]) -> std::result::Result<Measures, String> {
     let (path, kind, turn) = cat.original(id).map_err(|e| format!("{e:#}"))?;
     let full = cat.full_size(id);
     let long = full.map_or(3000, |l| if l <= CLOSE_WHOLE { l } else { l / 2 });
     let loaded = crate::imaging::load(&path, kind, long);
     let full = full.or(loaded.meta.width.max(loaded.meta.height));
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    // Turned as its preview is: the faces' boxes are on the photo as it stands.
+    // Turned as its preview is: the faces' boxes and the focus points are on the photo as it stands.
     let img = crate::imaging::turned(loaded.image.map_err(|e| format!("{name}: {e}"))?, turn).to_rgb8();
-    let mut m = measure(&img, faces);
+    let mut m = measure(&img, faces, points);
     m.full = full.filter(|&f| f >= m.long);
     Ok(m)
 }
 
-/// Where to look at 100% first: the middle of the largest face (0..1 of the picture).
-fn focus_of(faces: &[FaceBox]) -> Option<[f32; 2]> {
-    let f = faces.iter().max_by(|a, b| (a.x2 - a.x1).total_cmp(&(b.x2 - b.x1)))?;
-    Some([(f.x1 + f.x2) * 0.5, (f.y1 + f.y2) * 0.5])
+/// Where to look at 100% first (0..1 of the picture): where the camera
+/// focused, the middle of the point nearest the middle of them all (on a
+/// point, not between two); else the middle of the largest face.
+fn first_look(points: &[Point], faces: &[FaceBox]) -> Option<[f32; 2]> {
+    let mid = |p: &Point| [p.x + p.w * 0.5, p.y + p.h * 0.5];
+    let n = points.len() as f32;
+    let [cx, cy] = points.iter().map(mid).fold([0.0, 0.0], |[x, y], [a, b]| [x + a / n, y + b / n]);
+    let far = |[x, y]: &[f32; 2]| (x - cx) * (x - cx) + (y - cy) * (y - cy);
+    let point = points.iter().map(mid).min_by(|a, b| far(a).total_cmp(&far(b)));
+    point.map(|[x, y]| [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)]).or_else(|| {
+        let f = faces.iter().max_by(|a, b| (a.x2 - a.x1).total_cmp(&(b.x2 - b.x1)))?;
+        Some([(f.x1 + f.x2) * 0.5, (f.y1 + f.y2) * 0.5])
+    })
+}
+
+/// The points a camera focused on: those it found focus at, else those it
+/// was given (chosen). None when it says neither, or was focused by hand.
+pub fn aimed(f: &Focus) -> Vec<Point> {
+    if f.mode == Some("Manual focus") {
+        return Vec::new();
+    }
+    let of = |state| f.points.iter().copied().filter(|p| p.state == state).collect::<Vec<_>>();
+    let found = of(State::InFocus);
+    if found.is_empty() { of(State::Chosen) } else { found }
+}
+
+/// Where the camera focused in these photos, as each is shown ([`aimed`]):
+/// every photo whose file said something about focus, even if not where.
+fn points_of(db: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<Point>>> {
+    let mut out = HashMap::new();
+    let mut stmt = db.prepare(
+        "SELECT id, focus, turn FROM photos WHERE focus IS NOT NULL AND id IN (SELECT value FROM json_each(?1))",
+    )?;
+    let mut rows = stmt.query([serde_json::to_string(ids)?])?;
+    while let Some(r) = rows.next()? {
+        let (blob, turn): (Vec<u8>, i64) = (r.get(1)?, r.get(2)?);
+        let focus = crate::focus::decode(db, &blob)?.map(|f| f.turned(turn));
+        out.insert(r.get(0)?, focus.as_ref().map(aimed).unwrap_or_default());
+    }
+    Ok(out)
+}
+
+/// A photo's own in a map of photos' things (none if it has none).
+fn of<'a, T>(map: &'a HashMap<i64, Vec<T>>, id: &i64) -> &'a [T] {
+    map.get(id).map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// A photo measured from its preview, as `quality.db` keeps it.
+struct Measured {
+    id: i64,
+    /// What its preview showed ([`Catalog::preview_ready`]).
+    fingerprint: String,
+    /// Its faces had been looked for.
+    faces: bool,
+    /// The catalog had its focus points.
+    focus: bool,
+    m: Measures,
 }
 
 /// The faces found in these photos.
@@ -1081,8 +1232,12 @@ pub struct FrameRow {
     pub alike: Option<f32>,
     /// How alike its layout and the frame before's are (-1..1).
     pub framing: Option<f32>,
-    /// Where to look at 100% first: the middle of its largest face (0..1 of the picture).
+    /// Where to look at 100% first (0..1 of the picture): where the camera
+    /// focused, when its file says, else the middle of its largest face.
     pub focus: Option<[f32; 2]>,
+    /// The points the camera focused on (as the photo is shown; see
+    /// [`aimed`]): `focus` is on one of them. Empty when its file doesn't say.
+    pub focus_points: Vec<Point>,
 }
 
 /// An original a closer look couldn't read.
@@ -1307,10 +1462,10 @@ mod tests {
 
     #[test]
     fn edge_blur_is_measured_whatever_the_contrast() {
-        let sharp = measure(&squares(480, 320, 0.0), &[]);
+        let sharp = measure(&squares(480, 320, 0.0), &[], &[]);
         assert!(sharp.sharpest.unwrap() < 0.3, "sharp edges: {sharp:?}");
         for sigma in [1.0f32, 2.0, 3.0] {
-            let m = measure(&squares(480, 320, sigma), &[]);
+            let m = measure(&squares(480, 320, sigma), &[], &[]);
             let got = m.sharpest.unwrap();
             assert!((got - sigma).abs() < 0.35 * sigma, "blurred by {sigma}: measured {got}");
         }
@@ -1319,15 +1474,15 @@ mod tests {
             if (x / 24 + y / 24).is_multiple_of(2) { Rgb([110; 3]) } else { Rgb([175; 3]) }
         });
         let (a, b) = (
-            measure(&image::imageops::blur(&faint, 2.0), &[]).sharpest,
-            measure(&squares(480, 320, 2.0), &[]).sharpest,
+            measure(&image::imageops::blur(&faint, 2.0), &[], &[]).sharpest,
+            measure(&squares(480, 320, 2.0), &[], &[]).sharpest,
         );
         assert!((a.unwrap() - b.unwrap()).abs() < 0.3, "{a:?} vs {b:?}");
     }
 
     #[test]
     fn shake_in_one_direction_counts() {
-        let m = measure(&moved(&squares(480, 320, 0.0), 6), &[]);
+        let m = measure(&moved(&squares(480, 320, 0.0), 6), &[], &[]);
         assert!(m.sharpest.unwrap() > 2.0, "{m:?}");
     }
 
@@ -1338,7 +1493,7 @@ mod tests {
         let soft = squares(480, 320, 4.0);
         let img =
             RgbImage::from_fn(480, 320, |x, y| if x < 160 { *sharp.get_pixel(x, y) } else { *soft.get_pixel(x, y) });
-        let m = measure(&img, &[]);
+        let m = measure(&img, &[], &[]);
         assert!(m.sharpest.unwrap() < 0.5 && m.typical.unwrap() > 2.5, "{m:?}");
         let q = Quality { preview: m, close: None };
         assert!(problems(&q, &Shot::default()).is_empty());
@@ -1348,41 +1503,111 @@ mod tests {
     fn problems_of_typical_frames() {
         // 1080 px previews.
         let shot = Shot { exposure: Some("1/15".into()), focal: Some(200.0) };
-        let blurry = Quality { preview: measure(&squares(1080, 720, 2.5), &[]), close: None };
+        let blurry = Quality { preview: measure(&squares(1080, 720, 2.5), &[], &[]), close: None };
         let found = problems(&blurry, &shot);
         assert_eq!(found.iter().map(|f| f.problem).collect::<Vec<_>>(), [Problem::Blurry]);
         assert!(found[0].text.contains("1/15 s at 200 mm"), "{found:?}");
 
-        let black = Quality { preview: measure(&RgbImage::from_pixel(1080, 720, Rgb([2; 3])), &[]), close: None };
+        let black = Quality { preview: measure(&RgbImage::from_pixel(1080, 720, Rgb([2; 3])), &[], &[]), close: None };
         assert_eq!(problems(&black, &Shot::default())[0].problem, Problem::Empty);
 
-        let sharp = Quality { preview: measure(&squares(1080, 720, 0.0), &[]), close: None };
+        let sharp = Quality { preview: measure(&squares(1080, 720, 0.0), &[], &[]), close: None };
         assert!(problems(&sharp, &Shot::default()).is_empty());
         // Fine on screen, soft at 100%: only the original says so.
-        let soft_close = Quality { preview: sharp.preview, close: Some(measure(&squares(3000, 2000, 2.0), &[])) };
+        let soft_close = Quality { preview: sharp.preview, close: Some(measure(&squares(3000, 2000, 2.0), &[], &[])) };
         assert_eq!(problems(&soft_close, &Shot::default())[0].problem, Problem::Soft);
+    }
+
+    /// A 1080 x 720 preview, sharp but for a patch `x0..x1, y0..y1` (0..1 of
+    /// the picture) whose own edges are blurred.
+    fn soft_patch((x0, y0, x1, y1): (f32, f32, f32, f32)) -> RgbImage {
+        let sharp = squares(1080, 720, 0.0);
+        let soft = squares(1080, 720, 5.0);
+        RgbImage::from_fn(1080, 720, |x, y| {
+            let (fx, fy) = (x as f32 / 1080.0, y as f32 / 720.0);
+            if fx > x0 && fx < x1 && fy > y0 && fy < y1 { *soft.get_pixel(x, y) } else { *sharp.get_pixel(x, y) }
+        })
+    }
+
+    fn found(q: &Quality) -> Vec<Problem> {
+        problems(q, &Shot::default()).iter().map(|f| f.problem).collect()
     }
 
     #[test]
     fn a_face_out_of_focus_is_found() {
         // Sharp background; a smooth face-sized patch whose own edges are blurred.
-        let sharp = squares(1080, 720, 0.0);
-        let soft = squares(1080, 720, 5.0);
         let face = FaceBox { x1: 0.4, y1: 0.3, x2: 0.6, y2: 0.7, kps: None };
-        let img = RgbImage::from_fn(1080, 720, |x, y| {
-            let (fx, fy) = (x as f32 / 1080.0, y as f32 / 720.0);
-            if fx > 0.38 && fx < 0.62 && fy > 0.28 && fy < 0.72 {
-                *soft.get_pixel(x, y)
-            } else {
-                *sharp.get_pixel(x, y)
-            }
-        });
-        let q = Quality { preview: measure(&img, std::slice::from_ref(&face)), close: None };
-        let found: Vec<Problem> = problems(&q, &Shot::default()).iter().map(|f| f.problem).collect();
-        assert_eq!(found, [Problem::FaceSoft], "{:?}", q.preview);
+        let img = soft_patch((0.38, 0.28, 0.62, 0.72));
+        let q = Quality { preview: measure(&img, std::slice::from_ref(&face), &[]), close: None };
+        assert_eq!(found(&q), [Problem::FaceSoft], "{:?}", q.preview);
         // The same face in focus: nothing to say.
-        let ok = Quality { preview: measure(&sharp, &[face]), close: None };
+        let ok = Quality { preview: measure(&squares(1080, 720, 0.0), &[face], &[]), close: None };
         assert!(problems(&ok, &Shot::default()).is_empty());
+    }
+
+    /// One of the camera's points, 0.04 x 0.06 of the picture, its middle at (`x`, `y`).
+    fn point(x: f32, y: f32, state: State) -> Point {
+        Point { x: x - 0.02, y: y - 0.03, w: 0.04, h: 0.06, state }
+    }
+
+    #[test]
+    fn a_focus_point_out_of_focus_is_found() {
+        // The camera found focus in the middle of a soft patch; the rest is sharp.
+        let img = soft_patch((0.6, 0.3, 0.9, 0.7));
+        let missed = Quality { preview: measure(&img, &[], &[point(0.75, 0.5, State::InFocus)]), close: None };
+        assert_eq!(found(&missed), [Problem::FocusMissed], "{:?}", missed.preview);
+        assert_eq!(
+            problems(&missed, &Shot::default())[0].text,
+            "Focus missed: the camera focused here, but the sharpest part is elsewhere"
+        );
+        // Focus found on the sharp part, or on one of two points: nothing to say.
+        let sharp_point = point(0.25, 0.5, State::InFocus);
+        for points in [vec![sharp_point], vec![point(0.75, 0.5, State::InFocus), sharp_point]] {
+            let q = Quality { preview: measure(&img, &[], &points), close: None };
+            assert!(found(&q).is_empty(), "{points:?}: {:?}", q.preview);
+        }
+        // A face decides over the camera's point: here it is sharp, elsewhere.
+        let face = FaceBox { x1: 0.1, y1: 0.3, x2: 0.3, y2: 0.7, kps: None };
+        let q = Quality { preview: measure(&img, &[face], &[point(0.75, 0.5, State::InFocus)]), close: None };
+        assert!(q.preview.face.is_some() && q.preview.focus_point.is_some(), "{:?}", q.preview);
+        assert!(found(&q).is_empty(), "{:?}", q.preview);
+        // A closer look from before Cull knew the points: the preview's measure of them counts.
+        let sharp_close = measure(&squares(3000, 2000, 0.0), &[], &[]);
+        let q = Quality { preview: missed.preview, close: Some(sharp_close) };
+        assert_eq!(found(&q), [Problem::FocusMissed]);
+        // Shown, not enough alone to suggest rejecting: a single frame is left to the user.
+        assert!(!Problem::FocusMissed.major());
+        let mut f = frame(1, 100, None, 0.3);
+        f.quality = Some(missed);
+        let stacks = suggest(vec![f]);
+        assert_eq!(stacks[0].frames[0].suggest, Suggest::None);
+        assert_eq!(stacks[0].frames[0].problems, [Problem::FocusMissed]);
+    }
+
+    #[test]
+    fn the_first_look_at_100_percent_is_where_the_camera_focused() {
+        let near = |got: Option<[f32; 2]>, want: [f32; 2]| {
+            got.is_some_and(|[x, y]| (x - want[0]).abs() < 1e-4 && (y - want[1]).abs() < 1e-4)
+        };
+        let face = FaceBox { x1: 0.6, y1: 0.6, x2: 0.8, y2: 0.8, kps: None };
+        let faces = std::slice::from_ref(&face);
+        // Without points, the largest face; with one, the point.
+        assert!(near(first_look(&[], faces), [0.7, 0.7]));
+        assert!(near(first_look(&[point(0.2, 0.3, State::InFocus)], faces), [0.2, 0.3]));
+        // Points apart: on the one nearest their middle, not between them.
+        let row = [point(0.1, 0.5, State::InFocus), point(0.45, 0.5, State::InFocus), point(0.95, 0.5, State::InFocus)];
+        assert!(near(first_look(&row, &[]), [0.45, 0.5]));
+        assert_eq!(first_look(&[], &[]), None);
+
+        // The points it found focus at, else the ones it was given; nothing when focused by hand.
+        let focus = |mode, points: &[Point]| Focus { mode, points: points.to_vec() };
+        let (other, chosen, in_focus) =
+            (point(0.1, 0.1, State::Other), point(0.3, 0.3, State::Chosen), point(0.5, 0.5, State::InFocus));
+        let zone = Point { x: 0.2, y: 0.2, w: 0.6, h: 0.6, state: State::Area };
+        assert_eq!(aimed(&focus(Some("Single point"), &[other, chosen, in_focus, zone])), [in_focus]);
+        assert_eq!(aimed(&focus(None, &[other, chosen, zone])), [chosen]);
+        assert!(aimed(&focus(None, &[other, zone])).is_empty());
+        assert!(aimed(&focus(Some("Manual focus"), &[chosen])).is_empty());
     }
 
     fn frame(id: i64, taken: i64, vector: Option<Vec<f32>>, blur: f32) -> FrameIn {

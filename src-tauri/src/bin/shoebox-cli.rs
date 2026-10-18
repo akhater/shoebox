@@ -172,7 +172,11 @@
 //!   shoebox-cli cull [filters] [scope] [--closer]   a view as a shoot, as Cull shows it (up to
 //!                                         5,000 photos: a folder or a day): bursts gathered in
 //!                                         stacks, each frame's problems, and Cull's suggestion
-//!                                         (keep, reject, none) with the reasons. --closer first
+//!                                         (keep, reject, none) with the reasons; "focus" is where
+//!                                         to look at 100% first: on "focusPoints", where the
+//!                                         camera focused (when its file says), else on the
+//!                                         largest face; "focusMissed" = soft there while
+//!                                         something else is sharp. --closer first
 //!                                         looks closer at the originals plugged in (read at half
 //!                                         size, read-only), which shows a photo only soft at 100%;
 //!                                         originals it couldn't read are listed under "unreadable", with why

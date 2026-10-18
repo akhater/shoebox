@@ -441,6 +441,50 @@ describe("Cull", () => {
     expect(title(host)).toBe("Trip");
   });
 
+  test("a frame soft where the camera focused shows that point, and Z goes there", async () => {
+    const be = fakeBackend();
+    be.focusOf.set(303, {
+      mode: "Single point",
+      points: [
+        { x: 0.3, y: 0.4, w: 0.04, h: 0.06, state: "other" },
+        { x: 0.7, y: 0.4, w: 0.04, h: 0.06, state: "inFocus" },
+      ],
+    });
+    be.focusMissed.add(303);
+    const host = await renderApp();
+    await openCull(host, "Trip");
+    // The burst's keeper: its file says nothing about focus, Z looks at its face.
+    const photo = () => host.querySelector<HTMLElement>(".cull-photo")!;
+    expect(photo().title).toBe("Click: 100% here (Z: on the face)");
+    expect(photo().querySelector(".focus-points")).toBeNull();
+
+    await key(document.body, "ArrowDown");
+    await wait(20);
+    expect(cullPhoto(host)).toBe(303);
+    expect(host.querySelector(".cull-suggest")!.textContent).toBe("Your call");
+    expect(host.querySelector(".cull-says")!.textContent).toContain("Focus missed: the camera focused here");
+    expect(photo().title).toBe("Click: 100% here (Z: where the camera focused)");
+    // "Here" is drawn: the point it focused on, not the camera's others.
+    const drawn = photo().querySelectorAll(".focus-points .af");
+    expect([...drawn].map((g) => g.getAttribute("class"))).toEqual(["af inFocus"]);
+    expect(photo().querySelector(".focus-points .af rect")!.getAttribute("x")).toBe("70%");
+
+    // At 100%, on the middle of the point (0.72 of the width, 0.43 of the height), drawn there too.
+    await key(document.body, "z");
+    await wait(20);
+    const full = host.querySelector<HTMLImageElement>(".cull-zoom-full")!;
+    Object.defineProperty(full, "naturalWidth", { configurable: true, value: 1500 });
+    Object.defineProperty(full, "naturalHeight", { configurable: true, value: 1000 });
+    await act(async () => {
+      full.dispatchEvent(new Event("load"));
+    });
+    // The spot looked at is in the middle of the box.
+    const box = host.querySelector<HTMLElement>(".cull-zoom")!;
+    expect(parseFloat(full.style.left)).toBeCloseTo(box.clientWidth / 2 - 0.72 * 1500);
+    expect(parseFloat(full.style.top)).toBeCloseTo(box.clientHeight / 2 - 0.43 * 1000);
+    expect(host.querySelectorAll(".cull-zoom .focus-points .af.inFocus")).toHaveLength(1);
+  });
+
   test("Ctrl or Shift click selects several frames or shots: X and P act on them all", async () => {
     const be = fakeBackend();
     const host = await renderApp();

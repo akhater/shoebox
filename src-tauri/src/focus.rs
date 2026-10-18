@@ -736,8 +736,11 @@ pub fn decode(db: &Connection, blob: &[u8]) -> rusqlite::Result<Option<Focus>> {
     let count = u16::from_le_bytes([blob[6], blob[7]]) as usize;
     let rest = &blob[8..];
     let points = if grid != 0 {
-        let layout: Option<Vec<u8>> =
-            db.query_row("SELECT points FROM focus_grids WHERE id = ?1", [grid], |r| r.get(0)).optional()?;
+        // Kept prepared: a shoot decodes thousands of photos, most of one layout.
+        let layout: Option<Vec<u8>> = db
+            .prepare_cached("SELECT points FROM focus_grids WHERE id = ?1")?
+            .query_row([grid], |r| r.get(0))
+            .optional()?;
         let Some(layout) = layout else { return Ok(None) };
         let mut points: Vec<Point> = layout.as_chunks::<8>().0.iter().map(|b| get_box(b, State::Other)).collect();
         for used in rest.as_chunks::<3>().0.iter().take(count) {

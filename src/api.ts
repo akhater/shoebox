@@ -476,7 +476,7 @@ const deletedFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", tim
 export const fmtDeleted = (ts: number) => deletedFmt.format(new Date(ts * 1000));
 
 /** What Cull can find wrong with a photo; `bit` is its bit in PhotoList.flags. */
-export type Problem = "empty" | "dark" | "blurry" | "soft" | "faceSoft" | "blown" | "bright";
+export type Problem = "empty" | "dark" | "blurry" | "soft" | "faceSoft" | "blown" | "bright" | "focusMissed";
 export const PROBLEMS: { problem: Problem; bit: number; label: string }[] = [
   { problem: "empty", bit: 1, label: "Nothing in it" },
   { problem: "dark", bit: 2, label: "Very dark" },
@@ -485,6 +485,7 @@ export const PROBLEMS: { problem: Problem; bit: number; label: string }[] = [
   { problem: "faceSoft", bit: 16, label: "Face out of focus" },
   { problem: "blown", bit: 32, label: "Highlights blown" },
   { problem: "bright", bit: 64, label: "Very bright" },
+  { problem: "focusMissed", bit: 128, label: "Focus missed" },
 ];
 export const problemsOf = (flags: number) => PROBLEMS.filter((p) => flags & p.bit);
 
@@ -512,8 +513,12 @@ export interface CullFrame {
   alike: number | null;
   /** How alike its layout and the frame before's are (-1..1). */
   framing: number | null;
-  /** Where to look at 100% first: the middle of its largest face (0..1 of the picture). */
+  /** Where to look at 100% first (0..1 of the picture): where the camera focused, when its
+   *  file says, else the middle of its largest face. */
   focus: [number, number] | null;
+  /** The points the camera focused on (those in focus, else those chosen), as the photo is
+   *  shown: `focus` is on one of them. Empty when its file doesn't say. */
+  focusPoints: FocusPoint[];
 }
 /** Frames of the same shot; `keeper` = the one Cull would keep. */
 export interface CullStack {

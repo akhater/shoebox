@@ -79,6 +79,8 @@ export function fakeBackend() {
   };
   /** Originals Cull couldn't read for a closer look (a test sets them). */
   let unreadable: Shoot["unreadable"] = [];
+  /** Frames Cull finds soft where the camera focused (a test sets them, with `focusOf`). */
+  const focusMissed = new Set<number>();
   let people: Person[] = [
     { id: 7, name: "Ana", faces: 3, photos: 3, cover: 1, ignored: false, isNew: false, newPhotos: 0 },
     { id: 8, name: null, faces: 2, photos: 2, cover: 2, ignored: false, isNew: false, newPhotos: 0 },
@@ -200,27 +202,36 @@ export function fakeBackend() {
 
   /**
    * Cull's shoot: in each source, its first two photos are a burst (the
-   * second is sharper and kept), the third is fine, the fourth blurry.
+   * second is sharper and kept), the third is fine, the fourth blurry. A
+   * photo whose file says where the camera focused is looked at there first.
    */
   const shootOf = (ps: Photo[]): Shoot => {
-    const frame = (p: Photo, suggest: CullFrame["suggest"], reasons: string[], problems: Problem[] = []): CullFrame => ({
-      id: p.id,
-      name: `IMG_${p.id}.jpg`,
-      taken: p.taken,
-      state: 2,
-      w: 150,
-      h: 100,
-      rev: 1,
-      marked: marked.has(p.id),
-      suggest,
-      reasons,
-      problems,
-      blur: 0.3,
-      closer: false,
-      alike: null,
-      framing: null,
-      focus: [0.5, 0.3],
-    });
+    const frame = (p: Photo, suggest: CullFrame["suggest"], reasons: string[], problems: Problem[] = []): CullFrame => {
+      const said = focusOf.get(p.id)?.points ?? [];
+      const inFocus = said.filter((f) => f.state === "inFocus");
+      const focusPoints = inFocus.length ? inFocus : said.filter((f) => f.state === "chosen");
+      const missed = focusMissed.has(p.id);
+      const at = focusPoints[0];
+      return {
+        id: p.id,
+        name: `IMG_${p.id}.jpg`,
+        taken: p.taken,
+        state: 2,
+        w: 150,
+        h: 100,
+        rev: 1,
+        marked: marked.has(p.id),
+        suggest: missed && suggest === "keep" ? "none" : suggest,
+        reasons: missed ? [...reasons, "Focus missed: the camera focused here, but the sharpest part is elsewhere"] : reasons,
+        problems: missed ? [...problems, "focusMissed"] : problems,
+        blur: 0.3,
+        closer: false,
+        alike: null,
+        framing: null,
+        focus: at ? [at.x + at.w / 2, at.y + at.h / 2] : [0.5, 0.3],
+        focusPoints,
+      };
+    };
     const stacks: CullStack[] = [];
     for (const p of ps) {
       const n = p.id % 10;
@@ -462,6 +473,7 @@ export function fakeBackend() {
     sideways,
     turns,
     focusOf,
+    focusMissed,
     /** What Cull says it couldn't read. */
     unreadableOriginals: (u: Shoot["unreadable"]) => {
       unreadable = u;

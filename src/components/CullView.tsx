@@ -1,6 +1,17 @@
 import { listen } from "@tauri-apps/api/event";
 import { Check, CheckCheck, LoaderCircle, ScanSearch, Star, Trash2, TriangleAlert, X } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import {
   cull,
   fmtNum,
@@ -12,12 +23,21 @@ import {
   type CullFrame,
   type CullStack,
   type Filters,
+  type Focus,
   type Scope,
   type Shoot,
 } from "../api";
+import { FocusPoints } from "./FocusPoints";
 
 /** Where the photo is looked at, at 100%: the point in the middle of the screen, 0..1 of the photo. */
 type Spot = { x: number; y: number };
+
+/** Where Z looks at 100% first, in words. */
+const firstLook = (f: CullFrame) => (f.focusPoints.length ? "where the camera focused" : f.focus ? "on the face" : "the middle");
+
+/** The camera's points, drawn on a frame whose focus missed them: where "the camera focused here" is. */
+const missedPoints = (f: CullFrame): Focus | null =>
+  f.problems.includes("focusMissed") && f.focusPoints.length ? { mode: null, points: f.focusPoints } : null;
 
 interface Props {
   scope: Scope;
@@ -52,7 +72,8 @@ const range = (a: number, b: number) => Array.from({ length: Math.abs(b - a) + 1
  * trash. Bursts come as stacks with the frame Cull would keep first in line;
  * each frame says what Cull suggests and why. A reject is a mark for
  * deletion: nothing is deleted here. Z or a click shows the frame at 100%
- * from its original, and the next frame at the same spot, to compare sharpness.
+ * from its original (Z where the camera focused, else on the main face), and
+ * the next frame at the same spot, to compare sharpness.
  */
 export const CullView = memo(function CullView({ scope, filters, title, onClose, onChanged, onError }: Props) {
   const [shoot, setShoot] = useState<Shoot | null>(null);
@@ -62,6 +83,8 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
   const [at, setAt] = useState<{ stack: number; frame: number }>({ stack: 0, frame: 0 });
   // The frame looked at, by id: kept when the shoot is reloaded.
   const atId = useRef<number | null>(null);
+  // The frame's picture, fitted (what is drawn on it follows it).
+  const picture = useRef<HTMLImageElement>(null);
   const [closer, setCloser] = useState<CloserProgress | null>(null);
   // At 100%: where. Kept from frame to frame.
   const [zoom, setZoom] = useState<Spot | null>(null);
@@ -266,7 +289,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
     [at, goStack, clearSelection],
   );
 
-  // 100%: Z toggles it, on the main face (or the middle); a click on the photo goes there.
+  // 100%: Z toggles it, where the camera focused (else on the main face, or the middle); a click on the photo goes there.
   const zoomOn = useCallback(() => setZoom(frame?.focus ? { x: frame.focus[0], y: frame.focus[1] } : { x: 0.5, y: 0.5 }), [frame]);
   const clickPhoto = (e: ReactMouseEvent<HTMLDivElement>) => {
     const img = e.currentTarget.querySelector("img");
@@ -395,6 +418,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
   }
 
   const marked = isMarked(frame);
+  const missed = missedPoints(frame);
   const lookable = shoot.canLookCloser.length;
   const chosen = targets();
   const n = several ? ` ${fmtNum(chosen.length)}` : "";
@@ -461,10 +485,19 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
         <ShotList stacks={stacks} current={at.stack} selected={selShots} isMarked={isMarked} onClick={clickShot} />
         <div className="cull-main">
           {zoom ? (
-            <Zoomed frame={frame} spot={zoom} onMove={setZoom} onExit={() => setZoom(null)} />
+            <Zoomed frame={frame} points={missed} spot={zoom} onMove={setZoom} onExit={() => setZoom(null)} />
           ) : (
-            <div className={`cull-photo ${marked ? "rejected" : ""}`} onClick={clickPhoto} title="Click: 100% here (Z: on the face)">
-              <img key={frame.id} src={previewUrl(frame.id, frame.rev)} alt="" draggable={false} />
+            <div
+              className={`cull-photo ${marked ? "rejected" : ""}`}
+              onClick={clickPhoto}
+              title={`Click: 100% here (Z: ${firstLook(frame)})`}
+            >
+              <img key={frame.id} ref={picture} src={previewUrl(frame.id, frame.rev)} alt="" draggable={false} />
+              {missed && (
+                <OnPicture key={frame.id} picture={picture}>
+                  <FocusPoints focus={missed} />
+                </OnPicture>
+              )}
               {marked && (
                 <span className="cull-stamp rejected">
                   <Trash2 size={16} /> Rejected
@@ -552,7 +585,20 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
  * The frame at 100%, from its original (disk plugged in), `spot` in the
  * middle; drag to move, a click without dragging goes back.
  */
-function Zoomed({ frame, spot, onMove, onExit }: { frame: CullFrame; spot: Spot; onMove: (s: Spot) => void; onExit: () => void }) {
+function Zoomed({
+  frame,
+  points,
+  spot,
+  onMove,
+  onExit,
+}: {
+  frame: CullFrame;
+  /** Drawn over the photo. */
+  points: Focus | null;
+  spot: Spot;
+  onMove: (s: Spot) => void;
+  onExit: () => void;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const [boxSize, setBoxSize] = useState({ w: 0, h: 0 });
   // The original's size once its picture is here (for this frame).
@@ -571,6 +617,8 @@ function Zoomed({ frame, spot, onMove, onExit }: { frame: CullFrame; spot: Spot;
   }, []);
 
   const shown = size?.id === frame.id ? size : null;
+  // The original at 100%, the spot looked at in the middle.
+  const placed = shown ? { left: boxSize.w / 2 - spot.x * shown.w, top: boxSize.h / 2 - spot.y * shown.h } : undefined;
   const down = (e: ReactMouseEvent) => {
     drag.current = { x: e.clientX, y: e.clientY, spot, moved: false };
     const move = (m: MouseEvent) => {
@@ -607,8 +655,13 @@ function Zoomed({ frame, spot, onMove, onExit }: { frame: CullFrame; spot: Spot;
           alt=""
           draggable={false}
           onLoad={(e) => setSize({ id: frame.id, w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
-          style={shown ? { left: boxSize.w / 2 - spot.x * shown.w, top: boxSize.h / 2 - spot.y * shown.h } : undefined}
+          style={placed}
         />
+      )}
+      {placed && points && (
+        <div className="cull-on-picture" style={{ ...placed, width: shown?.w, height: shown?.h }}>
+          <FocusPoints focus={points} />
+        </div>
       )}
       {!shown && (
         <span className="cull-zoom-note">
@@ -621,6 +674,31 @@ function Zoomed({ frame, spot, onMove, onExit }: { frame: CullFrame; spot: Spot;
           )}
         </span>
       )}
+    </div>
+  );
+}
+
+/** A box over `picture` where `.cull-photo` fits it, for what is drawn on the photo;
+ *  hidden until the picture is in. */
+function OnPicture({ picture, children }: { picture: RefObject<HTMLImageElement | null>; children: ReactNode }) {
+  const [box, setBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = picture.current;
+    if (!el) return;
+    const measure = () => setBox({ left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth, height: el.offsetHeight });
+    measure();
+    el.addEventListener("load", measure);
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    if (el.parentElement) ro?.observe(el.parentElement);
+    return () => {
+      el.removeEventListener("load", measure);
+      ro?.disconnect();
+    };
+  }, [picture]);
+  return (
+    <div className="cull-on-picture" style={box?.width ? box : { visibility: "hidden" }}>
+      {children}
     </div>
   );
 }

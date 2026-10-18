@@ -12,6 +12,7 @@
 use image::{Rgb, RgbImage};
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::cull::{Problem, QualityIndex, Suggest};
+use shoebox_lib::focus::{self, Focus, Point, State};
 use shoebox_lib::organize;
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::scan_root;
@@ -162,6 +163,87 @@ fn an_original_that_cant_be_read_is_named_and_not_offered_again() {
     assert_eq!(shoot.unreadable.len(), 1);
     assert_eq!((shoot.unreadable[0].id, shoot.unreadable[0].name.as_deref()), (two, Some("IMG_0002.JPG")));
     assert!(!shoot.unreadable[0].reason.is_empty());
+
+    drop((quality, search, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Where the camera focused leads Cull: its first look at 100% goes there,
+/// turned with the photo, and a frame soft there while sharp elsewhere is
+/// found. Measures kept from before Cull knew focus points still open, and a
+/// photo whose points reach the catalog after it was measured is measured again.
+#[test]
+fn the_camera_focus_point_leads_cull() {
+    let base = std::env::temp_dir().join("shoebox-cull-focus");
+    let _ = std::fs::remove_dir_all(&base);
+    let photos = base.join("photos");
+    std::fs::create_dir_all(&photos).unwrap();
+    // Sharp, but for a patch on the right whose own edges are blurred.
+    let tile = |x: u32, y: u32| if (x / 30 + y / 30).is_multiple_of(2) { Rgb([60; 3]) } else { Rgb([190; 3]) };
+    let sharp = RgbImage::from_fn(1200, 800, tile);
+    let soft = image::imageops::blur(&sharp, 6.0);
+    let in_patch = |x: u32, y: u32| (720..1080).contains(&x) && (240..560).contains(&y);
+    RgbImage::from_fn(1200, 800, |x, y| if in_patch(x, y) { *soft.get_pixel(x, y) } else { *sharp.get_pixel(x, y) })
+        .save(photos.join("IMG_0001.JPG"))
+        .unwrap();
+
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data.clone()).unwrap();
+    let root = cat.add_root(&photos).unwrap();
+    scan_root(&cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
+    let id = id_of(&cat, "IMG_0001.JPG");
+    // Measures kept by a Shoebox from before focus points.
+    rusqlite::Connection::open(data.root.join("quality.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE quality (photo_id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL, version INTEGER NOT NULL,
+                                   faces INTEGER NOT NULL, preview TEXT NOT NULL, close TEXT);",
+        )
+        .unwrap();
+
+    let quality = QualityIndex::open(&cat).unwrap();
+    quality.index_pending(&cat, &AtomicBool::new(false), &|_| {}).unwrap();
+    let search = SearchIndex::open(&cat).unwrap();
+    let scope = Scope::Root { id: root };
+    let frame = || quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap().stacks[0].frames[0].clone();
+    let f = frame();
+    assert!(f.problems.is_empty() && f.focus.is_none() && f.focus_points.is_empty(), "{f:?}");
+
+    // Its file's focus points read since (as when its disk is plugged in):
+    // the camera found focus in the middle of the soft patch.
+    let point = Point { x: 0.73, y: 0.47, w: 0.04, h: 0.06, state: State::InFocus };
+    let said = Focus { mode: Some("Single point"), points: vec![point] };
+    {
+        let db = cat.db();
+        let blob = focus::stored(&db, Some(&said)).unwrap();
+        db.execute("UPDATE photos SET focus = ?1 WHERE id = ?2", rusqlite::params![blob, id]).unwrap();
+    }
+    let asked = std::cell::Cell::new(0);
+    quality.index_pending(&cat, &AtomicBool::new(false), &|_| asked.set(asked.get() + 1)).unwrap();
+    assert!(asked.get() > 0, "measured again");
+    let f = frame();
+    assert_eq!(f.problems, [Problem::FocusMissed], "{:?}", quality.report(&cat, id).unwrap().quality);
+    assert_eq!(f.suggest, Suggest::None);
+    assert!(f.reasons[0].starts_with("Focus missed"), "{:?}", f.reasons);
+    let near = |got: Option<[f32; 2]>, (x, y): (f32, f32)| {
+        got.is_some_and(|g| (g[0] - x).abs() < 0.005 && (g[1] - y).abs() < 0.005)
+    };
+    assert!(near(f.focus, (0.75, 0.5)), "{:?}", f.focus);
+    assert_eq!(f.focus_points.len(), 1);
+    assert_eq!(quality.flags(&[id]), [Problem::FocusMissed.bit()]);
+
+    // Opened again: nothing to measure.
+    drop(quality);
+    let quality = QualityIndex::open(&cat).unwrap();
+    asked.set(0);
+    quality.index_pending(&cat, &AtomicBool::new(false), &|_| asked.set(asked.get() + 1)).unwrap();
+    assert_eq!(asked.get(), 0, "nothing new to measure");
+
+    // Turned a quarter clockwise: the point goes with the photo.
+    cat.db().execute("UPDATE photos SET turn = 1 WHERE id = ?1", [id]).unwrap();
+    let f = quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap().stacks[0].frames[0].clone();
+    assert!(near(f.focus, (0.5, 0.75)), "{:?}", f.focus);
 
     drop((quality, search, cat));
     let _ = std::fs::remove_dir_all(&base);

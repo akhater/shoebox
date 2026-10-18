@@ -26,6 +26,15 @@ Newest first. Same format and versioning as Argentum.
   catalog are read again, metadata only, when their drive is plugged in. Kept
   small: a few bytes per photo, each camera's layout of points once.
 - `shoebox-cli focus <file>` and `find-focus`; `photo <id>` gives the focus points.
+- **Cull looks where the camera focused.** Z, its first look at 100%, goes
+  to the point the camera found focus at (else the one it was given), and
+  the face only for photos whose file doesn't say. A new finding, **Focus
+  missed**: the camera's point is soft while something else in the frame is
+  sharp, the point drawn on the photo. Shown and left to you, not suggested
+  for rejection: a photographer who focused, then turned the camera to frame
+  the shot leaves the point where the subject was. Photos measured before
+  are measured again once their focus points are known. `shoebox-cli cull`
+  gives it too.
 
 ## 26.42.5 - 2026-10-18
 
