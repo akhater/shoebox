@@ -13,7 +13,8 @@ Newest first. Same format and versioning as Argentum.
   given dashed. Off until turned on, then kept on for the next photos and the
   next time. With the points shown, Z zooms to 100% where the camera focused.
   The info panel says what was in focus and how the camera was set ("1 of 9
-  in focus · Single point"); a photo whose file says nothing says so.
+  in focus · Single point"), or that it was focused by hand, with no point
+  drawn; a photo whose file says nothing says so.
   Read from the maker's note of Canon cameras (EOS DSLRs and mirrorless,
   PowerShots, CRW files), Nikon Z cameras and Nikon DSLRs in live view, Sony,
   Fujifilm, Olympus and OM System, Panasonic and Leica's Panasonic-made
