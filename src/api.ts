@@ -543,6 +543,19 @@ export interface TurnReport {
   faces: number;
   /** Photos whose preview couldn't be turned: made again, turned, from the original when its disk is plugged in. */
   toReadAgain: number[];
+  /** Each photo turned, as it stands now. */
+  photos: Turned[];
+}
+
+/** A photo just turned: `by` quarter turns clockwise this time (Undo turns it back by as many). */
+export interface Turned {
+  id: number;
+  by: number;
+  /** How it is turned now, on top of what its file says. */
+  turn: number;
+  rev: number;
+  w: number;
+  h: number;
 }
 
 /** Turning photos (catalog only) and the upright model's suggestions. */

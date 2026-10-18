@@ -127,6 +127,31 @@ describe("turning photos", () => {
     expect(viewer(host)).not.toBeNull(); // a click on the control doesn't close the viewer
   });
 
+  test("pointing at Turn shows the selected photos turned that way before the click; Undo turns them back", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(tile(host, 201));
+    const right = host.querySelector('.toolbar .turn-control [aria-label="Turn right"]')!;
+    await act(async () => {
+      right.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }));
+    });
+    const img = (id: number) => tile(host, id).querySelector("img")!;
+    expect(img(201).style.transform).toContain("rotate(90deg)");
+    expect(img(202).style.transform).toBe(""); // not selected
+    await act(async () => {
+      right.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }));
+    });
+    expect(img(201).style.transform).toBe("");
+
+    await click(right);
+    await wait(100);
+    expect(turnsAsked(be)).toEqual([{ ids: [201], by: 1 }]);
+    await click(byText(host, ".statusbar button", "Undo"));
+    await wait(100);
+    expect(turnsAsked(be).at(-1)).toEqual({ ids: [201], by: -1 });
+    expect(be.turns.get(201)).toBe(0);
+  });
+
   test("Sideways shows each photo turned the way Shoebox suggests: leave the wrong ones, turn the rest", async () => {
     const be = fakeBackend();
     be.sideways.set(102, 1);
@@ -150,7 +175,7 @@ describe("turning photos", () => {
     await wait(100);
     expect(turnsAsked(be, "sideways_leave")).toEqual([{ ids: [203] }]);
     expect(gridIds(host)).toEqual([102]);
-    await click(byText(host, ".banner button", "Turn it"));
+    await click(byText(host, ".banner button", "Turn it as shown"));
     await wait(100);
     expect(turnsAsked(be, "sideways_accept")).toEqual([{ ids: [102] }]);
     expect(be.turns.get(102)).toBe(1);

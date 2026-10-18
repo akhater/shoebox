@@ -31,6 +31,8 @@ interface Props {
   /** Drawn turned by this many quarter turns clockwise (the turns suggested, to look them over);
    *  the list's sizes are already those of the photos turned. */
   turned?: Map<number, number> | null;
+  /** Quarter turns the selected photos would get: pointing at Turn draws them so, before the click. */
+  previewTurn?: number;
   /** False while something covers the grid (viewer, dialog): keys are theirs. */
   keyboard: boolean;
   /** Changes when the grid should take the keyboard back (viewer closed). */
@@ -308,7 +310,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                 const marked = list.marked[t.index] === 1;
                 const inBin = state === 0 ? p.binned?.get(id) : undefined;
                 const problems = problemsOf(list.flags[t.index] ?? 0);
-                const turn = p.turned?.get(id) ?? 0;
+                const turn = ((((p.turned?.get(id) ?? 0) + (p.previewTurn && selected.has(id) ? p.previewTurn : 0)) % 4) + 4) % 4;
                 return (
                   <button
                     key={id}

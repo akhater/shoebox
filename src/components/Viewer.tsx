@@ -62,8 +62,12 @@ interface Props {
   onFacesChanged: () => void;
   /** Turns the photo: quarter turns clockwise (-1 counter-clockwise), back to how its file
    *  shows it, or the way the upright model suggests. Shoebox's copies only, never the file. */
-  onTurn: (by: number | "back" | "suggested") => void;
+  onTurn: (by: number | "back" | "suggested") => Promise<boolean>;
 }
+
+/** The button that makes a turn: "Turn it left", "Turn it upside down"... */
+export const turnItWords = (turn: number) =>
+  ["Leave it", "Turn it right", "Turn it upside down", "Turn it left"][((turn % 4) + 4) % 4];
 
 /** "a quarter turn right", "upside down"... for quarter turns clockwise. */
 export const turnWords = (turn: number) =>
@@ -127,6 +131,53 @@ export function Viewer({
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const [full, setFull] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
+  // Pointing at a turn shows the photo turned that way, before the click; after
+  // it, the photo stays so until its turned picture is in (`waitingFor`: the
+  // revision it had then). `instant`: no animation (the new picture replacing it).
+  const [turnView, setTurnView] = useState<{ transform: string; instant?: boolean } | null>(null);
+  const waitingFor = useRef<number | null>(null);
+
+  useEffect(() => {
+    waitingFor.current = null;
+    setTurnView(null);
+  }, [id]);
+
+  /** The photo as it would stand after `q` quarter turns clockwise, fitted to the stage. */
+  const turnedLook = (q: number) => {
+    const el = stage.current;
+    if (!el || !previewSize || q % 4 === 0) return null;
+    let k = 1;
+    if (Math.abs(q) % 2 === 1) {
+      const [bw, bh] = [el.clientWidth - 48, el.clientHeight - 48];
+      const s0 = Math.min(bw / previewSize.w, bh / previewSize.h);
+      k = Math.min(bw / (previewSize.h * s0), bh / (previewSize.w * s0));
+    }
+    return { transform: `rotate(${q * 90}deg) scale(${k.toFixed(4)})` };
+  };
+  /** Pointing at a turn (0: pointing away). */
+  const previewTurn = (q: number) => {
+    if (waitingFor.current == null) setTurnView(q ? turnedLook(q) : null);
+  };
+  /** How many quarter turns a turn is. */
+  const quarters = (by: number | "back" | "suggested") =>
+    by === "back" ? -(detail?.turn ?? 0) : by === "suggested" ? (detail?.sideways ?? 0) : by;
+  const turnNow = (by: number | "back" | "suggested") => {
+    if (zoom) setZoom(null);
+    waitingFor.current = rev;
+    setTurnView(turnedLook(quarters(by)));
+    onTurn(by).then((ok) => {
+      if (ok) return;
+      waitingFor.current = null;
+      setTurnView(null);
+    });
+  };
+  /** Hover and focus handlers that show a turn before it is made. */
+  const showing = (q: number) => ({
+    onMouseEnter: () => previewTurn(q),
+    onMouseLeave: () => previewTurn(0),
+    onFocus: () => previewTurn(q),
+    onBlur: () => previewTurn(0),
+  });
 
   // Another photo, or this one turned (a new revision): its pictures again.
   useEffect(() => {
@@ -237,7 +288,7 @@ export function Viewer({
         e.preventDefault(); // don't type the "t"
         tagBox.current?.focus();
       } else if ((e.key === "r" || e.key === "R") && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        onTurn(e.shiftKey ? -1 : 1);
+        turnNow(e.shiftKey ? -1 : 1);
       } else if (e.key === "ArrowLeft" && index > 0) onIndex(index - 1);
       else if (e.key === "ArrowRight" && index < list.ids.length - 1) onIndex(index + 1);
       else if (e.key === "Delete") {
@@ -276,8 +327,13 @@ export function Viewer({
             onExit={() => setZoom(null)}
           />
         ) : list.preview[index] === 1 ? (
-          <>
-            <img className="viewer-under" src={thumbUrl(id, rev)} alt="" style={{ opacity: loaded ? 0 : 1 }} />
+          <div className={`viewer-turn ${turnView?.instant ? "instant" : ""}`} style={turnView ? { transform: turnView.transform } : undefined}>
+            <img
+              className="viewer-under"
+              src={thumbUrl(id, rev)}
+              alt=""
+              style={{ opacity: loaded || waitingFor.current != null ? 0 : 1 }}
+            />
             <img
               className="viewer-img"
               src={previewUrl(id, rev)}
@@ -287,13 +343,18 @@ export function Viewer({
                 setLoaded(true);
                 setPreviewLong(Math.max(w, h));
                 setPreviewSize({ w, h });
+                // The turned picture is in: it replaces the one shown turned.
+                if (waitingFor.current != null && waitingFor.current !== rev) {
+                  waitingFor.current = null;
+                  setTurnView({ transform: "none", instant: true });
+                }
               }}
               onClick={onPhotoClick}
               title={reachable ? "Click to zoom to 100% (Z)" : undefined}
             />
             {sharp && <img className="viewer-img sharp" src={sharp} alt="" onClick={onPhotoClick} title="Click to zoom to 100% (Z)" />}
             {spotted && previewSize && <FittedSpot stage={stage} size={previewSize} face={spotted} />}
-          </>
+          </div>
         ) : (
           <div className="viewer-empty">
             <ImageOff size={40} />
@@ -315,7 +376,9 @@ export function Viewer({
             <ChevronRight size={28} />
           </button>
         )}
-        {list.preview[index] === 1 && !zoom && <TurnControl on="photo" what="this photo" onTurn={onTurn} />}
+        {list.preview[index] === 1 && !zoom && (
+          <TurnControl on="photo" what="this photo" onTurn={turnNow} onPreview={previewTurn} />
+        )}
         {zoom && <span className="viewer-badge">{full ? "100%" : "Loading full size…"}</span>}
         {hint && <span className="viewer-hint">{hint}</span>}
       </div>
@@ -390,7 +453,7 @@ export function Viewer({
             {d.turn !== 0 && (
               <p className="note turn-note">
                 Turned {turnWords(d.turn)} in Shoebox; the file is unchanged.{" "}
-                <button className="link" onClick={() => onTurn("back")}>
+                <button className="link" onClick={() => turnNow("back")} {...showing(-d.turn)}>
                   Show it as the file does
                 </button>
               </p>
@@ -398,8 +461,8 @@ export function Viewer({
             {d.sideways > 0 && (
               <p className="note turn-note">
                 It looks sideways: Shoebox would turn it {turnWords(d.sideways)}.{" "}
-                <button className="link" onClick={() => onTurn("suggested")}>
-                  Turn it
+                <button className="link" onClick={() => turnNow("suggested")} {...showing(d.sideways)}>
+                  {turnItWords(d.sideways)}
                 </button>
               </p>
             )}

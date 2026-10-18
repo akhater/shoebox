@@ -62,6 +62,7 @@ import {
   SORTS,
   type Sort,
   turnApi,
+  type Turned,
   type TurnReport,
   type UpdateStatus,
   updatesApi,
@@ -644,35 +645,59 @@ export default function App() {
 
   // Turning: only Shoebox's copies change, never a file. A quarter or half turn has Undo
   // (the opposite turn); the grid and viewer show the new pictures once reloaded.
-  const turnPhotos = useLatest((ids: number[], by: number | "back" | "suggested") => {
-    if (!ids.length) return;
+  // Pointing at Turn in the toolbar: the selected thumbnails drawn turned that way (quarter turns).
+  const [turnPreview, setTurnPreview] = useState(0);
+  // The turned photos where they are: their new pictures and shapes at once, so the
+  // grid and the viewer show how they ended up (a reload follows).
+  const showTurned = (photos: Turned[]) => {
+    const at = new Map(photos.map((t) => [t.id, t]));
+    setLoaded((v) => {
+      const l = v.list;
+      const pick = <K extends "rev" | "w" | "h">(k: K) => l[k].map((x, i) => at.get(l.ids[i])?.[k] ?? x);
+      return {
+        ...v,
+        list: { ...l, rev: pick("rev"), w: pick("w"), h: pick("h"), sideways: l.sideways.map((x, i) => (at.has(l.ids[i]) ? 0 : x)) },
+      };
+    });
+  };
+  // Turning: only Shoebox's copies change, never a file. Every turn has Undo: each
+  // photo turned back by exactly as much. Says whether anything turned.
+  const turnPhotos = useLatest((ids: number[], by: number | "back" | "suggested"): Promise<boolean> => {
+    if (!ids.length) return Promise.resolve(false);
     // A few hundred take a while (each preview is turned): say so meanwhile.
     if (ids.length > 20) setMessage({ text: `Turning ${fmtNum(ids.length)} photos…` });
     const call = by === "back" ? turnApi.back(ids) : by === "suggested" ? turnApi.accept(ids) : turnApi.turn(ids, by);
-    run(
-      call.then((r) => {
-        const how = typeof by === "number" ? turnWords(by) : by === "back" ? "back to how the file shows it" : null;
+    return call
+      .then((r) => {
+        const amounts = new Set(r.photos.map((t) => t.by));
+        const how =
+          by === "back" ? "back to how the file shows it" : amounts.size === 1 ? turnWords([...amounts][0]) : null;
+        showTurned(r.photos);
+        setTurnPreview(0);
         setMessage({
           text: turnedText(r, how),
           warn: r.toReadAgain.length > 0,
-          action:
-            typeof by === "number" && r.turned
-              ? {
-                  label: "Undo",
-                  run: () =>
-                    run(
-                      turnApi.turn(ids, -by).then(() => {
-                        setMessage({ text: ids.length === 1 ? "The photo stands as before." : "The photos stand as before." });
-                        refresh();
-                      }),
-                    ),
-                }
-              : undefined,
+          action: r.turned ? { label: "Undo", run: () => undoTurn(r) } : undefined,
         });
+        refresh();
+        return r.turned > 0;
+      })
+      .catch((e) => {
+        setMessage({ text: String(e), warn: true });
+        return false;
+      });
+  });
+  const undoTurn = (r: TurnReport) => {
+    const byAmount = new Map<number, number[]>();
+    for (const t of r.photos) byAmount.set(t.by, [...(byAmount.get(t.by) ?? []), t.id]);
+    const back = [...byAmount].reduce<Promise<unknown>>((p, [by, ids]) => p.then(() => turnApi.turn(ids, -by)), Promise.resolve());
+    run(
+      back.then(() => {
+        setMessage({ text: r.photos.length === 1 ? "The photo stands as before." : "The photos stand as before." });
         refresh();
       }),
     );
-  });
+  };
 
   // Sideways: the photos you say are fine as they are leave it, never suggested again.
   const leaveUpright = (ids: number[]) =>
@@ -1446,6 +1471,7 @@ export default function App() {
                 on="toolbar"
                 what={selected.size === 1 ? "the selected photo" : `the ${fmtNum(selected.size)} selected photos`}
                 onTurn={(by) => turnPhotos(shown.ids.filter((id) => selected.has(id)), by)}
+                onPreview={setTurnPreview}
               />
             )}
             {view === "photos" && selected.size > 0 && personHere && (
@@ -1629,13 +1655,13 @@ export default function App() {
                     setSelected(new Set());
                   }}
                 >
-                  Turn {selected.size === 1 ? "it" : fmtNum(selected.size)}
+                  Turn {selected.size === 1 ? "it" : fmtNum(selected.size)} as shown
                 </button>
               </>
             )}
             {shown.ids.length > 0 && (
               <button className="btn small primary" disabled={!current} onClick={() => turnPhotos(shown.ids, "suggested")}>
-                Turn {shown.ids.length === 1 ? "it" : `all ${fmtNum(shown.ids.length)}`}
+                Turn {shown.ids.length === 1 ? "it" : `all ${fmtNum(shown.ids.length)}`} as shown
               </button>
             )}
           </div>
@@ -1702,6 +1728,7 @@ export default function App() {
               onTag={setTagging}
               onTurn={sidewaysView ? undefined : turnPhotos}
               turned={turnedShown}
+              previewTurn={turnPreview}
               selected={selected}
               binned={inBin}
               keyboard={

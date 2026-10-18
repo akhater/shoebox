@@ -933,6 +933,18 @@ button {
 .viewer-img {
   cursor: zoom-in;
 }
+/* The photo, turned while a turn is pointed at (and until its turned picture is in). */
+.viewer-turn {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease;
+}
+.viewer-turn.instant {
+  transition: none;
+}
 .viewer-main {
   display: flex;
   flex-direction: column;

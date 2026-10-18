@@ -37,18 +37,35 @@ export const TurnPhotoIcon = ({ size = 16, className }: { size?: number; classNa
  * `on="toolbar"`: with the grid's other buttons. `what` names what turns,
  * for the hover text ("this photo", "the 3 selected").
  */
-export function TurnControl({ onTurn, what, on }: { onTurn: (by: number) => void; what: string; on: "photo" | "toolbar" }) {
+export function TurnControl({
+  onTurn,
+  onPreview,
+  what,
+  on,
+}: {
+  onTurn: (by: number) => void;
+  /** Pointing at an arrow (or leaving it, 0): show what it would do. */
+  onPreview?: (by: number) => void;
+  what: string;
+  on: "photo" | "toolbar";
+}) {
   const turn = (by: number) => (e: ReactMouseEvent) => {
     e.stopPropagation(); // on the photo, a click elsewhere closes the viewer
     onTurn(by);
   };
+  const preview = (by: number) => ({
+    onMouseEnter: () => onPreview?.(by),
+    onMouseLeave: () => onPreview?.(0),
+    onFocus: () => onPreview?.(by),
+    onBlur: () => onPreview?.(0),
+  });
   return (
     <div className={`turn-control on-${on}`} role="group" aria-label="Turn" onClick={(e) => e.stopPropagation()}>
-      <button onClick={turn(-1)} aria-label="Turn left" title={`Turn ${what} left (Shift+R)`}>
+      <button onClick={turn(-1)} {...preview(-1)} aria-label="Turn left" title={`Turn ${what} left (Shift+R)`}>
         <TurnIcon dir="left" />
       </button>
       <span className="turn-label">Turn</span>
-      <button onClick={turn(1)} aria-label="Turn right" title={`Turn ${what} right (R)`}>
+      <button onClick={turn(1)} {...preview(1)} aria-label="Turn right" title={`Turn ${what} right (R)`}>
         <TurnIcon dir="right" />
       </button>
     </div>
