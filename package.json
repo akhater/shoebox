@@ -2,7 +2,7 @@
   "name": "shoebox",
   "author": "Antoine Khater",
   "private": true,
-  "version": "26.42.5",
+  "version": "26.43.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
