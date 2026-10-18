@@ -1067,6 +1067,11 @@ button {
   border-color: var(--accent);
   opacity: 1;
 }
+/* Selected with it (Shift or Ctrl+click): turned together. */
+.film.picked {
+  border-color: rgba(232, 163, 61, 0.55);
+  opacity: 1;
+}
 .film img {
   display: block;
   width: 100%;
@@ -1201,6 +1206,43 @@ button {
   border-radius: 10px;
   background: rgba(30, 32, 36, 0.86);
   border: 1px solid rgba(255, 255, 255, 0.07);
+}
+/* Sideways: as they are, or as Shoebox would turn them (V). On the photo at the
+   top, and in the banner over the grid. */
+.view-switch {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 9px;
+  background: rgba(30, 32, 36, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+.viewer-stage .view-switch {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.view-switch.in-banner {
+  flex: 0 0 auto;
+  background: var(--raised);
+  border-color: var(--border);
+}
+.view-switch button {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.view-switch button:hover {
+  color: var(--text);
+}
+.view-switch button.on {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 /* Above the photo: what is shown is not how it stands yet. */
 .viewer-preview {

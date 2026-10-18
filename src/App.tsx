@@ -1066,13 +1066,29 @@ export default function App() {
     () => (loaded.query && !showPossible ? headOf(list, clearCount) : list),
     [list, loaded.query, showPossible, clearCount],
   );
-  // Sideways: each photo drawn turned the way the model suggests (laid out at that shape),
-  // to look them over before turning them.
+  // Sideways: each photo's suggested turn. Its photos are drawn turned that way (laid
+  // out at that shape) to look them over, or as they are: one switch for the grid,
+  // the viewer and its filmstrip (V).
   const sidewaysView = scope.kind === "sideways" && view === "photos";
-  const turnedShown = useMemo(
+  const [asTurned, setAsTurned] = useState(true);
+  const suggestions = useMemo(
     () => (sidewaysView ? new Map(shown.ids.map((id, i) => [id, shown.sideways[i]] as const).filter(([, t]) => t > 0)) : null),
     [sidewaysView, shown],
   );
+  const turnedShown = asTurned ? suggestions : null;
+  // V in Sideways: as they are, or as they would be turned.
+  useEffect(() => {
+    if (!sidewaysView || viewerId != null) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if ((e.key !== "v" && e.key !== "V") || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      setAsTurned((on) => !on);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sidewaysView, viewerId]);
+
   const gridList = useMemo(
     () =>
       turnedShown
@@ -1121,9 +1137,10 @@ export default function App() {
     setSelected(new Set(id == null ? [] : [id]));
   }, [scope, query, filters]);
 
-  const closeViewer = () => {
+  /** Closes the viewer; the photos selected in its filmstrip stay selected in the grid. */
+  const closeViewer = (picked?: number[]) => {
     setFocusId(viewerId);
-    if (viewerId != null) setSelected(new Set([viewerId]));
+    if (viewerId != null) setSelected(new Set(picked?.length ? picked : [viewerId]));
     setViewerId(null);
     setGridFocus((n) => n + 1);
     if (facesChanged.current) {
@@ -1643,9 +1660,20 @@ export default function App() {
           <div className="banner">
             <TurnPhotoIcon size={15} />
             <span>
-              These photos look sideways or upside down, and are shown turned the way Shoebox suggests. Turning changes
-              only Shoebox's copies, never your files. Select the ones it got wrong and leave them as they are.
+              These photos look sideways or upside down. Only Shoebox's copies turn, never your files.
             </span>
+            <div className="view-switch in-banner" role="group" aria-label="Show">
+              <button className={asTurned ? "" : "on"} onClick={() => setAsTurned(false)} title="Show them as they are now (V)">
+                As they are
+              </button>
+              <button
+                className={asTurned ? "on" : ""}
+                onClick={() => setAsTurned(true)}
+                title="Show them as Shoebox would turn them; nothing is turned until you say so (V)"
+              >
+                As Shoebox would turn them
+              </button>
+            </div>
             <span className="grow" />
             {selected.size > 0 && (
               <>
@@ -1789,9 +1817,11 @@ export default function App() {
           onToggleMark={() => setMarked([shown.ids[viewerIndex]], shown.marked[viewerIndex] !== 1)}
           onForget={() => forgetMissing([shown.ids[viewerIndex]])}
           onTagsChanged={refreshSoon}
-          onTurn={(by) => turnPhotos([shown.ids[viewerIndex]], by)}
-          suggested={turnedShown}
-          onLeave={() => leaveUpright([shown.ids[viewerIndex]])}
+          onTurn={(ids, by) => turnPhotos(ids, by)}
+          suggested={suggestions}
+          showTurned={asTurned}
+          onShowTurned={setAsTurned}
+          onLeave={leaveUpright}
           onPerson={(id) => drill({ kind: "person", id })}
           onFolder={goToFolder}
           everyone={peopleList}

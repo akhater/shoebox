@@ -171,21 +171,71 @@ describe("turning photos", () => {
     await wait(100);
     await doubleClick(tile(host, 102));
     await wait(50);
-    const label = () => host.querySelector(".viewer-preview")?.textContent ?? "";
+    const shownAs = () => host.querySelector(".viewer-stage .view-switch button.on")?.textContent ?? "";
     const answer = (text: string) => byText(host, ".turn-decision button", text);
     const film = () => [...host.querySelectorAll<HTMLImageElement>(".filmstrip .film img")].map((i) => i.style.transform);
-    expect(label()).toBe("Shown as Shoebox would turn it: a quarter turn right. Not turned yet.");
+    const photo = () => host.querySelector<HTMLElement>(".viewer-turn")!.style.transform;
+    expect(shownAs()).toBe("As Shoebox would turn it");
     expect(film()).toEqual(["translate(-50%, -50%) rotate(90deg)", "translate(-50%, -50%) rotate(270deg)"]);
+    // V: as they are, then back; the grid follows.
+    await key(document.body, "v");
+    await wait(20);
+    expect(shownAs()).toBe("As it is");
+    expect(film()).toEqual(["", ""]);
+    expect(photo()).toBe("");
+    await key(document.body, "v");
+    await wait(20);
+    expect(shownAs()).toBe("As Shoebox would turn it");
     await click(answer("Turn it right"));
     await wait(100);
     expect(turnsAsked(be, "sideways_accept")).toEqual([{ ids: [102] }]);
     // On to the next one.
     expect(host.querySelector(".viewer-info h2")!.textContent).toBe("IMG_203.jpg");
-    expect(label()).toBe("Shown as Shoebox would turn it: a quarter turn left. Not turned yet.");
+    expect(byText(host, ".turn-decision button", "Turn it left")).toBeTruthy();
     await click(answer("Leave it as it is"));
     await wait(100);
     expect(turnsAsked(be, "sideways_leave")).toEqual([{ ids: [203] }]);
     expect(viewer(host)).toBeNull(); // that was the last one
+  });
+
+  test("several picked in the filmstrip turn together; closing keeps them selected", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await doubleClick(tile(host, 201));
+    await wait(50);
+    const films = () => [...host.querySelectorAll<HTMLElement>(".filmstrip .film")];
+    const at = (id: number) => ALL.indexOf(id);
+    // Shift+click: up to there; Ctrl+click: one more; Shift+arrow: one further.
+    await click(films()[at(203)], { shiftKey: true });
+    await click(films()[at(301)], { ctrlKey: true });
+    expect(host.querySelector(".viewer-top")!.textContent).toMatch(/4 selected/);
+    await key(document.body, "ArrowRight", { shiftKey: true });
+    expect(host.querySelector(".viewer-top")!.textContent).toMatch(/2 selected/); // a range from 301
+    await click(films()[at(201)], { shiftKey: true });
+    expect(host.querySelector(".viewer-top")!.textContent).toMatch(/5 selected/);
+    await key(document.body, "r");
+    await wait(100);
+    expect(turnsAsked(be)).toEqual([{ ids: [201, 202, 203, 204, 301], by: 1 }]);
+    // Escape: first the selection, then the viewer.
+    await key(document.body, "Escape");
+    expect(host.querySelector(".viewer-top")!.textContent).not.toMatch(/selected/);
+    expect(viewer(host)).not.toBeNull();
+    await key(document.body, "Escape");
+    await wait(20);
+    expect(viewer(host)).toBeNull();
+  });
+
+  test("closing the viewer keeps the photos picked in its filmstrip selected", async () => {
+    fakeBackend();
+    const host = await renderApp();
+    await doubleClick(tile(host, 201));
+    await wait(50);
+    const films = [...host.querySelectorAll<HTMLElement>(".filmstrip .film")];
+    await click(films[ALL.indexOf(203)], { shiftKey: true });
+    await click(host.querySelector("[aria-label='Close']")!);
+    await wait(50);
+    expect(viewer(host)).toBeNull();
+    expect([201, 202, 203, 204].map((id) => tile(host, id).classList.contains("is-selected"))).toEqual([true, true, true, false]);
   });
 
   test("everywhere else the viewer shows the photo as it is", async () => {
