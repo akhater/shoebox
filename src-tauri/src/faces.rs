@@ -68,6 +68,15 @@ const GROUPING_RULES: &str = "2";
 /// (`join_look_alikes`).
 const JOIN_RULES: &str = "1";
 const DIM: usize = 512;
+
+/// A person as the look for people found twice saw them: their faces
+/// ([`Averages::digest`]) and whether they may join someone.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Standing {
+    faces: u64,
+    movable: bool,
+}
+
 /// Where ArcFace expects the eyes, nose and mouth corners in its 112x112 input.
 const ARCFACE_DST: [[f32; 2]; 5] =
     [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655], [70.7299, 92.2041]];
@@ -471,6 +480,21 @@ impl Averages {
         Some((sum, faces(k)))
     }
 
+    /// A person's faces in short: their sum, how many, and in which months.
+    /// Any face added, removed or moved changes it.
+    fn digest(&self, person: i64) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        if let Some((sum, n)) = self.life.get(&person) {
+            n.hash(&mut h);
+            sum.iter().for_each(|x| x.to_bits().hash(&mut h));
+        }
+        for (m, (_, n)) in self.months.get(&person).into_iter().flatten() {
+            (m, n).hash(&mut h);
+        }
+        h.finish()
+    }
+
     /// The first and last month of a person's photos with a date.
     fn months_of(&self, person: i64) -> Option<(i64, i64)> {
         let m = self.months.get(&person)?;
@@ -483,8 +507,21 @@ impl Averages {
     /// then; one with too few photos from then (or a face with no date), by
     /// their whole-life average.
     fn alike(&self, faces: &[&[f32]], months: Option<(i64, i64)>, except: &[i64], min: f32) -> Vec<(f32, usize, i64)> {
+        self.alike_among(self.life.keys(), faces, months, except, min)
+    }
+
+    /// [`Averages::alike`], with only these people.
+    fn alike_among<'a>(
+        &self,
+        people: impl IntoIterator<Item = &'a i64>,
+        faces: &[&[f32]],
+        months: Option<(i64, i64)>,
+        except: &[i64],
+        min: f32,
+    ) -> Vec<(f32, usize, i64)> {
         let mut pairs = Vec::new();
-        for (pid, (sum, n)) in &self.life {
+        for pid in people {
+            let Some((sum, n)) = self.life.get(pid) else { continue };
             if *n == 0 || except.contains(pid) {
                 continue;
             }
@@ -900,6 +937,10 @@ pub struct FaceIndex {
     /// Per person: the sum of its faces' fingerprints and how many, whole
     /// life and month by month.
     centroids: RwLock<Averages>,
+    /// How everyone stood when the last look for people found twice found
+    /// nobody more: the next look compares only who changed since (none:
+    /// everyone, as after a start).
+    joined: Mutex<Option<HashMap<i64, Standing>>>,
     /// Open once the averages are read (and any regrouping done): every
     /// method waits for it, so none works from half the people.
     ready: crate::Ready,
@@ -946,6 +987,7 @@ impl FaceIndex {
             db: Mutex::new(conn),
             models: Mutex::new(None),
             centroids: RwLock::new(Averages::default()),
+            joined: Mutex::new(None),
             ready: crate::Ready::default(),
             kept_people: crate::catalog::Kept::new(1),
         })
@@ -1460,14 +1502,21 @@ impl FaceIndex {
     }
 
     /// [`FaceIndex::join_look_alikes`], also while the index is being read.
+    ///
+    /// Only who changed since the last look can have come close enough to
+    /// someone: they are compared with everyone, the others only with them.
+    /// After a few photos' faces that is a handful of people, not every
+    /// person against every other (seconds on a big catalog).
     fn join_now(&self, cat: &Catalog) -> Result<usize> {
+        let before = self.joined.lock().unwrap().take();
         // A join moves an average, which can bring someone else close enough:
         // again until nobody joins (two or three passes on a real catalog).
         let mut joined = 0;
         for _ in 0..10 {
-            let n = self.join_pass(cat)?;
+            let (n, seen) = self.join_pass(cat, before.as_ref())?;
             joined += n;
             if n == 0 {
+                *self.joined.lock().unwrap() = Some(seen);
                 break;
             }
         }
@@ -1477,8 +1526,15 @@ impl FaceIndex {
         Ok(joined)
     }
 
-    fn join_pass(&self, cat: &Catalog) -> Result<usize> {
-        let (everyone, movable, mut photos) = {
+    /// One round of joins. `before`: how everyone stood after the last look
+    /// that found nobody (none: compare everyone). Returns how many joined
+    /// someone, and how everyone stood for this round.
+    fn join_pass(
+        &self,
+        cat: &Catalog,
+        before: Option<&HashMap<i64, Standing>>,
+    ) -> Result<(usize, HashMap<i64, Standing>)> {
+        let (everyone, movable) = {
             let db = cat.db();
             let everyone: HashSet<i64> =
                 db.prepare("SELECT id FROM people")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
@@ -1489,21 +1545,20 @@ impl FaceIndex {
                 )?
                 .query_map([], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
-            let mut photos: HashMap<i64, HashSet<i64>> = HashMap::new();
-            let mut stmt = db.prepare("SELECT person_id, photo_id FROM faces WHERE person_id IS NOT NULL")?;
-            for r in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
-                let (person, photo) = r?;
-                photos.entry(person).or_default().insert(photo);
-            }
-            (everyone, movable, photos)
+            (everyone, movable)
         };
         // Every join alike enough, best first: (similarity, who moves, to whom).
         // Who may move is compared, as a whole, with each person as they
         // looked over the months of their photos.
         let mut joins: Vec<(f32, i64, i64)> = Vec::new();
+        // A copy: a face moved meanwhile ("who is this") doesn't wait for the comparing.
+        let c = self.centroids.read().unwrap().clone();
+        let seen: HashMap<i64, Standing> =
+            c.life.keys().map(|p| (*p, Standing { faces: c.digest(*p), movable: movable.contains(p) })).collect();
+        let changed: Option<HashSet<i64>> =
+            before.map(|b| seen.iter().filter(|(p, s)| b.get(p) != Some(s)).map(|(p, _)| *p).collect());
+        let is_changed = |p: &i64| changed.as_ref().is_none_or(|ch| ch.contains(p));
         {
-            // A copy: a face moved meanwhile ("who is this") doesn't wait for the comparing.
-            let c = self.centroids.read().unwrap().clone();
             let size = |id: &i64| c.life.get(id).map_or(0, |(_, n)| *n);
             let bigger = |a: i64, b: i64| size(&a) > size(&b) || (size(&a) == size(&b) && a < b);
             // Grouped by their months, so each person's look then is worked out once.
@@ -1514,12 +1569,23 @@ impl FaceIndex {
                 }
             }
             for (months, ls) in by_months {
-                let averages: Vec<Vec<f32>> = ls.iter().map(|l| unit(c.life[l].0.clone())).collect();
-                let faces: Vec<&[f32]> = averages.iter().map(Vec::as_slice).collect();
-                for (s, i, t) in c.alike(&faces, months, &[], SAME_PERSON) {
-                    let l = ls[i];
-                    if t != l && everyone.contains(&t) && (!movable.contains(&t) || bigger(t, l)) {
-                        joins.push((s, l, t));
+                // Who changed, against everyone; the others, against who changed.
+                let (fresh, settled): (Vec<i64>, Vec<i64>) = ls.into_iter().partition(|l| is_changed(l));
+                for (ls, among) in [(fresh, None), (settled, changed.as_ref())] {
+                    if ls.is_empty() || among.is_some_and(HashSet::is_empty) {
+                        continue;
+                    }
+                    let averages: Vec<Vec<f32>> = ls.iter().map(|l| unit(c.life[l].0.clone())).collect();
+                    let faces: Vec<&[f32]> = averages.iter().map(Vec::as_slice).collect();
+                    let pairs = match among {
+                        None => c.alike(&faces, months, &[], SAME_PERSON),
+                        Some(among) => c.alike_among(among, &faces, months, &[], SAME_PERSON),
+                    };
+                    for (s, i, t) in pairs {
+                        let l = ls[i];
+                        if t != l && everyone.contains(&t) && (!movable.contains(&t) || bigger(t, l)) {
+                            joins.push((s, l, t));
+                        }
                     }
                 }
             }
@@ -1529,26 +1595,40 @@ impl FaceIndex {
         // was joined.
         let mut joining: HashMap<i64, Vec<i64>> = HashMap::new();
         let mut moved: HashSet<i64> = HashSet::new();
-        for (_, l, t) in joins {
-            if moved.contains(&l) || moved.contains(&t) || joining.contains_key(&l) {
-                continue;
+        {
+            // Each one's photos, read once they're needed.
+            let db = cat.db();
+            let mut stmt = db.prepare("SELECT photo_id FROM faces WHERE person_id = ?1")?;
+            let mut photos: HashMap<i64, HashSet<i64>> = HashMap::new();
+            let mut photos_of = |p: i64, photos: &mut HashMap<i64, HashSet<i64>>| -> Result<()> {
+                if let std::collections::hash_map::Entry::Vacant(e) = photos.entry(p) {
+                    e.insert(stmt.query_map([p], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?);
+                }
+                Ok(())
+            };
+            for (_, l, t) in joins {
+                if moved.contains(&l) || moved.contains(&t) || joining.contains_key(&l) {
+                    continue;
+                }
+                photos_of(l, &mut photos)?;
+                photos_of(t, &mut photos)?;
+                let theirs = photos[&l].clone();
+                let target = photos.get_mut(&t).unwrap();
+                // Nobody twice in one photo.
+                if !target.is_disjoint(&theirs) {
+                    continue;
+                }
+                target.extend(theirs);
+                joining.entry(t).or_default().push(l);
+                moved.insert(l);
             }
-            let theirs = photos.get(&l).cloned().unwrap_or_default();
-            let target = photos.entry(t).or_default();
-            // Nobody twice in one photo.
-            if !target.is_disjoint(&theirs) {
-                continue;
-            }
-            target.extend(theirs);
-            joining.entry(t).or_default().push(l);
-            moved.insert(l);
         }
         for (t, ls) in &joining {
             let mut ids = ls.clone();
             ids.push(*t);
             self.merge_now(cat, &ids, *t)?;
         }
-        Ok(moved.len())
+        Ok((moved.len(), seen))
     }
 
     /// Makes several people one ("Same person"): the only way two people
