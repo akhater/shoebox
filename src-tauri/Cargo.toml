@@ -6,6 +6,8 @@ edition = "2024"
 version = "26.42.5"
 rust-version = "1.98"
 default-run = "shoebox"
+# Integration tests are one program, declared below (see tests/all.rs).
+autotests = false
 
 [lib]
 name = "shoebox_lib"
@@ -19,6 +21,11 @@ path = "src/main.rs"
 [[bin]]
 name = "shoebox-cli"
 path = "src/bin/shoebox-cli.rs"
+
+# Every file in tests/ is a module of this one test program.
+[[test]]
+name = "all"
+path = "tests/all.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.6", features = [] }

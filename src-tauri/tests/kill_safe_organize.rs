@@ -285,12 +285,14 @@ fn a_move_really_killed_is_finished_or_undone() {
     if let Ok(base) = std::env::var("SHOEBOX_KILL_CHILD") {
         return move_and_die(Path::new(&base));
     }
+    // Its name to the test harness: the module path without the crate (`all::`).
+    let me = format!("{}::a_move_really_killed_is_finished_or_undone", module_path!().split_once("::").unwrap().1);
     let after = done_state("real-done", |cat, a, b| drop(move_folder(cat, &trip_to_b(a, b)).unwrap()));
     for (i, (step, nth, taken)) in [("copy:copied", 3, false), ("copy:removed", 2, true)].into_iter().enumerate() {
         let w = World::new(&format!("real-{i}"));
         let before = w.state(&w.open(&["a", "b"]).0);
         let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "a_move_really_killed_is_finished_or_undone"])
+            .args(["--exact", &me])
             .env("SHOEBOX_KILL_CHILD", &w.base)
             .env("SHOEBOX_KILL_AT", format!("{step}#{nth}"))
             .output()
