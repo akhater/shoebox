@@ -41,7 +41,9 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   JPEG goes with it.
 - **Cull's assistant.** A shoot one shot at a time: the frames of a burst
   gathered, the sharpest first in line, and what's wrong with each frame -
-  blurry, a face out of focus, too dark, blown out, nothing in it (lens cap).
+  blurry, a face out of focus, the focus missed where the camera says it
+  focused, too dark, blown out, nothing in it (lens cap). At 100% it looks
+  first where the camera focused.
   It only suggests: you reject, take back, or accept its suggestions in one
   key. Measured from the previews, so unplugged drives too; with the drive
   connected it looks closer at the originals and finds what is only soft at

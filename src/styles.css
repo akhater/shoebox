@@ -3286,6 +3286,12 @@ button.link:hover {
 .cull-photo.rejected img {
   filter: grayscale(0.7) brightness(0.45);
 }
+/* What is drawn on the photo (where the camera focused, when the focus
+   missed it), in a box over the picture as fitted or at 100%. */
+.cull-on-picture {
+  position: absolute;
+  pointer-events: none;
+}
 .cull-stamp {
   position: absolute;
   top: 10px;
