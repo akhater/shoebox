@@ -26,7 +26,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// read again ([`find`]); raise it when Shoebox learns another maker's notes.
 /// 1: Canon, Nikon, Sony, Fujifilm, Olympus / OM System, Panasonic / Leica,
 /// Pentax / Ricoh, and any maker's EXIF SubjectArea (phones).
-pub const FOCUS_READER: i64 = 1;
+/// 2: Canon: a zone in a fine grid is one outline whatever its size, and a
+/// photo focused by hand has no point drawn.
+pub const FOCUS_READER: i64 = 2;
 
 /// What a point was in this photo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -88,7 +90,9 @@ fn mode(name: &str) -> Option<&'static str> {
 
 /// A layout with more points than this is a mirrorless camera's fine grid of
 /// cells (Canon R: 1,053), not points to draw one by one: only the cells it
-/// used are kept, the zone it was given as one outline.
+/// used are kept, the zone it was given as one outline. Counted on the
+/// camera's layout, not on the cells a photo gives: an R6 Mark III gives
+/// only its zone's 81 cells.
 const LAYOUT_MAX: usize = 100;
 
 impl Point {
@@ -153,13 +157,10 @@ impl Focus {
         f
     }
 
-    /// What is worth keeping: a fine grid of cells (a mirrorless camera)
-    /// keeps the cells it used, and the zone it was given as one outline,
-    /// unless that is the whole picture.
+    /// What is worth keeping of a fine grid of cells (a mirrorless camera):
+    /// the cells it used, and the zone it was given as one outline, unless
+    /// that is the whole picture.
     fn tidy(mut self) -> Self {
-        if self.points.len() <= LAYOUT_MAX {
-            return self;
-        }
         let chosen: Vec<Point> = self.points.iter().copied().filter(|p| p.state == State::Chosen).collect();
         self.points.retain(|p| p.state == State::InFocus);
         if chosen.len() == 1 {
@@ -240,7 +241,7 @@ pub fn read(src: &Source, picture: Option<(u32, u32)>) -> Option<Focus> {
     {
         return None;
     }
-    Some(focus.tidy()).filter(|f| !f.is_empty())
+    Some(focus).filter(|f| !f.is_empty())
 }
 
 fn shorts(ifd: &IFD, tag: u16) -> Option<Vec<u16>> {
@@ -336,6 +337,12 @@ fn canon_af_info2(v: &[u16], up: bool, eos: bool, use_image: bool) -> Option<Fou
     if *v.first()? == 0 {
         return None;
     }
+    let mode = canon_mode(*v.get(1)?);
+    // Focused by hand: a point still chosen on the camera (a 5D Mark II
+    // keeps it) is not where it focused.
+    if *v.get(1)? == 0 {
+        return Some((Focus { mode, points: vec![] }, None));
+    }
     let n = *v.get(2)? as usize;
     let valid = (*v.get(3)? as usize).min(n);
     let frame = match (v.get(6), v.get(7)) {
@@ -359,7 +366,8 @@ fn canon_af_info2(v: &[u16], up: bool, eos: bool, use_image: bool) -> Option<Fou
             Point::centred(x as f32, y as f32, w as f32, h as f32, frame, up, state)
         })
         .collect();
-    Some((Focus { mode: canon_mode(*v.get(1)?), points }, Some(frame)))
+    let focus = Focus { mode, points };
+    Some((if n > LAYOUT_MAX { focus.tidy() } else { focus }, Some(frame)))
 }
 
 /// The older AFInfo (10D, 20D, 30D, 1D Mark II, PowerShots...): points, valid
@@ -391,7 +399,7 @@ fn canon_af_info(v: &[u16], up: bool) -> Option<Found> {
 /// [`canon_af_info`]), in the file's own frame.
 pub fn from_crw(af_info: &[u16]) -> Option<Focus> {
     let (focus, _) = canon_af_info(af_info, true)?;
-    Some(focus.tidy()).filter(|f| !f.is_empty())
+    Some(focus).filter(|f| !f.is_empty())
 }
 
 fn canon_mode(code: u16) -> Option<&'static str> {
@@ -867,18 +875,75 @@ mod tests {
         }
         v.extend(focus);
         v.extend(chosen);
-        let f = canon_af_info2(&v, true, true, false).unwrap().0.tidy();
+        let f = canon_af_info2(&v, true, true, false).unwrap().0;
         assert_eq!(f.mode, Some("Flexible zone"));
         assert_eq!(f.points.iter().map(|p| p.state).collect::<Vec<_>>(), [State::Area, State::InFocus, State::InFocus]);
         let area = f.points[0];
         assert!(close(area.w, (8.0 * 170.0 + 153.0) / 6960.0));
     }
 
+    /// An R6 Mark III's AFInfo3: a grid of 1,053 cells in a 6960 x 4640
+    /// frame, of which a photo gives only its first `cells` (width, height,
+    /// X, Y), the rest left at zero, and the cells in focus and chosen.
+    fn r6_mark_iii(mode: u16, cells: &[(u16, u16, i16, i16)], in_focus: &[usize], chosen: &[usize]) -> Vec<u16> {
+        let n = 1053;
+        let mut v = vec![8838, mode, n as u16, cells.len() as u16, 6960, 4640, 6960, 4640];
+        for k in 0..4 {
+            v.extend((0..n).map(|i| cells.get(i).map_or(0, |c| [c.0, c.1, c.2 as u16, c.3 as u16][k])));
+        }
+        for set in [in_focus, chosen] {
+            let mut mask = vec![0u16; n.div_ceil(16)];
+            for &i in set {
+                mask[i / 16] |= 1 << (i % 16);
+            }
+            v.extend(mask);
+        }
+        v
+    }
+
+    #[test]
+    fn a_zone_of_a_fine_grid_is_one_outline() {
+        // An R6 Mark III in flexible zone AF gives only its zone's 81 cells
+        // (9 x 9 of 153 px every 170 px, left of the middle), all chosen,
+        // none in focus: one zone, not 81 points.
+        let cells: Vec<_> =
+            (0..81).map(|i| (153, 153, -2024 + 170 * (i % 9) as i16, 680 - 170 * (i / 9) as i16)).collect();
+        let v = r6_mark_iii(19, &cells, &[], &(0..81).collect::<Vec<_>>());
+        let f = canon_af_info2(&v, true, true, false).unwrap().0;
+        assert_eq!(f.mode, Some("Flexible zone"));
+        let side = 8.0 * 170.0 + 153.0;
+        assert!(about(only(&f), (0.5 - 1344.0 / 6960.0, 0.5, side / 6960.0, side / 4640.0, State::Area)));
+    }
+
+    #[test]
+    fn an_r6_mark_iii_tracking_frame_turned_upright() {
+        // Whole area AF following an eye, the camera held upright
+        // (orientation 8): one frame, in focus, in its AFInfo3.
+        let v = r6_mark_iii(22, &[(532, 533, 1260, 252)], &[0], &[0]);
+        let note = dir(&[short_tag(0x3c, &v)]);
+        let src = Source { make: "Canon", model: "Canon EOS R6 Mark III", ifds: &[], note: Some(&note) };
+        let f = read(&src, None).unwrap().upright(8);
+        assert_eq!(f.mode, Some("Whole area"));
+        // Right of the middle and above it, turned a quarter counter-clockwise:
+        // above the middle and left of it.
+        let (cx, cy, w, h, state) = only(&f);
+        assert!(close(cx, 0.5 - 252.0 / 4640.0) && close(cy, 0.5 - 1260.0 / 6960.0));
+        assert!(close(w, 533.0 / 4640.0) && close(h, 532.0 / 6960.0) && state == State::InFocus);
+    }
+
     #[test]
     fn manual_focus_says_so_with_nothing_to_draw() {
         let mut v = vec![96, 0, 9, 0, 5616, 3744, 5616, 3744];
         v.extend([0; 36 + 3]);
-        let f = canon_af_info2(&v, true, true, false).unwrap().0.tidy();
+        let f = canon_af_info2(&v, true, true, false).unwrap().0;
+        assert_eq!(f, Focus { mode: Some("Manual focus"), points: vec![] });
+        // A 5D Mark II on manual focus keeps its nine points valid and the
+        // centre one chosen: not where it focused.
+        let mut v = five_d_mark_ii();
+        v[1] = 0;
+        v[8 + 4 * 9] = 0;
+        v[8 + 4 * 9 + 1] = 1 << 8;
+        let f = canon_af_info2(&v, true, true, false).unwrap().0;
         assert_eq!(f, Focus { mode: Some("Manual focus"), points: vec![] });
     }
 
