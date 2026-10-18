@@ -130,6 +130,21 @@
 //!                                              removable media for good), on the listed disks or every
 //!                                              disk in the plan; the "gone" ones only leave the catalog
 //!
+//! Turning photos (JSON out). Only the catalog and Shoebox's own copies change, never a file:
+//!   shoebox-cli turn right|left|half|back <photo-id>...   a quarter turn clockwise or
+//!                                              counter-clockwise, half a turn, or back to how
+//!                                              the file shows it. Faces keep their names; a photo
+//!                                              turned is never suggested as sideways again
+//!   shoebox-cli sideways                       photos the upright model would turn, the surest first
+//!                                              ("turn": quarter turns clockwise, "sure": 0..1)
+//!   shoebox-cli upright-check [--again]        look at the photos not looked at yet (the window does
+//!                                              it in the background once its model is here);
+//!                                              --again: every photo nobody decided about
+//!   shoebox-cli sideways-accept <photo-id>... | --all   turn them the way the model suggests
+//!   shoebox-cli sideways-leave <photo-id>... | --all    fine as they are: never suggested again
+//!   shoebox-cli upright-eval <folder> [limit]  how the model does on upright JPEGs in a folder,
+//!                                              each shown to it four ways (reads only)
+//!
 //! Missing photos (JSON out): no copy found on any disk, plugged in or not.
 //!   shoebox-cli missing                        each one, where its files were, and whether they are
 //!                                              in the system's bin (deleted, not moved: restoring
@@ -158,7 +173,7 @@
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::{self, Progress};
-use shoebox_lib::{cull, gear, organize, tags};
+use shoebox_lib::{cull, gear, organize, tags, upright};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -171,6 +186,8 @@ fn main() -> anyhow::Result<()> {
     let cat = Catalog::open(data)?;
     shoebox_lib::tidy_old_catalog(&cat.data);
     scan::heal_saved_previews(&cat)?;
+    // Turns a stop cut short: previews brought to the turn the catalog says.
+    shoebox_lib::turn::settle(&cat)?;
     // A folder move, rename or delete cut short (a kill, a crash): finished or
     // undone first, as the window does at start. Told on stderr.
     let resumed = organize::resume(&cat)?;
@@ -560,9 +577,9 @@ fn main() -> anyhow::Result<()> {
             // Times the viewer's sharp picture (nothing is written): shoebox-cli sharp <photo-id> [long, 0 = full]
             let id: i64 = args.get(1).ok_or_else(|| anyhow::anyhow!("sharp <photo-id> [long]"))?.parse()?;
             let long: u32 = args.get(2).map(|v| v.parse()).transpose()?.unwrap_or(2560);
-            let (file, kind) = cat.original(id)?;
+            let (file, kind, turn) = cat.original(id)?;
             let t = std::time::Instant::now();
-            let bytes = shoebox_lib::imaging::sharp(&file, kind, long)?;
+            let bytes = shoebox_lib::imaging::sharp(&file, kind, long, turn)?;
             println!(
                 "{}",
                 serde_json::json!({ "file": file, "long": long, "kb": bytes.len() / 1024, "ms": t.elapsed().as_millis() as u64 })
@@ -775,8 +792,65 @@ fn main() -> anyhow::Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&cat.forget_missing(&ids)?)?);
         }
+        Some("turn") => {
+            let usage = || anyhow::anyhow!("turn right|left|half|back <photo-id>...");
+            let how = args.get(1).ok_or_else(usage)?.as_str();
+            let ids = args[2..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+            if ids.is_empty() {
+                return Err(usage());
+            }
+            let by = match how {
+                "right" => 1,
+                "left" => -1,
+                "half" => 2,
+                "back" => 0,
+                _ => return Err(usage()),
+            };
+            let report = if by == 0 {
+                shoebox_lib::turn::back(&cat, &ids)?
+            } else {
+                shoebox_lib::turn::turn(&cat, &ids.iter().map(|id| (*id, by)).collect::<Vec<_>>())?
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Some("sideways") => println!("{}", serde_json::to_string_pretty(&upright::suggestions(&cat)?)?),
+        Some("upright-check") => {
+            if args.get(1).is_some_and(|a| a == "--again") {
+                eprintln!("{} photos to look at again", upright::look_again(&cat)?);
+            }
+            let t = std::time::Instant::now();
+            upright::Upright::default()
+                .check_pending(&cat, &cancel, &|p| eprint!("\r  looked at {}/{} gpu={}", p.done, p.total, p.gpu))?;
+            eprintln!();
+            let found = upright::suggestions(&cat)?.len();
+            println!("{}", serde_json::json!({ "sideways": found, "seconds": t.elapsed().as_secs_f64() }));
+        }
+        Some(cmd @ ("sideways-accept" | "sideways-leave")) => {
+            let ids: Vec<i64> = match args.get(1).map(String::as_str) {
+                None => anyhow::bail!("{cmd} <photo-id>... | --all"),
+                Some("--all") => upright::suggestions(&cat)?.into_iter().map(|s| s.id).collect(),
+                Some(_) => args[1..].iter().map(|a| a.parse()).collect::<Result<_, _>>()?,
+            };
+            if cmd == "sideways-accept" {
+                println!("{}", serde_json::to_string_pretty(&upright::accept(&cat, &ids)?)?);
+            } else {
+                println!("{}", serde_json::json!({ "left": upright::leave(&cat, &ids)? }));
+            }
+        }
+        Some("upright-eval") => {
+            let usage = || anyhow::anyhow!("upright-eval <folder> [limit] [--as-they-stand]");
+            let as_they_stand = args.iter().any(|a| a == "--as-they-stand");
+            let rest: Vec<&String> = args[1..].iter().filter(|a| *a != "--as-they-stand").collect();
+            let folder = Path::new(rest.first().ok_or_else(usage)?);
+            let limit = rest.get(1).map(|n| n.parse()).transpose()?.unwrap_or(usize::MAX);
+            if as_they_stand {
+                println!("{}", serde_json::to_string_pretty(&upright::eval_as_they_stand(folder, limit)?)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&upright::eval(folder, limit)?)?);
+            }
+        }
         _ => eprintln!(
-            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope] | missing | forget-missing <id>... | --in-bin | --all"
+            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope] | missing | forget-missing <id>... | --in-bin | --all | turn right|left|half|back <id>... | sideways | upright-check [--again] | sideways-accept <id>... | --all | sideways-leave <id>... | --all | upright-eval <folder> [limit]"
         ),
     }
     Ok(())

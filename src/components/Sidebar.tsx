@@ -13,6 +13,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
+  RotateCwSquare,
   Settings,
   Trash2,
   TriangleAlert,
@@ -479,6 +480,15 @@ export function Sidebar(p: Props) {
                 <Trash2 size={16} className="marked-icon" />
               </RailItem>
             )}
+            {((overview?.sideways ?? 0) > 0 || scope.kind === "sideways") && (
+              <RailItem
+                label={`Sideways · ${fmtNum(overview?.sideways ?? 0)}`}
+                className={cls({ kind: "sideways" })}
+                onClick={() => onScope({ kind: "sideways" })}
+              >
+                <RotateCwSquare size={16} />
+              </RailItem>
+            )}
           </div>
           <div className="rail-sep" />
           <div className="nav-group">
@@ -606,6 +616,18 @@ export function Sidebar(p: Props) {
               <Trash2 size={16} className="marked-icon" />
               <span className="grow">Marked for deletion</span>
               <span className="count">{fmtNum(overview?.marked ?? 0)}</span>
+            </button>
+          )}
+          {((overview?.sideways ?? 0) > 0 || scope.kind === "sideways") && (
+            <button
+              {...nav(0)}
+              className={cls({ kind: "sideways" })}
+              onClick={() => onScope({ kind: "sideways" })}
+              title="Photos that look sideways or upside down: turn them, or leave them as they are"
+            >
+              <RotateCwSquare size={16} />
+              <span className="grow">Sideways</span>
+              <span className="count">{fmtNum(overview?.sideways ?? 0)}</span>
             </button>
           )}
         </div>

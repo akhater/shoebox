@@ -87,6 +87,59 @@ describe("sort order", () => {
   });
 });
 
+describe("turning photos", () => {
+  const turnsAsked = (be: ReturnType<typeof fakeBackend>, cmd = "turn_photos") =>
+    be.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
+
+  test("R turns the selected photos right, Shift+R left, and they're drawn again turned", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(tile(host, 201));
+    await click(tile(host, 202), { ctrlKey: true });
+    await key(scroller(host), "r");
+    await wait(100);
+    expect(turnsAsked(be)).toEqual([{ ids: [201, 202], by: 1 }]);
+    // A new revision: the grid asks for the new thumbnails.
+    expect(tile(host, 201).querySelector("img")!.src).toContain("/thumb/201?r=2");
+    expect(tile(host, 203).querySelector("img")!.src).toContain("/thumb/203?r=1");
+    expect(host.querySelector(".statusbar")?.textContent ?? "").toMatch(/Turned 2 photos a quarter turn right/);
+    await key(scroller(host), "R", { shiftKey: true });
+    await wait(100);
+    expect(turnsAsked(be).at(-1)).toEqual({ ids: [201, 202], by: -1 });
+    expect(be.turns.get(201)).toBe(0);
+  });
+
+  test("Sideways shows each photo turned the way Shoebox suggests: leave the wrong ones, turn the rest", async () => {
+    const be = fakeBackend();
+    be.sideways.set(102, 1);
+    be.sideways.set(203, 3);
+    const host = await renderApp();
+    await click(sidebarItem(host, "Sideways"));
+    await wait(100);
+    expect(title(host)).toBe("Sideways");
+    expect(gridIds(host)).toEqual([102, 203]);
+    const shown = (id: number) => tile(host, id).querySelector("img")!;
+    expect(shown(102).classList).toContain("turned");
+    expect(shown(102).style.transform).toContain("rotate(90deg)");
+    expect(shown(203).style.transform).toContain("rotate(270deg)");
+    // R doesn't turn here: the thumbnails show the suggestion, not the photo.
+    await click(tile(host, 203));
+    await key(scroller(host), "r");
+    await wait(50);
+    expect(turnsAsked(be)).toEqual([]);
+
+    await click(byText(host, ".banner button", "Leave it as it is"));
+    await wait(100);
+    expect(turnsAsked(be, "sideways_leave")).toEqual([{ ids: [203] }]);
+    expect(gridIds(host)).toEqual([102]);
+    await click(byText(host, ".banner button", "Turn it"));
+    await wait(100);
+    expect(turnsAsked(be, "sideways_accept")).toEqual([{ ids: [102] }]);
+    expect(be.turns.get(102)).toBe(1);
+    expect(gridIds(host)).toEqual([]);
+  });
+});
+
 describe("marking for deletion", () => {
   test("Delete marks the selected photo at once, then the totals are reloaded; Delete again unmarks it", async () => {
     const be = fakeBackend();

@@ -46,6 +46,11 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   key. Measured from the previews, so unplugged drives too; with the drive
   connected it looks closer at the originals and finds what is only soft at
   100%.
+- **Turn photos** with R and Shift+R, in the grid or the viewer. Only Shoebox's
+  copies turn, never the files; faces keep their names. **Sideways** lists the
+  photos an AI model finds sideways or upside down (an old camera without an
+  orientation sensor, a camera pointed up or down), shown turned the way it
+  suggests: turn them all, or leave the ones it got wrong.
 - **Organize folders.** Rename, create and move folders by drag and drop. The
   catalog updates in the same step, with no rescan.
 - **Full-screen viewer**, sharp from the original when its drive is connected,
@@ -109,12 +114,13 @@ may show a warning on first launch.
    already scanned become part of it and are not read again.
 3. Repeat for each drive. Once scanned, a drive can be unplugged; when it is
    connected again, Shoebox notices and catches up on its own.
-4. For word search and people, open **Settings > AI models** and download the
+4. For word search, people and sideways photos, open **Settings > AI models** and download the
    models.
 
 ## AI models
 
-Word search and face recognition run entirely on your computer. The models
+Word search, face recognition and finding sideways photos run entirely on
+your computer. The models
 are not bundled with the app: Shoebox downloads them on request from their
 original publishers and verifies each file against a pinned SHA-256 hash.
 
@@ -122,6 +128,7 @@ original publishers and verifies each file against a pinned SHA-256 hash.
 |---|---|---|
 | Word search | CLIP ViT-B-32 (as packaged by Immich) | 581 MB |
 | Faces | InsightFace buffalo_l (as packaged by Immich) | 182 MB |
+| Sideways photos | Image orientation detector v2, EfficientNetV2 (Duarte Barbosa) | 81 MB |
 | AI runtime | Microsoft ONNX Runtime 1.22, on the GPU (DirectML) or the CPU | |
 
 Download, verify or delete them in **Settings > AI models**, or with
@@ -156,6 +163,8 @@ shoebox-cli stats                # catalog overview
 shoebox-cli search kids on a beach
 shoebox-cli people               # everyone found, with their names
 shoebox-cli people-check         # likely mix-ups among named people
+shoebox-cli turn right 42        # a quarter turn clockwise, in Shoebox only
+shoebox-cli sideways             # photos that look sideways or upside down
 shoebox-cli cull '{}' '{"kind":"root","id":1}'   # a folder as Cull shows it: bursts, problems, suggestions
 shoebox-cli models               # which AI models are installed
 shoebox-cli bench                # how fast the main views are on this catalog and computer

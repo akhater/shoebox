@@ -1214,7 +1214,11 @@ impl FaceIndex {
                     None
                 }
             };
-            if let Some((img, faces)) = found {
+            if let Some((img, mut faces)) = found {
+                // Looked at again after a turn: the faces already found stay as
+                // they are (names, places); only those missed until now join.
+                let known = known_boxes(cat, *photo_id, img.width() as f32, img.height() as f32)?;
+                faces.retain(|(d, _)| known.iter().all(|k| iou(k, &d.bbox) < NMS_IOU));
                 total_faces += faces.len();
                 self.store(cat, *photo_id, &img, faces)?;
             }
@@ -1320,9 +1324,11 @@ impl FaceIndex {
                     None => cat.data.remove(&path)?,
                 }
             }
+            // Every face of the photo, those found before a turn included.
             tx.execute(
-                "INSERT OR REPLACE INTO face_scan (photo_id, model, faces) VALUES (?1, ?2, ?3)",
-                params![photo_id, FACE_MODEL, faces.len() as i64],
+                "INSERT OR REPLACE INTO face_scan (photo_id, model, faces)
+                 VALUES (?1, ?2, (SELECT COUNT(*) FROM faces WHERE photo_id = ?1))",
+                params![photo_id, FACE_MODEL],
             )?;
             tx.commit()?;
         }
@@ -2340,6 +2346,133 @@ fn people_in(tx: &rusqlite::Transaction, photo: i64, except_face: i64) -> Result
         .prepare("SELECT person_id FROM faces WHERE photo_id = ?1 AND person_id IS NOT NULL AND id <> ?2")?
         .query_map(params![photo, except_face], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The boxes of the faces already found in a photo, in pixels of its preview
+/// (`w` x `h`).
+fn known_boxes(cat: &Catalog, photo_id: i64, w: f32, h: f32) -> Result<Vec<[f32; 4]>> {
+    Ok(cat
+        .db()
+        .prepare("SELECT x1, y1, x2, y2 FROM faces WHERE photo_id = ?1")?
+        .query_map([photo_id], |r| {
+            Ok([
+                r.get::<_, f64>(0)? as f32 * w,
+                r.get::<_, f64>(1)? as f32 * h,
+                r.get::<_, f64>(2)? as f32 * w,
+                r.get::<_, f64>(3)? as f32 * h,
+            ])
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// A point (0..1 of the picture) once the picture is turned clockwise by
+/// `turn` quarter turns.
+fn turn_point(x: f64, y: f64, turn: i64) -> (f64, f64) {
+    match turn.rem_euclid(4) {
+        1 => (1.0 - y, x),
+        2 => (1.0 - x, 1.0 - y),
+        3 => (y, 1.0 - x),
+        _ => (x, y),
+    }
+}
+
+/// The faces of a photo the user turned clockwise by `by` quarter turns, in
+/// the caller's transaction. Each becomes a new face - a new id, so no window
+/// keeps showing its old picture - with its box and landmarks turned, keeping
+/// its person, how it was placed and whether it was seen; findings of the
+/// people check left as is follow it. Returns (old id, new id) of each.
+pub fn turn_faces(tx: &Connection, photo_id: i64, by: i64) -> Result<Vec<(i64, i64)>> {
+    type Row = (i64, Option<i64>, [f64; 4], String, f64, i64, i64);
+    let faces: Vec<Row> = tx
+        .prepare(
+            "SELECT id, person_id, x1, y1, x2, y2, kps, score, by_hand, seen FROM faces WHERE photo_id = ?1 ORDER BY id",
+        )?
+        .query_map([photo_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                [r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?],
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut moved = Vec::new();
+    for (old, person, b, kps, score, by_hand, seen) in faces {
+        let (ax, ay) = turn_point(b[0], b[1], by);
+        let (bx, by_) = turn_point(b[2], b[3], by);
+        let points: Vec<f64> = kps.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        let kps = points
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[x, y]| {
+                let (x, y) = turn_point(x, y, by);
+                [format!("{x:.4}"), format!("{y:.4}")]
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        tx.execute(
+            "INSERT INTO faces (photo_id, person_id, x1, y1, x2, y2, kps, score, by_hand, seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![photo_id, person, ax.min(bx), ay.min(by_), ax.max(bx), ay.max(by_), kps, score, by_hand, seen],
+        )?;
+        let new = tx.last_insert_rowid();
+        tx.execute(
+            "UPDATE check_left SET id = ?1 WHERE kind IN ('ageJump', 'likeOther') AND id = ?2",
+            params![new, old],
+        )?;
+        tx.execute("DELETE FROM faces WHERE id = ?1", [old])?;
+        moved.push((old, new));
+    }
+    Ok(moved)
+}
+
+/// faces.db's fingerprints of turned faces, copied to their new ids (see
+/// [`turn_faces`]): done before the catalog's change is committed, so no face
+/// is ever without its fingerprint. A fingerprint copied for a change that
+/// never landed belongs to no face, and is never read.
+pub fn copy_fingerprints(cat: &Catalog, moved: &[(i64, i64)]) -> Result<()> {
+    let path = cat.data.root.join("faces.db");
+    if moved.is_empty() || !path.is_file() {
+        return Ok(());
+    }
+    let mut conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(30))?;
+    let tx = conn.transaction()?;
+    for (old, new) in moved {
+        tx.execute(
+            "INSERT OR REPLACE INTO emb (face_id, vec) SELECT ?1, vec FROM emb WHERE face_id = ?2",
+            params![new, old],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// After a turn has landed and the photo's preview is turned: the new faces'
+/// pictures cut from it, the old faces' pictures and fingerprints gone.
+pub fn after_turn(cat: &Catalog, moved: &[(i64, i64)]) -> Result<()> {
+    if moved.is_empty() {
+        return Ok(());
+    }
+    cut_pictures_again(cat, &moved.iter().map(|(_, new)| *new).collect::<Vec<_>>())?;
+    for (old, _) in moved {
+        cat.data.remove(&cat.data.face_path(*old))?;
+    }
+    let path = cat.data.root.join("faces.db");
+    if path.is_file() {
+        let mut conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        let tx = conn.transaction()?;
+        for (old, _) in moved {
+            tx.execute("DELETE FROM emb WHERE face_id = ?1", [old])?;
+        }
+        tx.commit()?;
+    }
+    Ok(())
 }
 
 /// Cuts these faces' pictures again from their photo's preview, framed as when

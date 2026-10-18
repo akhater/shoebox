@@ -58,6 +58,19 @@ export function fakeBackend() {
   /** Photos missing everywhere (a test sets them), and those of them in the bin. */
   const missing = new Set<number>();
   const inBin = new Set<number>();
+  /** Photos the upright model would turn (a test sets them): quarter turns clockwise. */
+  const sideways = new Map<number, number>();
+  /** How photos were turned, and their previews' revisions (a turn makes a new one). */
+  const turns = new Map<number, number>();
+  const revs = new Map<number, number>();
+  const turn = (ids: number[], by: (id: number) => number) => {
+    for (const id of ids) {
+      turns.set(id, ((((turns.get(id) ?? 0) + by(id)) % 4) + 4) % 4);
+      revs.set(id, (revs.get(id) ?? 1) + 1);
+      sideways.delete(id);
+    }
+    return { turned: ids.length, faces: 0, toReadAgain: [] };
+  };
   /** Originals Cull couldn't read for a closer look (a test sets them). */
   let unreadable: Shoot["unreadable"] = [];
   let people: Person[] = [
@@ -137,6 +150,7 @@ export function fakeBackend() {
     offline: 0,
     missing: photos.filter((p) => missing.has(p.id)).length,
     marked: marked.size,
+    sideways: photos.filter((p) => sideways.has(p.id)).length,
     dataDir: "data",
   });
 
@@ -154,6 +168,8 @@ export function fakeBackend() {
         return photos.filter((p) => marked.has(p.id));
       case "missing":
         return photos.filter((p) => missing.has(p.id));
+      case "sideways":
+        return photos.filter((p) => sideways.has(p.id));
       default:
         return [];
     }
@@ -165,7 +181,7 @@ export function fakeBackend() {
     state: ps.map((p) => (missing.has(p.id) ? 0 : 2)),
     w: ps.map(() => 1500),
     h: ps.map(() => 1000),
-    rev: ps.map(() => 1),
+    rev: ps.map((p) => revs.get(p.id) ?? 1),
     preview: ps.map(() => 1),
     marked: ps.map((p) => +marked.has(p.id)),
     ext: ps.map(() => "jpg"),
@@ -173,6 +189,7 @@ export function fakeBackend() {
     fresh: ps.map(() => 0),
     // The fourth photo of each source is blurry.
     flags: ps.map((p) => (p.id % 10 === 4 ? 4 : 0)),
+    sideways: ps.map((p) => sideways.get(p.id) ?? 0),
   });
 
   /**
@@ -239,8 +256,10 @@ export function fakeBackend() {
       exposure: null,
       focal: null,
       previewState: 1,
-      previewRev: 1,
+      previewRev: revs.get(id) ?? 1,
       error: null,
+      turn: turns.get(id) ?? 0,
+      sideways: sideways.get(id) ?? 0,
       files: [
         {
           id: id * 10,
@@ -380,6 +399,18 @@ export function fakeBackend() {
         people = [...people.map((p) => (p.id === m.into ? { ...p, photos: inPerson[m.into].length } : p)), ...back];
         return m.joined.reduce((n, j) => n + j.faces.length, 0);
       }
+      case "turn_photos":
+        return turn(a.ids as number[], () => a.by as number);
+      case "turn_back":
+        return turn(a.ids as number[], (id) => -(turns.get(id) ?? 0));
+      case "sideways_accept": {
+        const ids = (a.ids as number[]).filter((id) => sideways.has(id));
+        return turn(ids, (id) => sideways.get(id)!);
+      }
+      case "sideways_leave": {
+        const ids = (a.ids as number[]).filter((id) => sideways.delete(id));
+        return ids.length;
+      }
       case "scan_status":
         return { current: null, queued: [] };
       case "update_status":
@@ -421,6 +452,8 @@ export function fakeBackend() {
     marked,
     missing,
     inBin,
+    sideways,
+    turns,
     /** What Cull says it couldn't read. */
     unreadableOriginals: (u: Shoot["unreadable"]) => {
       unreadable = u;

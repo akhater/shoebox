@@ -1,11 +1,13 @@
 //! The AI models Shoebox can use: what each one is for, where it comes from,
 //! and whether it's here. None ships with the app. A missing one is
 //! downloaded on request from its original publisher (Immich's Hugging Face
-//! pages, Microsoft for the runtime) and kept only if its SHA-256 matches the
-//! one pinned below. What is here is never downloaded again. Deleting one
-//! frees the space; the feature using it waits until it's back.
+//! pages, the orientation detector's author on GitHub, Microsoft for the
+//! runtime) and kept only if its SHA-256 matches the one pinned below. What is
+//! here is never downloaded again. Deleting one frees the space; the feature
+//! using it waits until it's back.
 //!
-//! The pinned hashes are the publishers' own: Hugging Face lists them, and
+//! The pinned hashes are the publishers' own: Hugging Face lists them (the
+//! orientation detector is published there too, the same file), and
 //! Microsoft's packages were hashed once (their library inside too, which is
 //! what sits in `models\`).
 
@@ -19,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const CLIP: &str = "clip";
 pub const FACES: &str = "faces";
+pub const UPRIGHT: &str = "upright";
 pub const RUNTIME_GPU: &str = "runtime-gpu";
 pub const RUNTIME_CPU: &str = "runtime-cpu";
 
@@ -93,6 +96,15 @@ const FACE_FILES: &[FileSpec] = &[
         source: Source::Url("https://huggingface.co/immich-app/buffalo_l/resolve/main/recognition/model.onnx"),
     },
 ];
+
+const UPRIGHT_FILES: &[FileSpec] = &[FileSpec {
+    path: "orientation/orientation_model_v2_0.9882.onnx",
+    size: 80_578_424,
+    sha256: "cffe911c1dff47fbfbbd90110aaab9c07134645c460d35b3ae8832079bea91ba",
+    source: Source::Url(
+        "https://github.com/duartebarbosadev/deep-image-orientation-detection/releases/download/v2/orientation_model_v2_0.9882.onnx",
+    ),
+}];
 
 /// ONNX Runtime 1.22.0 (what the `ort` binding expects), for this system.
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -228,6 +240,18 @@ const MODELS: &[ModelSpec] = &[
         licence: "Non-commercial use only",
         dir: Some("faces/buffalo_l"),
         files: FACE_FILES,
+        later: false,
+    },
+    ModelSpec {
+        id: UPRIGHT,
+        feature: "Sideways photos",
+        name: "Image orientation detector v2 (EfficientNetV2)",
+        about: "Finds photos that are sideways or upside down (a camera without an orientation sensor, or pointed \
+                up or down) and suggests turning them. Nothing is turned until you say so, and never the files.",
+        publisher: "Duarte Barbosa (GitHub)",
+        licence: "MIT",
+        dir: Some("orientation"),
+        files: UPRIGHT_FILES,
         later: false,
     },
     ModelSpec {
@@ -399,6 +423,11 @@ pub fn overview() -> ModelsOverview {
         runtime_ready: runtime_ready(),
         models: specs().map(|m| status(m, &dir)).collect(),
     }
+}
+
+/// Where the orientation detector (see upright.rs) is, once here.
+pub fn upright_model() -> PathBuf {
+    full_path(&models_dir(), UPRIGHT_FILES[0].path)
 }
 
 /// Every file of this model is here.

@@ -469,6 +469,12 @@ button {
 .tile:hover img {
   filter: brightness(1.08);
 }
+/* Drawn turned (the turns suggested in Sideways): sized by turnedStyle, centred, then turned. */
+.tile img.turned {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+}
 /* Selected: accent frame and a light wash. The current photo of a
    multi-selection that isn't itself selected gets a dashed frame. */
 .tile.is-selected {
@@ -1203,6 +1209,21 @@ button {
 }
 .note.warn {
   color: #f0a18c;
+}
+/* Viewer: how the photo is turned in Shoebox, or how it would be. */
+.turn-note {
+  color: var(--muted);
+}
+button.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+button.link:hover {
+  text-decoration: underline;
 }
 /* Viewer: a missing photo, and taking it out of the catalog. */
 .gone-note {

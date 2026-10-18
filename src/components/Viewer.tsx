@@ -1,4 +1,18 @@
-import { ArchiveX, ChevronLeft, ChevronRight, ExternalLink, FolderInput, FolderOpen, ImageOff, Trash2, Undo2, UserX, X } from "lucide-react";
+import {
+  ArchiveX,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  FolderInput,
+  FolderOpen,
+  ImageOff,
+  RotateCcw,
+  RotateCw,
+  Trash2,
+  Undo2,
+  UserX,
+  X,
+} from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import {
   api,
@@ -47,7 +61,14 @@ interface Props {
   everyone: Person[];
   /** A face went to someone else. */
   onFacesChanged: () => void;
+  /** Turns the photo: quarter turns clockwise (-1 counter-clockwise), back to how its file
+   *  shows it, or the way the upright model suggests. Shoebox's copies only, never the file. */
+  onTurn: (by: number | "back" | "suggested") => void;
 }
+
+/** "a quarter turn right", "upside down"... for quarter turns clockwise. */
+export const turnWords = (turn: number) =>
+  ["", "a quarter turn right", "upside down", "a quarter turn left"][((turn % 4) + 4) % 4];
 
 const STATE_LABEL = {
   online: "Plugged in",
@@ -68,6 +89,7 @@ export function Viewer({
   onTagsChanged,
   everyone,
   onFacesChanged,
+  onTurn,
 }: Props) {
   const tagBox = useRef<HTMLInputElement>(null);
   const id = list.ids[index];
@@ -107,6 +129,7 @@ export function Viewer({
   const [full, setFull] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
 
+  // Another photo, or this one turned (a new revision): its pictures again.
   useEffect(() => {
     setSharp(null);
     setZoom(null);
@@ -114,7 +137,7 @@ export function Viewer({
     setPreviewLong(0);
     setPreviewSize(null);
     setSpot(null);
-  }, [id]);
+  }, [id, rev]);
 
   // Once the preview shows, fetch the sharp one if the screen deserves more.
   useEffect(() => {
@@ -123,7 +146,7 @@ export function Viewer({
     const want = Math.round(Math.max(el.clientWidth, el.clientHeight) * window.devicePixelRatio);
     if (want <= previewLong * 1.1) return;
     let live = true;
-    const url = fullUrl(id, Math.min(want, 4096));
+    const url = fullUrl(id, Math.min(want, 4096), rev);
     const img = new Image();
     // A short wait, so arrowing through a shoot doesn't read every original.
     const t = window.setTimeout(() => {
@@ -135,13 +158,13 @@ export function Viewer({
       window.clearTimeout(t);
       img.onload = null;
     };
-  }, [id, reachable, previewLong]);
+  }, [id, rev, reachable, previewLong]);
 
   // Zoomed in: the full-size original.
   useEffect(() => {
     if (!zoom || !reachable || full) return;
     let live = true;
-    const url = fullUrl(id, 0);
+    const url = fullUrl(id, 0, rev);
     const img = new Image();
     img.onload = () => live && setFull(url);
     img.src = url;
@@ -149,7 +172,7 @@ export function Viewer({
       live = false;
       img.onload = null;
     };
-  }, [zoom, reachable, full, id]);
+  }, [zoom, reachable, full, id, rev]);
 
   useEffect(() => {
     if (!hint) return;
@@ -176,6 +199,7 @@ export function Viewer({
     zoomAt({ fx: clamp((e.clientX - r.left - (r.width - dw) / 2) / dw), fy: clamp((e.clientY - r.top - (r.height - dh) / 2) / dh) });
   };
 
+  // A turned photo's faces are new ones, their boxes turned with it.
   useEffect(() => {
     let live = true;
     setFaces([]);
@@ -186,7 +210,7 @@ export function Viewer({
     return () => {
       live = false;
     };
-  }, [id]);
+  }, [id, rev]);
 
   useEffect(() => {
     let live = true;
@@ -213,6 +237,8 @@ export function Viewer({
       } else if (e.key === "t" || e.key === "T") {
         e.preventDefault(); // don't type the "t"
         tagBox.current?.focus();
+      } else if ((e.key === "r" || e.key === "R") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        onTurn(e.shiftKey ? -1 : 1);
       } else if (e.key === "ArrowLeft" && index > 0) onIndex(index - 1);
       else if (e.key === "ArrowRight" && index < list.ids.length - 1) onIndex(index + 1);
       else if (e.key === "Delete") {
@@ -302,6 +328,12 @@ export function Viewer({
             {index + 1} of {list.ids.length}
           </span>
           <span className="viewer-top-actions">
+            <button className="icon-btn" onClick={() => onTurn(-1)} aria-label="Turn left" title="Turn left (Shift+R)">
+              <RotateCcw size={16} />
+            </button>
+            <button className="icon-btn" onClick={() => onTurn(1)} aria-label="Turn right" title="Turn right (R)">
+              <RotateCw size={16} />
+            </button>
             <button
               className={`btn small ${marked ? "" : "ghost"}`}
               onClick={onToggleMark}
@@ -361,6 +393,22 @@ export function Viewer({
                 </>
               )}
             </dl>
+            {d.turn !== 0 && (
+              <p className="note turn-note">
+                Turned {turnWords(d.turn)} in Shoebox; the file is unchanged.{" "}
+                <button className="link" onClick={() => onTurn("back")}>
+                  Show it as the file does
+                </button>
+              </p>
+            )}
+            {d.sideways > 0 && (
+              <p className="note turn-note">
+                It looks sideways: Shoebox would turn it {turnWords(d.sideways)}.{" "}
+                <button className="link" onClick={() => onTurn("suggested")}>
+                  Turn it
+                </button>
+              </p>
+            )}
             {d.error && <p className="note warn">{d.error}</p>}
 
             <h3>

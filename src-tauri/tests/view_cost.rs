@@ -84,6 +84,8 @@ fn a_view_costs_what_it_shows() {
                 }
             }
         }
+        // 50 photos the upright model would turn, the rest found upright.
+        tx.execute("UPDATE photos SET sideways = CASE WHEN id % 400 = 7 THEN 1 ELSE 0 END", []).unwrap();
         tx.commit().unwrap();
         person
     };
@@ -99,6 +101,7 @@ fn a_view_costs_what_it_shows() {
         // 1,600,000,000 + 3,600 * i: 2020-09-13 onwards, a month is 720-744 photos.
         ("a month", Scope::Date { key: "2021-03".into() }, 744),
         ("a person in 1,000 photos", Scope::Person { id: person, new_only: false }, 1_000),
+        ("50 sideways photos", Scope::Sideways, 50),
     ];
     let mut slow = Vec::new();
     for (what, view, photos) in views {

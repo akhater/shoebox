@@ -14,7 +14,9 @@ export type Scope =
   /** `newOnly`: only the photos they were found in since you last looked at them. */
   | { kind: "person"; id: number; newOnly?: boolean }
   /** Marked for deletion. */
-  | { kind: "marked" };
+  | { kind: "marked" }
+  /** Photos the upright model finds sideways or upside down, waiting for you. */
+  | { kind: "sideways" };
 
 export const sameScope = (a: Scope, b: Scope) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -184,6 +186,8 @@ export interface Overview {
   missing: number;
   /** Marked for deletion. */
   marked: number;
+  /** Suggested for turning by the upright model, waiting for you. */
+  sideways: number;
   dataDir: string;
 }
 
@@ -209,6 +213,8 @@ export interface PhotoList {
   fresh: number[];
   /** What Cull found wrong with each photo: bits of PROBLEMS (0 = nothing, or not measured yet). */
   flags: number[];
+  /** Quarter turns clockwise the upright model suggests (0 = none). */
+  sideways: number[];
 }
 
 export interface FileLoc {
@@ -245,6 +251,10 @@ export interface PhotoDetail {
   previewState: number;
   previewRev: number;
   error: string | null;
+  /** Quarter turns clockwise you turned it, on top of what its file says. */
+  turn: number;
+  /** Quarter turns clockwise the upright model suggests (0 = none). */
+  sideways: number;
   files: FileLoc[];
 }
 
@@ -522,8 +532,30 @@ export const cull = {
 
 export const thumbUrl = (id: number, rev: number) => `http://shoebox.localhost/thumb/${id}?r=${rev}`;
 export const previewUrl = (id: number, rev: number) => `http://shoebox.localhost/preview/${id}?r=${rev}`;
-/** The photo read from its original (disk plugged in) at this long edge; 0 = full size. */
-export const fullUrl = (id: number, long: number) => `http://shoebox.localhost/full/${id}?long=${long}`;
+/** The photo read from its original (disk plugged in) at this long edge; 0 = full size. `rev`
+ *  is its preview's: a turned photo is asked for again, turned. */
+export const fullUrl = (id: number, long: number, rev: number) => `http://shoebox.localhost/full/${id}?long=${long}&r=${rev}`;
+
+/** Photos turned. Only the catalog and Shoebox's copies change, never a file. */
+export interface TurnReport {
+  turned: number;
+  /** Their faces, turned with them (names kept). */
+  faces: number;
+  /** Photos whose preview couldn't be turned: made again, turned, from the original when its disk is plugged in. */
+  toReadAgain: number[];
+}
+
+/** Turning photos (catalog only) and the upright model's suggestions. */
+export const turnApi = {
+  /** Turns photos clockwise by quarter turns (-1: counter-clockwise, 2: upside down). */
+  turn: (ids: number[], by: number) => invoke<TurnReport>("turn_photos", { ids, by }),
+  /** Back to how their files show them. */
+  back: (ids: number[]) => invoke<TurnReport>("turn_back", { ids }),
+  /** Turns them the way the upright model suggests. */
+  accept: (ids: number[]) => invoke<TurnReport>("sideways_accept", { ids }),
+  /** Fine as they are: never suggested again. */
+  leave: (ids: number[]) => invoke<number>("sideways_leave", { ids }),
+};
 
 const nf = new Intl.NumberFormat();
 export const fmtNum = (n: number) => nf.format(n);
@@ -581,7 +613,7 @@ export function fmtAgo(ts: number | null) {
 }
 
 export interface AiProgress {
-  task: "search" | "faces" | "quality";
+  task: "upright" | "search" | "faces" | "quality";
   done: number;
   total: number;
   gpu: boolean;
@@ -611,6 +643,7 @@ export function headOf(l: PhotoList, n: number): PhotoList {
     raw: l.raw.slice(0, n),
     fresh: l.fresh.slice(0, n),
     flags: l.flags.slice(0, n),
+    sideways: l.sideways.slice(0, n),
   };
 }
 

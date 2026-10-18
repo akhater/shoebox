@@ -283,7 +283,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
   useEffect(() => {
     if (!zoomed || !stack) return;
     for (const f of [stack.frames[at.frame + 1], stack.frames[at.frame - 1]]) {
-      if (f && f.state === 2) new Image().src = fullUrl(f.id, 0);
+      if (f && f.state === 2) new Image().src = fullUrl(f.id, 0, f.rev);
     }
   }, [zoomed, stack, at.frame]);
 
@@ -603,7 +603,7 @@ function Zoomed({ frame, spot, onMove, onExit }: { frame: CullFrame; spot: Spot;
         <img
           key={frame.id}
           className="cull-zoom-full"
-          src={fullUrl(frame.id, 0)}
+          src={fullUrl(frame.id, 0, frame.rev)}
           alt=""
           draggable={false}
           onLoad={(e) => setSize({ id: frame.id, w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
