@@ -6,6 +6,7 @@ import {
   FolderInput,
   FolderOpen,
   ImageOff,
+  LockKeyhole,
   Trash2,
   Undo2,
   UserX,
@@ -85,6 +86,8 @@ interface Props {
   onShowTurned?: (on: boolean) => void;
   /** Sideways: these photos are fine as they are. */
   onLeave?: (ids: number[]) => void;
+  /** A private space open: makes the photo private, or not. Absent while locked (no trace). */
+  onPrivate?: (makePrivate: boolean) => void;
 }
 
 /** The button that makes a turn: "Turn it left", "Turn it upside down"... */
@@ -119,11 +122,13 @@ export function Viewer({
   showTurned = true,
   onShowTurned,
   onLeave,
+  onPrivate,
 }: Props) {
   const tagBox = useRef<HTMLInputElement>(null);
   const id = list.ids[index];
   const rev = list.rev[index];
   const marked = list.marked[index] === 1;
+  const isPrivate = list.private?.[index] === 1;
   const missing = list.state[index] === 0;
   // A missing photo: is its file in the system's bin (deleted, not moved)?
   const [gone, setGone] = useState<{ id: number; photo: MissingPhoto | null } | null>(null);
@@ -583,6 +588,21 @@ export function Viewer({
             {many && ` · ${fmtNum(selection.length)} selected`}
           </span>
           <span className="viewer-top-actions">
+            {onPrivate && (
+              <button
+                className={`icon-btn ${isPrivate ? "viewer-private" : ""}`}
+                onClick={() => onPrivate(!isPrivate)}
+                aria-pressed={isPrivate}
+                aria-label={isPrivate ? "Private: make it not private" : "Make private"}
+                title={
+                  isPrivate
+                    ? "Private: hidden everywhere while locked. Click to make it an ordinary photo again"
+                    : "Make private: hidden everywhere once you lock"
+                }
+              >
+                <LockKeyhole size={16} />
+              </button>
+            )}
             <button
               className={`btn small ${marked ? "" : "ghost"}`}
               onClick={onToggleMark}

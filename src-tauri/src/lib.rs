@@ -11,6 +11,7 @@ pub mod imaging;
 pub mod models;
 pub mod organize;
 pub mod paths;
+pub mod private;
 pub mod psd;
 pub mod repair;
 pub mod scan;
@@ -710,9 +711,11 @@ fn serve_full(cat: &Catalog, path: &str, query: &str) -> tauri::http::Response<V
     match bytes {
         Ok(bytes) => {
             log::info!("viewer: photo {} at {long} px in {} ms", id.unwrap_or(0), started.elapsed().as_millis());
+            // A private photo is never kept by the window once shown.
+            let private = id.is_some_and(|id| cat.is_private(id).unwrap_or(true));
             tauri::http::Response::builder()
                 .header("Content-Type", "image/jpeg")
-                .header("Cache-Control", "max-age=600")
+                .header("Cache-Control", if private { "no-store" } else { "max-age=600" })
                 .header("Access-Control-Allow-Origin", "*")
                 .body(bytes)
                 .unwrap()
@@ -724,20 +727,27 @@ fn serve_full(cat: &Catalog, path: &str, query: &str) -> tauri::http::Response<V
     }
 }
 
-fn serve_image(data: &DataDir, path: &str) -> tauri::http::Response<Vec<u8>> {
+fn serve_image(cat: &Catalog, path: &str) -> tauri::http::Response<Vec<u8>> {
     let mut parts = path.trim_start_matches('/').split('/');
     let kind = parts.next();
     let id = parts.next().and_then(|s| s.parse::<i64>().ok());
+    let data = &cat.data;
     let file = match (kind, id) {
         (Some("thumb"), Some(id)) => Some(data.thumb_path(id)),
         (Some("preview"), Some(id)) => Some(data.preview_path(id)),
         (Some("face"), Some(id)) => Some(data.face_path(id)),
         _ => None,
     };
-    match file.and_then(|f| std::fs::read(f).ok()) {
-        Some(bytes) => tauri::http::Response::builder()
+    // A private photo's copies are sealed: opened only while unlocked, and
+    // never kept by the window once shown.
+    let found = file.and_then(|f| match std::fs::read(&f) {
+        Ok(bytes) => Some((bytes, false)),
+        Err(_) => cat.read_copy(&f).ok().map(|bytes| (bytes, true)),
+    });
+    match found {
+        Some((bytes, sealed)) => tauri::http::Response::builder()
             .header("Content-Type", "image/jpeg")
-            .header("Cache-Control", "max-age=31536000, immutable")
+            .header("Cache-Control", if sealed { "no-store" } else { "max-age=31536000, immutable" })
             .header("Access-Control-Allow-Origin", "*")
             .body(bytes)
             .unwrap(),
@@ -762,6 +772,10 @@ pub fn run() {
     // Turns a stop cut short: previews brought to the turn the catalog says.
     if let Err(e) = turn::settle(&cat) {
         log::warn!("finishing turns cut short: {e:#}");
+    }
+    // Private photos' copies a stop left in the clear: sealed before anything shows.
+    if let Err(e) = private::settle(&cat) {
+        log::warn!("sealing private photos' copies: {e:#}");
     }
     let opened = data.clone();
     std::thread::spawn(move || {
@@ -791,7 +805,6 @@ pub fn run() {
     let model_queue = Arc::new(ModelQueue::default());
     let lens_kick = Arc::new(Kick::default());
     let update_status = Arc::new(Mutex::new(None));
-    let protocol_data = data.clone();
     let protocol_cat = cat.clone();
     // Thumbnails, previews and face pictures are files read as they are: their
     // own threads, so they never wait behind a photo read from its original
@@ -813,14 +826,13 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol("shoebox", move |_ctx, request, responder| {
-            let data = protocol_data.clone();
             let cat = protocol_cat.clone();
             let path = request.uri().path().to_string();
             let query = request.uri().query().unwrap_or("").to_string();
             if path.starts_with("/full/") {
                 rayon::spawn(move || responder.respond(serve_full(&cat, &path, &query)));
             } else {
-                saved_files.spawn(move || responder.respond(serve_image(&data, &path)));
+                saved_files.spawn(move || responder.respond(serve_image(&cat, &path)));
             }
         })
         .manage(AppState {
@@ -931,6 +943,12 @@ pub fn run() {
             commands::tag_delete,
             commands::gear_rename,
             commands::gear_split,
+            commands::private_status,
+            commands::private_unlock,
+            commands::private_lock,
+            commands::private_hide,
+            commands::private_hide_in,
+            commands::private_show,
             commands::mark_photos,
             commands::unmark_all,
             commands::cull_shoot,

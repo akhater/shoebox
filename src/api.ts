@@ -16,7 +16,9 @@ export type Scope =
   /** Marked for deletion. */
   | { kind: "marked" }
   /** Photos the upright model finds sideways or upside down, waiting for you. */
-  | { kind: "sideways" };
+  | { kind: "sideways" }
+  /** The private photos of the space open now (none while locked). */
+  | { kind: "private" };
 
 export const sameScope = (a: Scope, b: Scope) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -43,6 +45,8 @@ export interface Filters {
   tags: number[];
   /** Photos with all of `tags` (tags narrow down), or any of them. */
   tagsMatch: Match;
+  /** "private" and/or "notPrivate": only while private photos are open. */
+  private: ("private" | "notPrivate")[];
 }
 export const NO_FILTERS: Filters = {
   dates: [],
@@ -54,9 +58,17 @@ export const NO_FILTERS: Filters = {
   peopleMatch: "any",
   tags: [],
   tagsMatch: "all",
+  private: [],
 };
 export const filtersOn = (f: Filters) =>
-  f.dates.length + f.cameras.length + f.lenses.length + f.types.length + f.status.length + f.people.length + f.tags.length >
+  f.dates.length +
+    f.cameras.length +
+    f.lenses.length +
+    f.types.length +
+    f.status.length +
+    f.people.length +
+    f.tags.length +
+    f.private.length >
   0;
 
 /** A tag; `count` = photos with it (in the catalog, or among the photos asked about). */
@@ -92,6 +104,8 @@ export interface Facets {
   people: { id: number; name: string | null; cover: number; count: number }[];
   /** Tags on the photos shown, most used first. */
   tags: Tag[];
+  /** "private" and "notPrivate" with counts, while private photos are open (empty otherwise). */
+  private: FacetValue[];
 }
 
 /** Grid order: capture time (oldest/newest first, with month headers), file name, recently added. */
@@ -188,6 +202,8 @@ export interface Overview {
   marked: number;
   /** Suggested for turning by the upright model, waiting for you. */
   sideways: number;
+  /** Private photos of the space open now (0 while locked). */
+  private: number;
   dataDir: string;
 }
 
@@ -215,6 +231,8 @@ export interface PhotoList {
   flags: number[];
   /** Quarter turns clockwise the upright model suggests (0 = none). */
   sideways: number[];
+  /** 1 = a private photo (listed only while its space is open). */
+  private: number[];
 }
 
 export interface FileLoc {
@@ -259,6 +277,8 @@ export interface PhotoDetail {
   focus: Focus | null;
   /** What Cull found wrong with it, once measured (empty: nothing, or not measured yet). */
   problems: Found[];
+  /** A private photo (shown only while its space is open). */
+  private: boolean;
   files: FileLoc[];
 }
 
@@ -324,6 +344,8 @@ export interface Settings {
   catalogCacheMb: number;
   /** The catalog file mapped into memory, in MB; 0 = automatic (follows the catalog's size). */
   catalogMapMb: number;
+  /** Private photos lock again after this many minutes without using Shoebox. */
+  privateLockMinutes: number;
 }
 
 export interface FolderCheck {
@@ -582,6 +604,31 @@ export const previewUrl = (id: number, rev: number) => `http://shoebox.localhost
  *  is its preview's: a turned photo is asked for again, turned. */
 export const fullUrl = (id: number, long: number, rev: number) => `http://shoebox.localhost/full/${id}?long=${long}&r=${rev}`;
 
+export interface PrivateStatus {
+  /** A private space is open (its photos shown). Nothing is said about any other. */
+  unlocked: boolean;
+}
+
+/** Private photos: every password is its own space, like a wallet's passphrase - never
+ *  refused, a new one opens an empty space, none shows another's. Hidden from every view,
+ *  count, search and agent until their password opens them; Shoebox's copies of them are
+ *  kept sealed. Photo files are never touched. */
+export const privateApi = {
+  status: () => invoke<PrivateStatus>("private_status"),
+  /** Opens the space of a password (in this window only, until locked). */
+  unlock: (password: string) => invoke<PrivateStatus>("private_unlock", { password }),
+  lock: () => invoke<PrivateStatus>("private_lock"),
+  /** Into the space open now; its first photos need its password again (`confirm`). */
+  hide: (ids: number[], confirm?: string) => invoke<number>("private_hide", { ids, confirm: confirm ?? null }),
+  /** Every photo of a view (a folder). */
+  hideIn: (scope: Scope, confirm?: string) => invoke<number>("private_hide_in", { scope, confirm: confirm ?? null }),
+  show: (ids: number[]) => invoke<number>("private_show", { ids }),
+};
+/** Opens or locks private photos. */
+export const PRIVATE_SHORTCUT = "Ctrl+Shift+L";
+/** A password shorter than this is refused (as the backend does). */
+export const MIN_PASSWORD = 6;
+
 /** Photos turned. Only the catalog and Shoebox's copies change, never a file. */
 export interface TurnReport {
   turned: number;
@@ -703,7 +750,18 @@ export function headOf(l: PhotoList, n: number): PhotoList {
     fresh: l.fresh.slice(0, n),
     flags: l.flags.slice(0, n),
     sideways: l.sideways.slice(0, n),
+    private: l.private.slice(0, n),
   };
+}
+
+/** The list without its private photos: what the grid keeps the moment they are locked,
+ *  before the next answer comes. */
+export function withoutPrivate(l: PhotoList): PhotoList {
+  if (!l.private?.includes(1)) return l;
+  const keep = l.private.map((p) => p !== 1);
+  return Object.fromEntries(
+    Object.entries(l).map(([k, a]) => [k, (a as unknown[]).filter((_, i) => keep[i])]),
+  ) as unknown as PhotoList;
 }
 
 export interface Person {

@@ -14,6 +14,7 @@ use crate::cull;
 use crate::gear;
 use crate::models;
 use crate::organize::{self, DeletePlan, DeleteReport};
+use crate::private;
 use crate::scan::Progress;
 use crate::settings::Settings;
 use crate::tags;
@@ -275,7 +276,7 @@ pub async fn search_photos(
     let (cat, index, quality) = (state.cat.clone(), state.search.clone(), state.quality.clone());
     blocking(move || {
         let started = std::time::Instant::now();
-        let (hits, cutoff) = index.search(query.trim(), 1000)?;
+        let (hits, cutoff) = index.search(query.trim(), 1000, &cat.hidden_ids()?)?;
         let clear_ids: std::collections::HashSet<i64> = hits.iter().filter(|h| h.1 >= cutoff).map(|h| h.0).collect();
         let ranked: Vec<i64> = hits.iter().map(|h| h.0).collect();
         let mut list = cat.ranked_in_scope(&ranked, &scope, &filters)?;
@@ -789,6 +790,83 @@ pub async fn tag_delete(state: State<'_, AppState>, tag_id: i64) -> Res<()> {
     in_order(move || tags::delete(&cat, tag_id)).await
 }
 
+/// Private photos: whether a space is open (nothing about any other).
+#[tauri::command]
+pub fn private_status(state: State<'_, AppState>) -> private::Status {
+    private::status(&state.cat)
+}
+
+/// Locking or unlocking changes what every view shows.
+fn shown_changed(app: &AppHandle, state: &State<'_, AppState>, unlocked: bool) {
+    let _ = app.emit("catalog-changed", ());
+    if unlocked {
+        // What needed the key: face pictures to cut, private photos for the AI.
+        let (cat, ai) = (state.cat.clone(), state.ai.clone());
+        std::thread::spawn(move || {
+            if let Err(e) = private::after_unlock(&cat) {
+                log::warn!("private photos: face pictures not cut: {e:#}");
+            }
+            ai.kick();
+        });
+    }
+}
+
+/// Opens the space of a password: never refused, a new one is empty.
+#[tauri::command]
+pub async fn private_unlock(app: AppHandle, state: State<'_, AppState>, password: String) -> Res<private::Status> {
+    let cat = state.cat.clone();
+    // Not behind the window's other changes: it opens at once.
+    let s = blocking(move || private::unlock(&cat, &password)).await?;
+    shown_changed(&app, &state, s.unlocked);
+    Ok(s)
+}
+
+#[tauri::command]
+pub async fn private_lock(app: AppHandle, state: State<'_, AppState>) -> Res<private::Status> {
+    let cat = state.cat.clone();
+    let s = blocking(move || Ok(private::lock(&cat))).await?;
+    shown_changed(&app, &state, false);
+    Ok(s)
+}
+
+/// Makes photos private in the space open now. Its first ones need the
+/// password again (`confirm`).
+#[tauri::command]
+pub async fn private_hide(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    confirm: Option<String>,
+) -> Res<usize> {
+    let cat = state.cat.clone();
+    let n = in_order(move || private::hide(&cat, &ids, confirm.as_deref())).await?;
+    let _ = app.emit("catalog-changed", ());
+    Ok(n)
+}
+
+/// Makes every photo of a view private (a folder).
+#[tauri::command]
+pub async fn private_hide_in(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    scope: Scope,
+    confirm: Option<String>,
+) -> Res<usize> {
+    let cat = state.cat.clone();
+    let n = in_order(move || private::hide_in(&cat, &scope, confirm.as_deref())).await?;
+    let _ = app.emit("catalog-changed", ());
+    Ok(n)
+}
+
+/// Photos of the space open now made ordinary again.
+#[tauri::command]
+pub async fn private_show(app: AppHandle, state: State<'_, AppState>, ids: Vec<i64>) -> Res<usize> {
+    let cat = state.cat.clone();
+    let n = in_order(move || private::show(&cat, &ids)).await?;
+    let _ = app.emit("catalog-changed", ());
+    Ok(n)
+}
+
 /// Culling: marks or unmarks photos for deletion. Catalog only.
 #[tauri::command]
 pub async fn mark_photos(state: State<'_, AppState>, ids: Vec<i64>, marked: bool) -> Res<usize> {
@@ -978,9 +1056,9 @@ mod tests {
     /// memory stay plain, and the others hand their work to a worker thread.
     #[test]
     fn only_answers_from_memory_run_on_the_main_thread() {
-        // Plain on purpose: settings and the count of photos described are kept
-        // in memory; switching catalogs restarts Shoebox.
-        const PLAIN: &[&str] = &["get_settings", "ai_status", "switch_catalog"];
+        // Plain on purpose: settings, the count of photos described and whether
+        // a private space is open are kept in memory; switching catalogs restarts Shoebox.
+        const PLAIN: &[&str] = &["get_settings", "ai_status", "switch_catalog", "private_status"];
         const TOUCHES: &[&str] = &["state.cat", "state.faces", "state.search", "cat.", "faces."];
         const HANDS_OFF: &[&str] = &["blocking(", "in_order(", "spawn_blocking("];
         let source = include_str!("commands.rs").split("#[cfg(test)]").next().unwrap();

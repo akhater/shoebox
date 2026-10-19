@@ -5,6 +5,7 @@ import type {
   CullStack,
   FaceTarget,
   Facets,
+  Filters,
   Focus,
   Found,
   LeftAsIs,
@@ -69,6 +70,23 @@ export function fakeBackend() {
   const focusOf = new Map<number, Focus>();
   /** What Cull found wrong with photos, as their details say it (a test sets them). */
   const foundIn = new Map<number, Found[]>();
+  /** Private photos, by password: each password is its own space, never refused. */
+  const spaces = new Map<string, Set<number>>();
+  let open: string | null = null;
+  const mine = () => (open == null ? new Set<number>() : (spaces.get(open) ?? new Set<number>()));
+  const isPrivate = (id: number) => [...spaces.values()].some((s) => s.has(id));
+  const shownPhotos = () => photos.filter((p) => !isPrivate(p.id) || mine().has(p.id));
+  const status = () => ({ unlocked: open != null });
+  const hide = (ids: number[], confirm: unknown) => {
+    if (open == null) throw new Error("Private photos are locked.");
+    if (mine().size === 0 && confirm == null) throw new Error("Type the password again: no photos are private with it yet.");
+    if (mine().size === 0 && confirm !== open) throw new Error("The two passwords aren't the same.");
+    const space = spaces.get(open) ?? new Set<number>();
+    spaces.set(open, space);
+    const made = ids.filter((id) => !isPrivate(id));
+    made.forEach((id) => space.add(id));
+    return made.length;
+  };
   const turn = (ids: number[], by: (id: number) => number) => {
     const photos = ids.map((id) => {
       const q = ((by(id) % 4) + 4) % 4;
@@ -141,36 +159,41 @@ export function fakeBackend() {
     return (cmdDelays.get(cmd) ?? 0) + (v && v.cmds.includes(cmd) ? v.ms : 0);
   };
 
-  const overview = (): Overview => ({
-    volumes: [
-      {
-        id: 1,
-        label: "Disk",
-        online: true,
-        mount: "D:\\",
-        lastMount: "D:\\",
-        photos: photos.length,
-        roots: ROOTS.map((r) => ({
-          id: r.id,
-          found: true,
-          name: r.name,
-          path: `D:\\${r.name}`,
-          relPath: r.name,
-          lastScan: null,
-          photos: 4,
-        })),
-      },
-    ],
-    total: photos.length,
-    online: photos.length,
-    offline: 0,
-    missing: photos.filter((p) => missing.has(p.id)).length,
-    marked: marked.size,
-    sideways: photos.filter((p) => sideways.has(p.id)).length,
-    dataDir: "data",
-  });
+  const overview = (): Overview => {
+    const photos = shownPhotos();
+    return {
+      volumes: [
+        {
+          id: 1,
+          label: "Disk",
+          online: true,
+          mount: "D:\\",
+          lastMount: "D:\\",
+          photos: photos.length,
+          roots: ROOTS.map((r) => ({
+            id: r.id,
+            found: true,
+            name: r.name,
+            path: `D:\\${r.name}`,
+            relPath: r.name,
+            lastScan: null,
+            photos: 4,
+          })),
+        },
+      ],
+      total: photos.length,
+      online: photos.length,
+      offline: 0,
+      missing: photos.filter((p) => missing.has(p.id)).length,
+      marked: marked.size,
+      sideways: photos.filter((p) => sideways.has(p.id)).length,
+      private: mine().size,
+      dataDir: "data",
+    };
+  };
 
   const inScope = (s: Scope): Photo[] => {
+    const photos = shownPhotos();
     switch (s.kind) {
       case "all":
         return photos;
@@ -186,6 +209,8 @@ export function fakeBackend() {
         return photos.filter((p) => missing.has(p.id));
       case "sideways":
         return photos.filter((p) => sideways.has(p.id));
+      case "private":
+        return photos.filter((p) => mine().has(p.id));
       default:
         return [];
     }
@@ -205,6 +230,7 @@ export function fakeBackend() {
     fresh: ps.map(() => 0),
     flags: ps.map((p) => flagsOf(p.id)),
     sideways: ps.map((p) => sideways.get(p.id) ?? 0),
+    private: ps.map((p) => +isPrivate(p.id)),
   });
 
   /**
@@ -265,7 +291,32 @@ export function fakeBackend() {
   const sorted = (ps: Photo[], sort: Sort) =>
     sort === "newest" ? [...ps].sort((a, b) => b.taken - a.taken) : [...ps].sort((a, b) => a.taken - b.taken);
 
-  const facets = (): Facets => ({ dates: [], cameras: [], lenses: [], types: [], status: [], people: [], tags: [] });
+  const facets = (s: Scope): Facets => {
+    const here = inScope(s);
+    const priv = here.filter((p) => isPrivate(p.id)).length;
+    return {
+      dates: [],
+      cameras: [],
+      lenses: [],
+      types: [],
+      status: [],
+      people: [],
+      tags: [],
+      private:
+        open == null
+          ? []
+          : [
+              { value: "private", count: priv },
+              { value: "notPrivate", count: here.length - priv },
+            ].filter((v) => v.count > 0),
+    };
+  };
+  /** The Private filter, as Shoebox applies it: only while a space is open. */
+  const privateFilter = (ps: Photo[], f: Filters | undefined) => {
+    const want = f?.private ?? [];
+    if (open == null || want.length !== 1) return ps;
+    return ps.filter((p) => isPrivate(p.id) === (want[0] === "private"));
+  };
 
   const detail = (id: number): PhotoDetail => {
     const root = ROOTS.find((r) => r.id === photos.find((p) => p.id === id)?.root)!;
@@ -292,6 +343,7 @@ export function fakeBackend() {
       sideways: sideways.get(id) ?? 0,
       focus: focusOf.get(id) ?? null,
       problems: foundIn.get(id) ?? [],
+      private: isPrivate(id),
       files: [
         {
           id: id * 10,
@@ -329,14 +381,14 @@ export function fakeBackend() {
       case "find_people":
         return people.filter((p) => p.name?.toLowerCase().includes(String(a.query).toLowerCase()));
       case "list_photos":
-        return listOf(sorted(inScope(a.scope as Scope), a.sort as Sort));
+        return listOf(sorted(privateFilter(inScope(a.scope as Scope), a.filters as Filters), a.sort as Sort));
       case "search_photos": {
         const here = new Set(inScope(a.scope as Scope).map((p) => p.id));
         const found = SEARCH.ids.filter((id) => here.has(id)).map((id) => photos.find((p) => p.id === id)!);
         return { list: listOf(found), clear: SEARCH.clear };
       }
       case "facets":
-        return facets();
+        return facets(a.scope as Scope);
       case "get_photo":
         return detail(a.id as number);
       case "photo_faces":
@@ -449,6 +501,29 @@ export function fakeBackend() {
         const ids = (a.ids as number[]).filter((id) => sideways.delete(id));
         return ids.length;
       }
+      case "private_status":
+        return status();
+      case "private_unlock":
+        if (String(a.password).length < 6) throw new Error("A password needs at least 6 characters.");
+        open = a.password as string;
+        return status();
+      case "private_lock":
+        open = null;
+        return status();
+      case "private_hide":
+        return hide(a.ids as number[], a.confirm);
+      case "private_hide_in":
+        return hide(
+          inScope(a.scope as Scope).map((p) => p.id),
+          a.confirm,
+        );
+      case "private_show": {
+        if (open == null) throw new Error("Private photos are locked.");
+        const space = mine();
+        return (a.ids as number[]).filter((id) => space.delete(id)).length;
+      }
+      case "get_settings":
+        return { privateLockMinutes: 5 };
       case "scan_status":
         return { current: null, queued: [] };
       case "update_status":
@@ -494,6 +569,10 @@ export function fakeBackend() {
     turns,
     focusOf,
     foundIn,
+    /** Photos private under a password (its space), as a test sets them. */
+    privateIn: (password: string, ids: number[]) => spaces.set(password, new Set([...(spaces.get(password) ?? []), ...ids])),
+    /** The private photos of a password now. */
+    privateOf: (password: string) => [...(spaces.get(password) ?? [])].sort(),
     focusMissed,
     /** What Cull says it couldn't read. */
     unreadableOriginals: (u: Shoot["unreadable"]) => {

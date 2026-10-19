@@ -151,7 +151,10 @@ impl SearchIndex {
         let ready = cat.preview_ready()?;
         self.forget_stale(&ready)?;
         let have: HashSet<i64> = self.ids.read().unwrap().iter().copied().collect();
-        let todo: Vec<(i64, String)> = ready.into_iter().filter(|(id, _)| !have.contains(id)).collect();
+        // Private photos' previews can only be read while they are unlocked.
+        let locked = cat.hidden_ids()?;
+        let todo: Vec<(i64, String)> =
+            ready.into_iter().filter(|(id, _)| !have.contains(id) && !locked.contains(id)).collect();
         if todo.is_empty() {
             return Ok(());
         }
@@ -172,13 +175,13 @@ impl SearchIndex {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            match image::open(cat.data.preview_path(*id)) {
+            match cat.open_copy(&cat.data.preview_path(*id)) {
                 Ok(img) => match model.embed(&img) {
                     Ok(v) if v.len() == CLIP_DIM => batch.push((*id, fp.clone(), v)),
                     Ok(v) => log::warn!("search: photo {id}: unexpected vector length {}", v.len()),
                     Err(e) => log::warn!("search: photo {id}: {e:#}"),
                 },
-                Err(e) => log::warn!("search: photo {id}: preview unreadable: {e}"),
+                Err(e) => log::warn!("search: photo {id}: preview unreadable: {e:#}"),
             }
             if batch.len() >= 64 || n + 1 == todo.len() {
                 self.store(&mut batch)?;
@@ -274,8 +277,9 @@ impl SearchIndex {
     /// catalog most land close together, so a match has to stand out from how
     /// this whole catalog scores against this phrase (mean + 2.5 standard
     /// deviations), and stay near the best one. Weaker but still above-average
-    /// matches (mean + 1 sd) come back too, for "show more".
-    pub fn search(&self, query: &str, limit: usize) -> Result<(Vec<(i64, f32)>, f32)> {
+    /// matches (mean + 1 sd) come back too, for "show more". Photos `hidden`
+    /// (private ones, while locked) are left out before anything is weighed.
+    pub fn search(&self, query: &str, limit: usize, hidden: &HashSet<i64>) -> Result<(Vec<(i64, f32)>, f32)> {
         self.ready.wait()?;
         let q = {
             let mut text = self.text.lock().unwrap();
@@ -290,6 +294,7 @@ impl SearchIndex {
         let mut scored: Vec<(i64, f32)> = ids
             .iter()
             .enumerate()
+            .filter(|(_, id)| !hidden.contains(id))
             .map(|(i, id)| {
                 let v = &vecs[i * CLIP_DIM..(i + 1) * CLIP_DIM];
                 (*id, v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>())

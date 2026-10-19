@@ -9,7 +9,7 @@ use crate::volumes::{self, MountedVolume};
 use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock};
@@ -39,6 +39,8 @@ pub struct Catalog {
     kept_browse: Kept<Browse>,
     kept_lists: Kept<PhotoList>,
     kept_facets: Kept<Facets>,
+    /// The private photos' key while they are unlocked (see private.rs).
+    pub vault: crate::private::Vault,
 }
 
 impl Catalog {
@@ -65,6 +67,7 @@ impl Catalog {
             // A list of 190,000 photos is about 20 MB: the last three views.
             kept_lists: Kept::new(3),
             kept_facets: Kept::new(8),
+            vault: Default::default(),
         };
         cat.refresh_volumes()?;
         cat.refresh_roots()?;
@@ -133,6 +136,12 @@ impl Catalog {
         self.kept_browse.clear();
         self.kept_lists.clear();
         self.kept_facets.clear();
+    }
+
+    /// What is shown changed while the catalog didn't (private photos locked
+    /// or unlocked): every answer kept is worked out again.
+    pub(crate) fn note_shown_changed(&self) {
+        self.disks_changed.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn settings(&self) -> Settings {
@@ -309,8 +318,8 @@ impl Catalog {
         tx.commit()?;
         drop(db);
         for pid in &gone {
-            let _ = self.data.remove(&self.data.preview_path(*pid));
-            let _ = self.data.remove(&self.data.thumb_path(*pid));
+            let _ = self.remove_copy(&self.data.preview_path(*pid));
+            let _ = self.remove_copy(&self.data.thumb_path(*pid));
         }
         let _ = self.refresh_roots();
         Ok(RemoveReport { files: files.len() as i64, photos: gone.len() as i64 })
@@ -320,6 +329,7 @@ impl Catalog {
     /// or not - where their files were, and which of them sit in the system's
     /// bin (deleted, not moved). Looked up photo by photo: costs what it asks.
     pub fn missing(&self, photo_ids: &[i64]) -> Result<MissingReport> {
+        let photo_ids = &self.shown_ids(photo_ids)?[..];
         let started = std::time::Instant::now();
         let online = self.online.read().unwrap().clone();
         let mut photos = Vec::new();
@@ -392,6 +402,7 @@ impl Catalog {
     /// touched**, and a photo with a copy anywhere stays. They leave with their
     /// previews, faces and tags; people left without a face go too.
     pub fn forget_missing(&self, photo_ids: &[i64]) -> Result<ForgetReport> {
+        let photo_ids = &self.shown_ids(photo_ids)?[..];
         let mut report = ForgetReport::default();
         let mut gone = Vec::new();
         {
@@ -432,8 +443,8 @@ impl Catalog {
         for pid in photos {
             let back: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM photos WHERE id = ?1)", [pid], |r| r.get(0))?;
             if !back {
-                let _ = self.data.remove(&self.data.preview_path(*pid));
-                let _ = self.data.remove(&self.data.thumb_path(*pid));
+                let _ = self.remove_copy(&self.data.preview_path(*pid));
+                let _ = self.remove_copy(&self.data.thumb_path(*pid));
             }
         }
         tx.commit()?;
@@ -441,12 +452,16 @@ impl Catalog {
     }
 
     pub fn stats(&self) -> Result<Stats> {
+        // Private photos, while hidden, are left out of every count.
+        let (shown, shown_file) = (self.shown_sql("p"), self.shown_photo_sql("COALESCE(f.photo_id, 0)"));
         let (photos, raw, no_preview, files, missing_files, roots, disks): (i64, i64, i64, i64, i64, i64, i64) =
             self.db().query_row(
                 &format!(
-                    "SELECT (SELECT COUNT(*) FROM photos), (SELECT COUNT(*) FROM photos WHERE kind = 'raw'),
-                            (SELECT COUNT(*) FROM photos WHERE preview_state <> {PREVIEW_OK}),
-                            (SELECT COUNT(*) FROM files), (SELECT COUNT(*) FROM files WHERE state = {FILE_MISSING}),
+                    "SELECT (SELECT COUNT(*) FROM photos p WHERE {shown}),
+                            (SELECT COUNT(*) FROM photos p WHERE kind = 'raw' AND {shown}),
+                            (SELECT COUNT(*) FROM photos p WHERE preview_state <> {PREVIEW_OK} AND {shown}),
+                            (SELECT COUNT(*) FROM files f WHERE {shown_file}),
+                            (SELECT COUNT(*) FROM files f WHERE state = {FILE_MISSING} AND {shown_file}),
                             (SELECT COUNT(*) FROM roots), (SELECT COUNT(DISTINCT volume_id) FROM roots)"
                 ),
                 [],
@@ -530,6 +545,19 @@ impl Catalog {
         let online = self.online.read().unwrap().clone();
         let state = state_sql(&self.online_sql());
         let db = self.read()?;
+        let shown = self.shown_sql("p");
+        // The private photos hidden now and where their files are: few, looked
+        // up from them. Taken off the counts below, and the disks and folders
+        // holding nothing else aren't listed (their names would tell).
+        let hidden_files = self.hidden_files()?;
+        let hidden_in = |vid: i64, root: Option<&str>| -> i64 {
+            let ids: HashSet<i64> = hidden_files
+                .iter()
+                .filter(|(v, rel, _)| *v == vid && root.is_none_or(|r| db::is_under(rel, r)))
+                .map(|(.., id)| *id)
+                .collect();
+            ids.len() as i64
+        };
 
         let mut volumes: Vec<VolumeInfo> = db
             .prepare(
@@ -579,11 +607,25 @@ impl Catalog {
                 })?
                 .collect::<rusqlite::Result<_>>()?;
         }
+        if !hidden_files.is_empty() {
+            for v in &mut volumes {
+                v.roots.retain_mut(|r| {
+                    let hidden = hidden_in(v.id, Some(&r.rel_path));
+                    r.photos -= hidden;
+                    r.photos > 0 || hidden == 0
+                });
+            }
+            volumes.retain_mut(|v| {
+                let hidden = hidden_in(v.id, None);
+                v.photos -= hidden;
+                v.photos > 0 || hidden == 0 || !v.roots.is_empty()
+            });
+        }
 
         // Materialized: each photo's state is looked up once, not once per sum.
         let (total, on, off, missing, marked): (i64, i64, i64, i64, i64) = db.query_row(
             &format!(
-                "WITH st AS MATERIALIZED (SELECT {state} AS s, p.marked FROM photos p)
+                "WITH st AS MATERIALIZED (SELECT {state} AS s, p.marked FROM photos p WHERE {shown})
                  SELECT COUNT(*), COALESCE(SUM(s = 2), 0), COALESCE(SUM(s = 1), 0),
                         COALESCE(SUM(s = 0), 0), COALESCE(SUM(marked), 0)
                    FROM st"
@@ -591,7 +633,10 @@ impl Catalog {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
-        let sideways: i64 = db.query_row("SELECT COUNT(*) FROM photos WHERE sideways > 0", [], |r| r.get(0))?;
+        let sideways: i64 =
+            db.query_row(&format!("SELECT COUNT(*) FROM photos p WHERE sideways > 0 AND {shown}"), [], |r| r.get(0))?;
+        // The photos of the space open now (none while locked): the Private view's count.
+        let private = self.vault.ids().len() as i64;
 
         Ok(Overview {
             volumes,
@@ -601,6 +646,7 @@ impl Catalog {
             missing,
             marked,
             sideways,
+            private,
             data_dir: self.data.root.to_string_lossy().into_owned(),
         })
     }
@@ -638,12 +684,12 @@ impl Catalog {
             "SELECT p.id, COALESCE(p.taken_ts, 0), {state},
                     COALESCE(p.thumb_w, 0), COALESCE(p.thumb_h, 0), p.preview_rev, p.preview_state, p.marked,
                     COALESCE((SELECT {EXT_SQL} FROM files f WHERE f.photo_id = p.id ORDER BY f.state LIMIT 1), ''),
-                    p.kind = 'raw', {fresh}, MAX(COALESCE(p.sideways, 0), 0)
+                    p.kind = 'raw', {fresh}, MAX(COALESCE(p.sideways, 0), 0), p.private
                FROM photos p
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
                 AND (?10 IS NULL OR p.id IN (SELECT value FROM json_each(?10)))
               ORDER BY {order}",
-            filters_sql(filters, &state)
+            self.filters_sql(filters, &state)
         );
         let only = only.map(serde_json::to_string).transpose()?;
         let mut out = PhotoList::default();
@@ -663,6 +709,7 @@ impl Catalog {
             out.raw.push(r.get(9)?);
             out.fresh.push(r.get(10)?);
             out.sideways.push(r.get(11)?);
+            out.private.push(r.get(12)?);
         }
         Ok(out)
     }
@@ -679,7 +726,7 @@ impl Catalog {
                FROM photos p
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
               GROUP BY d ORDER BY d",
-            filters_sql(filters, &state)
+            self.filters_sql(filters, &state)
         );
         let mut stmt = db.prepare(&sql)?;
         let [d, c, l, t, s, pe, tg] = filters.params(None);
@@ -707,7 +754,7 @@ impl Catalog {
         let db = self.read()?;
         let state = state_sql(&self.online_sql());
         let (filter, p1, p2) = self.scope_sql(&db, scope, &state)?;
-        let where_ = format!("{filter} AND (?1 = ?1 AND ?2 = ?2) AND {}", filters_sql(filters, &state));
+        let where_ = format!("{filter} AND (?1 = ?1 AND ?2 = ?2) AND {}", self.filters_sql(filters, &state));
         let count = |value: &str, from: &str, order: &str, own: Facet| -> Result<Vec<(String, i64)>> {
             let sql = format!(
                 "SELECT {value} AS v, COUNT(DISTINCT p.id) FROM {from} WHERE {where_} GROUP BY v ORDER BY {order}"
@@ -720,13 +767,16 @@ impl Catalog {
             Ok(rows)
         };
         let people = {
+            // Their face and how often they're seen: from the photos shown.
+            let (shown2, shown3) = (self.shown_face_sql("f2"), self.shown_face_sql("f3"));
             let sql = format!(
                 "SELECT pe.id, pe.name,
-                        (SELECT f2.id FROM faces f2 WHERE f2.person_id = pe.id ORDER BY f2.score DESC LIMIT 1),
+                        (SELECT f2.id FROM faces f2 WHERE f2.person_id = pe.id AND {shown2} ORDER BY f2.score DESC LIMIT 1),
                         COUNT(DISTINCT p.id)
                    FROM photos p JOIN faces fa ON fa.photo_id = p.id JOIN people pe ON pe.id = fa.person_id
                   WHERE {where_} AND pe.ignored = 0
-                    AND (pe.name IS NOT NULL OR (SELECT COUNT(DISTINCT f3.photo_id) FROM faces f3 WHERE f3.person_id = pe.id) >= 2)
+                    AND (pe.name IS NOT NULL
+                         OR (SELECT COUNT(DISTINCT f3.photo_id) FROM faces f3 WHERE f3.person_id = pe.id AND {shown3}) >= 2)
                   GROUP BY pe.id ORDER BY pe.name IS NULL, COUNT(DISTINCT p.id) DESC, pe.name"
             );
             let [d, c, l, t, s, pe, tg] = filters.params(Some(Facet::People));
@@ -777,9 +827,37 @@ impl Catalog {
             })
             .collect(),
             status: count(&status_sql(&state), "photos p", "v DESC", Facet::Status)?.into_iter().map(value).collect(),
+            private: if self.vault.is_unlocked() {
+                // Counted with every other filter, not its own.
+                let others = Filters { private: Vec::new(), ..filters.clone() };
+                let sql = format!(
+                    "SELECT CASE WHEN p.private = 1 THEN 'private' ELSE 'notPrivate' END AS v, COUNT(*) FROM photos p
+                      WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {} GROUP BY v ORDER BY v DESC",
+                    self.filters_sql(&others, &state)
+                );
+                let [d, c, l, t, s, pe, tg] = others.params(None);
+                db.prepare(&sql)?
+                    .query_map(params![p1, p2, d, c, l, t, s, pe, tg], |r| {
+                        Ok(FacetValue { value: r.get(0)?, count: r.get(1)? })
+                    })?
+                    .collect::<rusqlite::Result<_>>()?
+            } else {
+                Vec::new()
+            },
             people,
             tags,
         })
+    }
+
+    /// [`filters_sql`], and the private filter while a private space is open.
+    fn filters_sql(&self, f: &Filters, state: &str) -> String {
+        let (private, shown) = (f.private.iter().any(|v| v == "private"), f.private.iter().any(|v| v == "notPrivate"));
+        let only = match (self.vault.is_unlocked(), private, shown) {
+            (true, true, false) => " AND p.private = 1",
+            (true, false, true) => " AND p.private = 0",
+            _ => "",
+        };
+        format!("{}{only}", filters_sql(f, state))
     }
 
     /// The SQL condition (on photo alias `p` whose state is `state`) for a
@@ -828,8 +906,10 @@ impl Catalog {
             ),
             Scope::Marked => ("p.marked = 1".into(), 0, String::new()),
             Scope::Sideways => ("p.sideways > 0".into(), 0, String::new()),
+            Scope::Private => (self.mine_sql("p"), 0, String::new()),
         };
-        Ok((filter, p1, p2))
+        // Private photos, while locked, are in no view.
+        Ok((format!("{filter} AND {}", self.shown_sql("p")), p1, p2))
     }
 
     /// Photos whose preview is ready (what the AI reads), with what each
@@ -865,6 +945,7 @@ impl Catalog {
                 out.raw.push(all.raw[i]);
                 out.fresh.push(all.fresh[i]);
                 out.sideways.push(all.sideways[i]);
+                out.private.push(all.private[i]);
             }
         }
         Ok(out)
@@ -880,14 +961,27 @@ impl Catalog {
 
         let mut years: Vec<YearNode> = Vec::new();
         let mut unknown_date = 0;
-        let mut stmt = db.prepare(
-            "SELECT CASE WHEN COALESCE(taken_ts, 0) > 0 THEN strftime('%Y-%m', taken_ts, 'unixepoch') END AS ym, COUNT(*)
-               FROM photos GROUP BY ym ORDER BY ym",
-        )?;
+        let shown = self.shown_sql("p");
+        let month = "CASE WHEN COALESCE(taken_ts, 0) > 0 THEN strftime('%Y-%m', taken_ts, 'unixepoch') END";
+        // The hidden private photos by month (few, looked up from them), taken off.
+        let hidden_months: HashMap<Option<String>, i64> = if self.hides_any() {
+            db.prepare(&format!(
+                "SELECT {month} AS ym, COUNT(*) FROM photos WHERE id IN {} GROUP BY ym",
+                self.hidden_ids_sql()
+            ))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+        } else {
+            HashMap::new()
+        };
+        let mut stmt = db.prepare(&format!("SELECT {month} AS ym, COUNT(*) FROM photos GROUP BY ym ORDER BY ym"))?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
             let ym: Option<String> = r.get(0)?;
-            let n: i64 = r.get(1)?;
+            let n: i64 = r.get::<_, i64>(1)? - hidden_months.get(&ym).copied().unwrap_or(0);
+            if n == 0 {
+                continue;
+            }
             let Some(ym) = ym else {
                 unknown_date = n;
                 continue;
@@ -903,16 +997,28 @@ impl Catalog {
         drop(rows);
         drop(stmt);
 
-        let gear = gear::list(&db)?;
+        let gear = gear::list(&db, &shown)?;
 
         // Photos per folder (directly in it), then rolled up into a tree per
-        // root. Empty folders (just made, or emptied) are listed too.
-        let direct: Vec<(i64, String, i64)> = db
+        // root. Empty folders (just made, or emptied) are listed too; those
+        // holding only private photos, while hidden, are not.
+        let mut hidden_in: HashMap<(i64, &str), HashSet<i64>> = HashMap::new();
+        let hidden_files = self.hidden_files()?;
+        for (vid, rel, id) in &hidden_files {
+            hidden_in.entry((*vid, rel.as_str())).or_default().insert(*id);
+        }
+        let direct: Vec<(i64, String, i64, i64)> = db
             .prepare(
                 "SELECT fo.volume_id, fo.rel_path, COUNT(DISTINCT f.photo_id) FROM folders fo
                    LEFT JOIN files f ON f.folder_id = fo.id GROUP BY fo.id",
             )?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .map(|row| {
+                row.map(|(vid, rel, n): (i64, String, i64)| {
+                    let hidden = hidden_in.get(&(vid, rel.as_str())).map_or(0, |s| s.len() as i64);
+                    (vid, rel, n, hidden)
+                })
+            })
             .collect::<rusqlite::Result<_>>()?;
         let roots: Vec<(i64, i64, String)> = db
             .prepare("SELECT id, volume_id, rel_path FROM roots")?
@@ -921,10 +1027,11 @@ impl Catalog {
         let mut folders = Vec::new();
         for (root_id, vid, root_rel) in roots {
             let mut top = FolderNode::new(String::new(), root_rel.clone(), vid);
-            for (v, rel, n) in direct.iter().filter(|(v, rel, _)| *v == vid && db::is_under(rel, &root_rel)) {
+            for (v, rel, n, hidden) in direct.iter().filter(|(v, rel, ..)| *v == vid && db::is_under(rel, &root_rel)) {
                 let rest = rel.get(root_rel.len()..).unwrap_or("").trim_start_matches(SEP);
-                top.insert(rest, rel, *v, *n);
+                top.insert(rest, rel, *v, n - hidden, *hidden);
             }
+            top.drop_hidden();
             top.sort();
             folders.push(RootTree { root_id, children: top.children });
         }
@@ -937,10 +1044,13 @@ impl Catalog {
         let db = self.read()?;
         let (focus, mut d) = db
             .query_row(
-                "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
-                        exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown, p.turn,
-                        MAX(COALESCE(p.sideways, 0), 0), p.focus
-                   FROM photos p WHERE id = ?1",
+                &format!(
+                    "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
+                            exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown, p.turn,
+                            MAX(COALESCE(p.sideways, 0), 0), p.focus, p.private
+                       FROM photos p WHERE id = ?1 AND {}",
+                    self.shown_sql("p")
+                ),
                 [id],
                 |r| {
                     let focus: Option<Vec<u8>> = r.get(20)?;
@@ -967,6 +1077,7 @@ impl Catalog {
                             lens: r.get::<_, Option<String>>(17)?.filter(|l| l != Kind::Lens.unknown()),
                             turn: r.get(18)?,
                             sideways: r.get(19)?,
+                            private: r.get::<_, i64>(21)? == 1,
                             focus: None,
                             problems: Vec::new(),
                             files: Vec::new(),
@@ -1180,6 +1291,7 @@ impl Catalog {
     /// A copy of the photo that can be read now (disk plugged in, file there),
     /// its kind, and how the user turned it (quarter turns clockwise).
     pub fn original(&self, photo_id: i64) -> Result<(PathBuf, crate::formats::Kind, u8)> {
+        self.check_shown(photo_id)?;
         let (kind, turn, files): (String, i64, Vec<i64>) = {
             let db = self.read()?;
             let (kind, turn) = db
@@ -1207,6 +1319,7 @@ impl Catalog {
 
     /// The photo's long edge at full size, px, when its files say.
     pub fn full_size(&self, photo_id: i64) -> Option<u32> {
+        self.check_shown(photo_id).ok()?;
         let db = self.read().ok()?;
         let (w, h): (Option<u32>, Option<u32>) = db
             .query_row("SELECT width, height FROM photos WHERE id = ?1", [photo_id], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -1217,6 +1330,7 @@ impl Catalog {
     /// Camera, exposure and a file name of each photo, by id (each found
     /// through its own row, whatever the catalog's size).
     pub fn shot_info(&self, ids: &[i64]) -> Result<HashMap<i64, crate::cull::ShotInfo>> {
+        let ids = &self.shown_ids(ids)?[..];
         let db = self.read()?;
         let mut stmt = db.prepare(
             "SELECT p.id, p.camera_shown, p.exposure, p.focal, (SELECT MIN(f.name) FROM files f WHERE f.photo_id = p.id)
@@ -1245,11 +1359,17 @@ impl Catalog {
 
     /// Full path of a file whose disk is plugged in.
     pub fn file_path(&self, file_id: i64) -> Result<String> {
-        let (vid, rel, name): (i64, String, String) = self.read()?.query_row(
-            "SELECT fo.volume_id, fo.rel_path, f.name FROM files f JOIN folders fo ON fo.id = f.folder_id WHERE f.id = ?1",
+        let (vid, rel, name, photo): (i64, String, String, Option<i64>) = self.read()?.query_row(
+            "SELECT fo.volume_id, fo.rel_path, f.name, f.photo_id FROM files f JOIN folders fo ON fo.id = f.folder_id
+              WHERE f.id = ?1",
             [file_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
+        if let Some(photo) = photo
+            && self.check_shown(photo).is_err()
+        {
+            bail!("Unknown file {file_id}");
+        }
         let mount = self.mount_of(vid).ok_or_else(|| anyhow!("That disk is not plugged in"))?;
         if self.is_unreachable(vid, &rel) {
             bail!("That folder isn't where it was on the disk");
@@ -1272,7 +1392,8 @@ pub(crate) struct Kept<T> {
     answers: Mutex<VecDeque<Answer<T>>>,
 }
 
-/// What [`Catalog::generation`] counts: commits seen, and disk or folder changes.
+/// What [`Catalog::generation`] counts: commits seen, and disk or folder
+/// changes (private photos locked or unlocked counted with them).
 pub type Generation = (u64, u64);
 
 struct Answer<T> {
@@ -1539,6 +1660,8 @@ pub enum Scope {
     /// Photos the upright model finds sideways or upside down, waiting for the
     /// user to turn them or leave them as they are.
     Sideways,
+    /// The private photos of the space open now (none while locked).
+    Private,
 }
 
 /// Narrows any view. Within a filter any ticked value matches, except where a
@@ -1564,6 +1687,9 @@ pub struct Filters {
     pub tags: Vec<i64>,
     /// Photos with all of `tags` (default: tags narrow down), or any of them.
     pub tags_match: Match,
+    /// "private" and/or "notPrivate": only while a private space is open
+    /// (otherwise there is nothing private to tell apart, and it is left out).
+    pub private: Vec<String>,
 }
 
 impl Default for Filters {
@@ -1578,6 +1704,7 @@ impl Default for Filters {
             people_match: Match::Any,
             tags: Vec::new(),
             tags_match: Match::All,
+            private: Vec::new(),
         }
     }
 }
@@ -1633,6 +1760,7 @@ impl Filters {
             && self.status.is_empty()
             && self.people.is_empty()
             && self.tags.is_empty()
+            && self.private.is_empty()
     }
 }
 
@@ -1711,6 +1839,8 @@ pub struct Facets {
     pub lenses: Vec<FacetValue>,
     pub types: Vec<TypeValue>,
     pub status: Vec<FacetValue>,
+    /// "private" and "notPrivate", while a private space is open (none otherwise).
+    pub private: Vec<FacetValue>,
     /// Named people first, then unnamed ones seen in 2+ photos; never ignored strangers.
     pub people: Vec<PersonValue>,
     /// Tags on the photos shown, most used first.
@@ -1774,16 +1904,21 @@ pub struct FolderNode {
     /// Photos in this folder and everything below it.
     pub count: i64,
     pub children: Vec<FolderNode>,
+    /// Private photos in it and below, while they are hidden.
+    #[serde(skip)]
+    hidden: i64,
 }
 
 impl FolderNode {
     fn new(name: String, rel_path: String, volume_id: i64) -> Self {
-        Self { name, rel_path, volume_id, count: 0, children: Vec::new() }
+        Self { name, rel_path, volume_id, count: 0, children: Vec::new(), hidden: 0 }
     }
 
-    /// Adds `n` photos at `rest` (path below this node) and to every node on the way.
-    fn insert(&mut self, rest: &str, full_rel: &str, volume_id: i64, n: i64) {
+    /// Adds `n` photos (and `hidden` private ones) at `rest` (path below this
+    /// node) and to every node on the way.
+    fn insert(&mut self, rest: &str, full_rel: &str, volume_id: i64, n: i64, hidden: i64) {
         self.count += n;
+        self.hidden += hidden;
         if rest.is_empty() {
             return;
         }
@@ -1796,7 +1931,16 @@ impl FolderNode {
                 self.children.len() - 1
             }
         };
-        self.children[idx].insert(tail, full_rel, volume_id, n);
+        self.children[idx].insert(tail, full_rel, volume_id, n, hidden);
+    }
+
+    /// Leaves out the folders holding nothing but hidden private photos:
+    /// their names would tell.
+    fn drop_hidden(&mut self) {
+        self.children.retain(|c| c.count > 0 || c.hidden == 0);
+        for c in &mut self.children {
+            c.drop_hidden();
+        }
     }
 
     /// A to Z as Explorer does: numbers by value ("IMG2" before "IMG10"), so
@@ -1891,6 +2035,8 @@ pub struct PhotoList {
     pub flags: Vec<u32>,
     /// The quarter turns clockwise the upright model suggests (0: none).
     pub sideways: Vec<i64>,
+    /// 1 = a private photo (listed only while they are unlocked).
+    pub private: Vec<i64>,
 }
 
 /// Photos per day, for the calendar.
@@ -1921,6 +2067,8 @@ pub struct Overview {
     pub marked: i64,
     /// Suggested for turning by the upright model, waiting for the user.
     pub sideways: i64,
+    /// Private photos of the space open now (0 while locked).
+    pub private: i64,
     pub data_dir: String,
 }
 
@@ -1976,6 +2124,8 @@ pub struct PhotoDetail {
     pub turn: i64,
     /// Quarter turns clockwise the upright model suggests (0: none).
     pub sideways: i64,
+    /// A private photo (shown only while they are unlocked).
+    pub private: bool,
     /// Where the camera focused, as the photo is shown; None when its file doesn't say.
     pub focus: Option<crate::focus::Focus>,
     /// What Cull found wrong with it, once measured: filled in by

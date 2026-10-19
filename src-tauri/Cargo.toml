@@ -68,6 +68,11 @@ sha2 = "0.10"
 zip = { version = "9.0.2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"
+# Private photos: Shoebox's copies of them sealed to keys worked out from the
+# user's password (Argon2id), which is never kept.
+crypto_box = { version = "0.9.1", features = ["seal"] }
+argon2 = "0.5.3"
+zeroize = "1.9"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

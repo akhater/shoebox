@@ -519,14 +519,15 @@ pub struct Gear {
     pub lenses: Vec<GearItem>,
 }
 
-/// Every camera and lens, most used first, the unknowns last.
-pub fn list(db: &Connection) -> Result<Gear> {
+/// Every camera and lens of the photos `shown` (SQL condition on photo alias
+/// `p`, see [`crate::catalog::Catalog::shown_sql`]), most used first, the unknowns last.
+pub fn list(db: &Connection, shown: &str) -> Result<Gear> {
     let items = |kind: Kind| -> Result<Vec<GearItem>> {
         let files = kind.files_sql();
         let sql = format!(
             "SELECT {} AS s, {files} AS f, COUNT(*),
                     EXISTS (SELECT 1 FROM gear_names g WHERE g.kind = ?1 AND g.name = {files} AND g.by_hand = 1)
-               FROM photos p GROUP BY s, f",
+               FROM photos p WHERE {shown} GROUP BY s, f",
             kind.stored_sql()
         );
         let mut out: Vec<GearItem> = Vec::new();
@@ -783,7 +784,7 @@ mod tests {
         add(&db, "NIKON CORPORATION", "NIKON D850", Some("Sigma 35mm F1.4 DG HSM | A"), 1);
         add(&db, "Nikon", "D850", None, 1);
         tidy(&db).unwrap();
-        let g = list(&db).unwrap();
+        let g = list(&db, "1").unwrap();
         assert_eq!(
             shown(&g.lenses),
             [("Canon EF 70-200mm f/4L IS USM", 5), ("Sigma 35mm F1.4 DG HSM | A", 1), ("Unknown lens", 1)]
@@ -795,16 +796,16 @@ mod tests {
         assert_eq!(rename(&db, Kind::Lens, "Canon EF 70-200mm f/4L IS USM", "70-200 f/4").unwrap(), "70-200 f/4");
         add(&db, "Canon", "EOS R6 Mark III", Some("EF 70-200mm F4L IS USM"), 1);
         tidy(&db).unwrap();
-        assert_eq!(shown(&list(&db).unwrap().lenses)[0], ("70-200 f/4", 6));
+        assert_eq!(shown(&list(&db, "1").unwrap().lenses)[0], ("70-200 f/4", 6));
 
         // Renaming onto a name shown (any case) merges, keeping its spelling.
         assert_eq!(rename(&db, Kind::Lens, "Sigma 35mm F1.4 DG HSM | A", "70-200 F/4").unwrap(), "70-200 f/4");
-        assert_eq!(shown(&list(&db).unwrap().lenses)[0], ("70-200 f/4", 7));
+        assert_eq!(shown(&list(&db, "1").unwrap().lenses)[0], ("70-200 f/4", 7));
 
         // Split: back to the files' names, kept apart from now on.
         split(&db, Kind::Lens, "70-200 f/4").unwrap();
         tidy(&db).unwrap();
-        assert_eq!(list(&db).unwrap().lenses.len(), 5);
+        assert_eq!(list(&db, "1").unwrap().lenses.len(), 5);
         assert!(rename(&db, Kind::Lens, "Unknown lens", "50mm").is_err());
         assert!(rename(&db, Kind::Lens, "Nothing like it", "50mm").is_err());
     }
@@ -849,7 +850,7 @@ mod tests {
         add(&db, "Nikon", "D700", Some("100-400mm f/4.5-5.6"), 1); // the same, both ends given
         add(&db, "Nikon", "D700", Some("100-400mm f/4-5.6"), 1); // not the same
         tidy(&db).unwrap();
-        let g = list(&db).unwrap();
+        let g = list(&db, "1").unwrap();
         assert_eq!(
             shown(&g.lenses),
             [
@@ -866,7 +867,7 @@ mod tests {
         // The user's name for the lens: it joins that.
         rename(&db, Kind::Lens, "Canon EF 24-70mm f/2.8L USM", "My 24-70").unwrap();
         tidy(&db).unwrap();
-        assert_eq!(shown(&list(&db).unwrap().lenses)[0], ("My 24-70", 5));
+        assert_eq!(shown(&list(&db, "1").unwrap().lenses)[0], ("My 24-70", 5));
 
         // Two lenses fit (a Canon and a Tamron 24-70 f/2.8): no guess.
         let db = catalog();
@@ -875,7 +876,7 @@ mod tests {
         add(&db, "Canon", "EOS 10D", Some("24-70mm f/2.8"), 3);
         tidy(&db).unwrap();
         assert_eq!(
-            shown(&list(&db).unwrap().lenses),
+            shown(&list(&db, "1").unwrap().lenses),
             [("24-70mm f/2.8", 3), ("Canon EF 24-70mm f/2.8L USM", 2), ("Tamron SP 24-70mm F/2.8 Di VC USD", 1)]
         );
     }

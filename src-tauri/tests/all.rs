@@ -31,6 +31,7 @@ mod people_ignore;
 mod people_read;
 mod photo_folder;
 mod photoshop;
+mod private_photos;
 mod reassign_faces;
 mod regroup_resumes;
 mod scan_copies;

@@ -351,8 +351,57 @@ fn migrate(conn: &Connection) -> Result<()> {
         };
         conn.execute_batch(&format!("BEGIN; {columns} {SCHEMA_V18} PRAGMA user_version = 18; COMMIT;"))?;
     }
+    // Private photos: looked for at every open (one look at the catalog), not
+    // by version, so they don't depend on the order changes reach a catalog.
+    let has = |sql: &str| -> Result<bool> { Ok(conn.prepare(sql)?.exists([])?) };
+    if !has("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'photos_private_faces'")? {
+        let mut columns = String::new();
+        for (table, column, def) in [
+            ("photos", "private", "INTEGER NOT NULL DEFAULT 0"),
+            ("photos", "seal_to", "BLOB"),
+            ("faces", "private", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !has(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = '{column}'"))? {
+                columns.push_str(&format!("ALTER TABLE {table} ADD COLUMN {column} {def};"));
+            }
+        }
+        conn.execute_batch(&format!("BEGIN; {columns} {SCHEMA_PRIVATE} COMMIT;"))?;
+    }
     Ok(())
 }
+
+/// Private photos (see private.rs): `photos.private` = 1 hides a photo unless
+/// the space it is in is open; `photos.seal_to` is the public key its copies
+/// are sealed to (its own: it says nothing about its space). Few of them: an
+/// index of their own keeps finding them as small as they are.
+/// Their faces carry the flag too (`faces.private`, kept by triggers), and
+/// it sits in the indexes the views count through (dates, cameras, lenses,
+/// a person's faces): leaving private photos out reads nothing more.
+const SCHEMA_PRIVATE: &str = r#"
+CREATE INDEX IF NOT EXISTS photos_private ON photos (id) WHERE private = 1;
+CREATE INDEX IF NOT EXISTS photos_taken_private ON photos (taken_ts, private);
+CREATE INDEX IF NOT EXISTS photos_camera_private ON photos (camera_shown, private);
+CREATE INDEX IF NOT EXISTS photos_lens_private ON photos (lens_shown, private);
+DROP INDEX IF EXISTS photos_taken;
+DROP INDEX IF EXISTS photos_camera_shown;
+DROP INDEX IF EXISTS photos_lens_shown;
+UPDATE faces SET private = 1 WHERE photo_id IN (SELECT id FROM photos WHERE private = 1);
+CREATE INDEX IF NOT EXISTS faces_person_private ON faces (person_id, photo_id, private);
+CREATE INDEX IF NOT EXISTS faces_person_cover ON faces (person_id, score, private);
+DROP INDEX IF EXISTS faces_person_photo;
+DROP INDEX IF EXISTS faces_person_score;
+CREATE TRIGGER IF NOT EXISTS faces_private_added AFTER INSERT ON faces
+  WHEN EXISTS (SELECT 1 FROM photos WHERE id = NEW.photo_id AND private = 1) BEGIN
+    UPDATE faces SET private = 1 WHERE id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS faces_private_moved AFTER UPDATE OF photo_id ON faces BEGIN
+    UPDATE faces SET private = (SELECT private FROM photos WHERE id = NEW.photo_id) WHERE id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS photos_private_faces AFTER UPDATE OF private ON photos
+  WHEN NEW.private IS NOT OLD.private BEGIN
+    UPDATE faces SET private = NEW.private WHERE photo_id = NEW.id;
+END;
+"#;
 
 /// Where the camera focused (see focus.rs). `photos.focus`: the points a
 /// photo used, and which layout of points its camera has: each layout once

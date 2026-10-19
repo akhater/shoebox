@@ -327,7 +327,7 @@ pub fn heal_saved_previews(cat: &Catalog) -> Result<usize> {
     let mut healed = 0;
     for pid in suspects {
         let (Ok(_), Ok((tw, th))) =
-            (image::image_dimensions(cat.data.preview_path(pid)), image::image_dimensions(cat.data.thumb_path(pid)))
+            (cat.copy_dimensions(&cat.data.preview_path(pid)), cat.copy_dimensions(&cat.data.thumb_path(pid)))
         else {
             continue;
         };
@@ -811,12 +811,12 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
         Err(e) => Err(anyhow!("{e}")),
     }
     .map_err(|e| e.to_string());
+    // Sealed when the photo is private.
     let saved = rendered.and_then(|r| {
-        cat.data
-            .write(&cat.data.preview_path(pid), &r.preview)
-            .and_then(|_| cat.data.write(&cat.data.thumb_path(pid), &r.thumb))
+        cat.write_copy(pid, &cat.data.preview_path(pid), &r.preview)
+            .and_then(|_| cat.write_copy(pid, &cat.data.thumb_path(pid), &r.thumb))
             .map(|_| (r.thumb_w, r.thumb_h))
-            .map_err(|e| format!("saving preview: {e}"))
+            .map_err(|e| format!("saving preview: {e:#}"))
     });
     let db = cat.db();
     match saved {

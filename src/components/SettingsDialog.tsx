@@ -8,6 +8,7 @@ import {
   fmtNum,
   type FolderCheck,
   type MoveProgress,
+  type PrivateStatus,
   type Settings,
   type Stats,
   type UpdateStatus,
@@ -15,6 +16,7 @@ import {
   BIN,
 } from "../api";
 import { ModelsTab } from "./ModelsTab";
+import { PrivateTab } from "./Private";
 
 const SIZES = [720, 1080, 1440, 2048, 2560, 3840];
 const QUALITIES: [number, string][] = [
@@ -24,10 +26,11 @@ const QUALITIES: [number, string][] = [
   [90, "90 - largest"],
 ];
 
-export type SettingsTab = "general" | "models";
+export type SettingsTab = "general" | "models" | "private";
 const TABS: [SettingsTab, string][] = [
   ["general", "General"],
   ["models", "AI models"],
+  ["private", "Private photos"],
 ];
 
 interface Props {
@@ -37,10 +40,25 @@ interface Props {
   /** What the last look for a newer Shoebox found. */
   update: UpdateStatus | null;
   onRegenerateAll: () => void;
+  privateStatus: PrivateStatus | null;
+  /** Private photos opened or locked here. */
+  onPrivateStatus: (s: PrivateStatus) => void;
+  /** The password dialog. */
+  onUnlockPrivate: () => void;
   onClose: () => void;
 }
 
-export function SettingsDialog({ initialTab, dataDir, version, update, onRegenerateAll, onClose }: Props) {
+export function SettingsDialog({
+  initialTab,
+  dataDir,
+  version,
+  update,
+  onRegenerateAll,
+  privateStatus,
+  onPrivateStatus,
+  onUnlockPrivate,
+  onClose,
+}: Props) {
   const [tab, setTab] = useState(initialTab);
   const [stats, setStats] = useState<Stats | null>(null);
   const [s, setS] = useState<Settings | null>(null);
@@ -124,6 +142,23 @@ export function SettingsDialog({ initialTab, dataDir, version, update, onRegener
           ))}
         </div>
         {tab === "models" && <ModelsTab />}
+        {tab === "private" && (
+          <PrivateTab
+            status={privateStatus}
+            onStatus={onPrivateStatus}
+            onUnlock={onUnlockPrivate}
+            lockMinutes={s?.privateLockMinutes}
+            onLockMinutes={async (privateLockMinutes) => {
+              // Saved at once, alone: what is being changed in General waits for its Save.
+              setS((now) => now && { ...now, privateLockMinutes });
+              try {
+                await api.saveSettings({ ...(await api.settings()), privateLockMinutes });
+              } catch (e) {
+                setError(String(e));
+              }
+            }}
+          />
+        )}
         {tab === "general" && s && (
           <div className="form">
             <label>

@@ -43,6 +43,7 @@ use testing::point as kill_point;
 
 /// Marks (or unmarks) photos for deletion. Catalog only: no file is touched.
 pub fn mark(cat: &Catalog, photo_ids: &[i64], marked: bool) -> Result<usize> {
+    let photo_ids = cat.shown_ids(photo_ids)?;
     let mut db = cat.db();
     let tx = db.transaction()?;
     let mut n = 0;
@@ -54,7 +55,9 @@ pub fn mark(cat: &Catalog, photo_ids: &[i64], marked: bool) -> Result<usize> {
 }
 
 pub fn unmark_all(cat: &Catalog) -> Result<usize> {
-    Ok(cat.db().execute("UPDATE photos SET marked = 0 WHERE marked = 1", [])?)
+    Ok(cat
+        .db()
+        .execute(&format!("UPDATE photos AS p SET marked = 0 WHERE marked = 1 AND {}", cat.shown_sql("p")), [])?)
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -100,22 +103,27 @@ pub struct DeletePlan {
     pub token: String,
 }
 
-/// What deleting the marked photos would remove, right now.
+/// What deleting the marked photos would remove, right now. Private photos
+/// marked while unlocked are left alone while they are hidden: nothing is
+/// deleted that the user can't see.
 pub fn plan(cat: &Catalog) -> Result<DeletePlan> {
+    let shown = cat.shown_sql("p");
     let (rows, marked, gone, labels) = {
         let db = cat.db();
         let rows: Vec<(i64, String, i64, String, String, i64)> = db
             .prepare(&format!(
                 "SELECT p.id, p.kind, fo.volume_id, fo.rel_path, f.name, f.size FROM photos p
                    JOIN files f ON f.photo_id = p.id JOIN folders fo ON fo.id = f.folder_id
-                  WHERE p.marked = 1 AND f.state = {FILE_PRESENT} ORDER BY fo.volume_id, fo.rel_path, f.name"
+                  WHERE p.marked = 1 AND f.state = {FILE_PRESENT} AND {shown}
+                  ORDER BY fo.volume_id, fo.rel_path, f.name"
             ))?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        let marked: i64 = db.query_row("SELECT COUNT(*) FROM photos WHERE marked = 1", [], |r| r.get(0))?;
+        let marked: i64 =
+            db.query_row(&format!("SELECT COUNT(*) FROM photos p WHERE marked = 1 AND {shown}"), [], |r| r.get(0))?;
         let gone: Vec<i64> = db
             .prepare(&format!(
-                "SELECT p.id FROM photos p WHERE p.marked = 1
+                "SELECT p.id FROM photos p WHERE p.marked = 1 AND {shown}
                     AND NOT EXISTS (SELECT 1 FROM files f WHERE f.photo_id = p.id AND f.state = {FILE_PRESENT})
                   ORDER BY p.id"
             ))?

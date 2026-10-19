@@ -13,6 +13,8 @@ import {
   Pencil,
   FolderPlus,
   FolderX,
+  LockKeyhole,
+  LockKeyholeOpen,
   RefreshCw,
   Search,
   Sparkles,
@@ -54,6 +56,9 @@ import {
   type Moved,
   type Person,
   type PhotoList,
+  PRIVATE_SHORTCUT,
+  privateApi,
+  type PrivateStatus,
   type Progress,
   type Report,
   type RootInfo,
@@ -66,6 +71,7 @@ import {
   type TurnReport,
   type UpdateStatus,
   updatesApi,
+  withoutPrivate,
 } from "./api";
 import { CalendarView } from "./components/CalendarView";
 import { CullView } from "./components/CullView";
@@ -76,6 +82,7 @@ import { FindMoreDialog } from "./components/FindMoreDialog";
 import { TagEditor } from "./components/Tags";
 import { NameEditor, PeopleView, PersonSearch } from "./components/PeopleView";
 import { PhotoGrid } from "./components/PhotoGrid";
+import { PrivateDialog } from "./components/Private";
 import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
 import { Sidebar, type FolderTarget } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
@@ -98,6 +105,7 @@ const EMPTY: PhotoList = {
   fresh: [],
   flags: [],
   sideways: [],
+  private: [],
 };
 
 /** What a turn did, for the status bar. `how`: the words for the turn, when all turned alike. */
@@ -284,6 +292,14 @@ export default function App() {
   const movingFrom = useRef<FolderTarget | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   const settingsOpen = settingsTab !== null;
+  // Private photos: locked at every start, and while locked nothing shows they exist.
+  // Ctrl+Shift+L (or Settings) asks for a password: each opens its own space. The
+  // first photos made private in a space ask for its password again (`confirm`).
+  const [privateStatus, setPrivateStatus] = useState<PrivateStatus | null>(null);
+  const [privateAsk, setPrivateAsk] = useState<
+    { mode: "unlock" } | { mode: "confirm"; hide: (password: string) => Promise<number> } | null
+  >(null);
+  const unlocked = privateStatus?.unlocked ?? false;
   // A message about a missing AI model offers to open Settings > AI models.
   // (Its shoebox-cli hint is for agents, not the window.)
   const modelHint = (text: string): Message =>
@@ -603,6 +619,85 @@ export default function App() {
   };
 
   const run = (p: Promise<unknown>) => p.catch((e) => setMessage({ text: String(e), warn: true }));
+
+  // Private photos. Locking hides them at once: from the grid before the next
+  // answer comes, from the viewer, the selection and the Private view.
+  useEffect(() => {
+    privateApi
+      .status()
+      .then(setPrivateStatus)
+      .catch(() => {});
+  }, []);
+  const privateChanged = useLatest((s: PrivateStatus) => {
+    setPrivateStatus(s);
+    setPrivateAsk(null);
+    if (!s.unlocked) {
+      setLoaded((v) => ({ ...v, list: withoutPrivate(v.list) }));
+      setViewerId(null);
+      setSelected(new Set());
+      setTagging(null);
+      // The Private filter only exists while open.
+      setFilters((f) => (f.private.length ? { ...f, private: [] } : f));
+    }
+    // Another space may be open now: the Private view shows its photos, or All photos once locked.
+    if (!s.unlocked && scopeRef.current.kind === "private") setScope({ kind: "all" });
+    refresh();
+  });
+  const lockPrivate = useLatest(() => run(privateApi.lock().then(privateChanged)));
+  // Ctrl+Shift+L, from anywhere: a password, or lock.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey || e.key.toLowerCase() !== "l") return;
+      e.preventDefault();
+      if (unlocked) lockPrivate();
+      else setPrivateAsk({ mode: "unlock" });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [unlocked, lockPrivate]);
+  // Open, they lock again after a while without using Shoebox (Settings).
+  useEffect(() => {
+    if (!unlocked) return;
+    let minutes = 5;
+    let last = Date.now();
+    api
+      .settings()
+      .then((s) => (minutes = s.privateLockMinutes || 5))
+      .catch(() => {});
+    const used = () => (last = Date.now());
+    const events = ["pointerdown", "pointermove", "keydown", "wheel"] as const;
+    events.forEach((e) => window.addEventListener(e, used, { passive: true }));
+    const t = window.setInterval(() => {
+      if (Date.now() - last > minutes * 60_000) lockPrivate();
+    }, 10_000);
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, used));
+      window.clearInterval(t);
+    };
+  }, [unlocked, lockPrivate]);
+  /** Makes photos private in the space open now; its first ones ask for its password again. */
+  const hidePrivate = useLatest((hide: (confirm?: string) => Promise<number>) => {
+    const done = (n: number) => {
+      setMessage({
+        text: `${n === 1 ? "1 photo" : `${fmtNum(n)} photos`} made private: hidden everywhere once you lock (${PRIVATE_SHORTCUT}).`,
+      });
+      refresh();
+      return n;
+    };
+    if ((overview?.private ?? 0) === 0) setPrivateAsk({ mode: "confirm", hide: (password) => hide(password).then(done) });
+    else hide().then(done, (e) => setMessage({ text: String(e), warn: true }));
+  });
+  const makePrivate = useLatest(async (ids: number[], isPrivate: boolean) => {
+    if (isPrivate) return hidePrivate((confirm) => privateApi.hide(ids, confirm));
+    try {
+      const n = await privateApi.show(ids);
+      setMessage({ text: `${n === 1 ? "1 photo" : `${fmtNum(n)} photos`} no longer private.` });
+      refresh();
+    } catch (e) {
+      setMessage({ text: String(e), warn: true });
+    }
+  });
+  const makeFolderPrivate = useLatest((s: Scope) => hidePrivate((confirm) => privateApi.hideIn(s, confirm)));
 
   // Culling: the mark shows at once; the list isn't reloaded, so a photo
   // unmarked in "Marked for deletion" stays put until the next refresh.
@@ -1099,6 +1194,11 @@ export default function App() {
     () => (current && selected.size > 0 ? shown.ids.filter((id, i) => shown.state[i] === 0 && selected.has(id)) : []),
     [current, selected, shown],
   );
+  // Selected photos that are private (listed only while their space is open).
+  const privateSelected = useMemo(
+    () => (unlocked && selected.size > 0 ? shown.ids.filter((id, i) => shown.private[i] === 1 && selected.has(id)) : []),
+    [unlocked, selected, shown],
+  );
   const focusIndex = useMemo(() => (focusId == null ? null : shown.ids.indexOf(focusId)), [focusId, shown]);
   // Stable, so the grid isn't drawn again for a scan's progress or a letter typed in the search box.
   const openPhoto = useLatest((i: number) => setViewerId(shown.ids[i]));
@@ -1168,6 +1268,7 @@ export default function App() {
     if (scope.kind === "missing") return { title: "Missing" };
     if (scope.kind === "marked") return { title: "Marked for deletion" };
     if (scope.kind === "sideways") return { title: "Sideways" };
+    if (scope.kind === "private") return { title: "Private", sub: `Hidden everywhere once you lock (${PRIVATE_SHORTCUT})` };
     if (scope.kind === "date") return { title: fmtDateKey(scope.key) };
     if (scope.kind === "camera" || scope.kind === "lens") {
       const items = (scope.kind === "camera" ? browse?.gear.cameras : browse?.gear.lenses) ?? [];
@@ -1217,7 +1318,9 @@ export default function App() {
                     ? "missing"
                     : scope.kind === "sideways"
                       ? "that look sideways"
-                      : "in the catalog";
+                      : scope.kind === "private"
+                        ? "that are private"
+                        : "in the catalog";
     const filtered = filtersOn(filters) ? ", as the filters narrow them" : "";
     if (current && n > CULL_MAX)
       return `Cull works on up to ${fmtNum(CULL_MAX)} photos at once; this view has ${fmtNum(n)}: pick a folder or a day, or narrow it with the filters`;
@@ -1274,6 +1377,9 @@ export default function App() {
           setScope(s);
           setFocusId(null);
         }}
+        privateUnlocked={unlocked}
+        onLockPrivate={lockPrivate}
+        onMakePrivate={makeFolderPrivate}
         onAddFolder={addFolder}
         onRescan={(id) => run(api.rescan(id))}
         onRename={(id, label) => run(api.renameVolume(id, label).then(refresh))}
@@ -1705,7 +1811,15 @@ export default function App() {
               selected={selected}
               binned={inBin}
               keyboard={
-                current && viewerIndex < 0 && !calendar && !deleteOpen && !settingsOpen && !straysFor && !tagging && !reassigning
+                current &&
+                viewerIndex < 0 &&
+                !calendar &&
+                !deleteOpen &&
+                !settingsOpen &&
+                !privateAsk &&
+                !straysFor &&
+                !tagging &&
+                !reassigning
               }
               focusRequest={gridFocus}
               focusIndex={focusIndex}
@@ -1774,6 +1888,24 @@ export default function App() {
                     <UserX size={15} /> Not {personHere.name?.split(" ")[0] ?? "them"}…
                   </button>
                 )}
+                {unlocked && privateSelected.length < selected.size && (
+                  <button
+                    className="btn ghost"
+                    onClick={() => makePrivate(shown.ids.filter((id, i) => selected.has(id) && shown.private[i] !== 1), true)}
+                    title="Hidden from every view, search, People and agent once you lock"
+                  >
+                    <LockKeyhole size={15} /> Make private
+                  </button>
+                )}
+                {unlocked && privateSelected.length > 0 && (
+                  <button
+                    className="btn ghost"
+                    onClick={() => makePrivate(privateSelected, false)}
+                    title="Ordinary photos again: shown everywhere, locked or not"
+                  >
+                    <LockKeyholeOpen size={15} /> Not private
+                  </button>
+                )}
                 {missingSelected.length > 0 && (
                   <button
                     className="btn ghost"
@@ -1825,6 +1957,7 @@ export default function App() {
           onToggleMark={() => setMarked([shown.ids[viewerIndex]], shown.marked[viewerIndex] !== 1)}
           onForget={() => forgetMissing([shown.ids[viewerIndex]])}
           onTagsChanged={refreshSoon}
+          onPrivate={unlocked ? (isPrivate) => makePrivate([shown.ids[viewerIndex]], isPrivate) : undefined}
           onTurn={(ids, by) => turnPhotos(ids, by)}
           suggested={suggestions}
           showTurned={asTurned}
@@ -1919,7 +2052,21 @@ export default function App() {
           version={version}
           update={update}
           onRegenerateAll={() => regenerate(null)}
+          privateStatus={privateStatus}
+          onPrivateStatus={privateChanged}
+          onUnlockPrivate={() => setPrivateAsk({ mode: "unlock" })}
           onClose={() => setSettingsTab(null)}
+        />
+      )}
+      {privateAsk && (
+        <PrivateDialog
+          mode={privateAsk.mode}
+          onUnlocked={privateChanged}
+          onConfirmed={async (password) => {
+            if (privateAsk.mode === "confirm") await privateAsk.hide(password);
+            setPrivateAsk(null);
+          }}
+          onClose={() => setPrivateAsk(null)}
         />
       )}
     </div>

@@ -10,6 +10,7 @@ import {
   FolderX,
   HardDrive,
   Images,
+  LockKeyholeOpen,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
@@ -30,6 +31,7 @@ import {
 import {
   fmtAgo,
   fmtNum,
+  PRIVATE_SHORTCUT,
   sameScope,
   type Browse,
   type FolderNode,
@@ -63,6 +65,12 @@ interface Props {
   /** `newOnly`: open People with "Only new" on (the yellow number). */
   onPeople: (newOnly?: boolean) => void;
   onScope: (s: Scope) => void;
+  /** A private space is open: the Private view and "Make private" exist only then. */
+  privateUnlocked: boolean;
+  /** Hides private photos again. */
+  onLockPrivate: () => void;
+  /** Makes every photo of a folder private. */
+  onMakePrivate: (s: Scope) => void;
   onAddFolder: () => void;
   onRescan: (rootId: number) => void;
   onRegenerate: (rootId: number) => void;
@@ -489,6 +497,15 @@ export function Sidebar(p: Props) {
                 <TurnPhotoIcon size={16} />
               </RailItem>
             )}
+            {p.privateUnlocked && (
+              <RailItem
+                label={`Private · ${fmtNum(overview?.private ?? 0)} · open (${PRIVATE_SHORTCUT} locks)`}
+                className={cls({ kind: "private" })}
+                onClick={() => onScope({ kind: "private" })}
+              >
+                <LockKeyholeOpen size={16} className="private-icon" />
+              </RailItem>
+            )}
           </div>
           <div className="rail-sep" />
           <div className="nav-group">
@@ -628,6 +645,30 @@ export function Sidebar(p: Props) {
               <TurnPhotoIcon size={16} />
               <span className="grow">Sideways</span>
               <span className="count">{fmtNum(overview?.sideways ?? 0)}</span>
+            </button>
+          )}
+          {p.privateUnlocked && (
+            <button
+              {...nav(0)}
+              className={cls({ kind: "private" })}
+              onClick={() => onScope({ kind: "private" })}
+              title="The private photos of this password. Open: they show everywhere until you lock again"
+            >
+              <LockKeyholeOpen size={16} className="private-icon" />
+              <span className="grow">Private</span>
+              <span
+                className="nav-lock"
+                role="button"
+                aria-label="Lock private photos"
+                title={`Lock: hide private photos everywhere again (${PRIVATE_SHORTCUT})`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  p.onLockPrivate();
+                }}
+              >
+                Lock
+              </span>
+              <span className="count">{fmtNum(overview?.private ?? 0)}</span>
             </button>
           )}
         </div>
@@ -857,6 +898,16 @@ function FolderMenu({
       <button disabled={!t.v.online || busy || waiting} onClick={act(() => p.onRescan(t.rootId))}>
         Scan again
       </button>
+      {p.privateUnlocked && (
+        <button
+          onClick={act(() =>
+            p.onMakePrivate(t.root ? { kind: "root", id: t.rootId } : { kind: "folder", volumeId: t.v.id, relPath: t.relPath }),
+          )}
+          title="Its photos and those of its subfolders: hidden everywhere once you lock"
+        >
+          Make its photos private
+        </button>
+      )}
       {t.root && (
         <>
           <button disabled={!t.v.online} onClick={act(() => p.onRegenerate(t.rootId))}>

@@ -64,6 +64,11 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   (Z and live view), Sony, Fujifilm, Olympus and OM System, Panasonic and
   Leica, Pentax (live view) cameras, and phones; shown for photos on unplugged
   drives too.
+- **Private photos.** Press Ctrl+Shift+L and type a password: every password
+  opens its own private space, like a wallet's passphrase, and none is ever
+  refused. Photos you make private there are hidden from every view, count,
+  search and script until that password opens them again, and Shoebox's own
+  copies of them are sealed on disk. The photo files are never touched.
 - **Scriptable.** Everything the window does is also available from
   `shoebox-cli`, with JSON output, for scripts and AI agents.
 

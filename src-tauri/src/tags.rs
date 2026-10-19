@@ -27,13 +27,18 @@ fn clean(name: &str) -> Option<String> {
 }
 
 /// Every tag, most used first (unused ones too, so they're still suggested).
+/// Counted on the photos shown: while private photos are hidden, a tag only
+/// they have isn't listed (its name would tell).
 pub fn all(cat: &Catalog) -> Result<Vec<Tag>> {
     let db = cat.read()?;
+    let shown = cat.shown_photo_sql("pt.photo_id");
     let tags = db
-        .prepare(
-            "SELECT t.id, t.name, COUNT(pt.photo_id) FROM tags t LEFT JOIN photo_tags pt ON pt.tag_id = t.id
-              GROUP BY t.id ORDER BY COUNT(pt.photo_id) DESC, t.name COLLATE NOCASE",
-        )?
+        .prepare(&format!(
+            "SELECT t.id, t.name, COUNT(CASE WHEN {shown} THEN 1 END) AS n FROM tags t
+               LEFT JOIN photo_tags pt ON pt.tag_id = t.id
+              GROUP BY t.id HAVING n > 0 OR COUNT(pt.photo_id) = 0
+              ORDER BY n DESC, t.name COLLATE NOCASE"
+        ))?
         .query_map([], |r| Ok(Tag { id: r.get(0)?, name: r.get(1)?, count: r.get(2)? }))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(tags)
@@ -41,6 +46,7 @@ pub fn all(cat: &Catalog) -> Result<Vec<Tag>> {
 
 /// The tags on some photos; `count` = how many of them have it.
 pub fn on(cat: &Catalog, photo_ids: &[i64]) -> Result<Vec<Tag>> {
+    let photo_ids = &cat.shown_ids(photo_ids)?[..];
     let db = cat.read()?;
     let tags = db
         .prepare(
