@@ -116,6 +116,17 @@
 //!                                 corner), "inFocus", "chosen", "area" (the zone given) or
 //!                                 "other" (the camera's other points); also in `photo <id>`
 //!
+//! Private photos (JSON out). Every password is its own private space: no
+//! password is wrong, a new one starts an empty space. Its photos are hidden from
+//! everything Shoebox shows until that password opens it in the window; Shoebox's
+//! copies of them (previews, thumbnails, face pictures) are kept sealed. Agents can
+//! make photos private, never see them: no command here lists, counts or opens one.
+//!   shoebox-cli private [--new] <photo-id>... | --in '<scope JSON>'   make photos private
+//!                                              in the space of the password read from the
+//!                                              first line of stdin (those of a view with --in,
+//!                                              e.g. a folder); --new: a password with no
+//!                                              private photos yet (a typo would start a space)
+//!
 //! Folders (on the disk and in the catalog in one step; JSON out):
 //!   shoebox-cli rename-folder <volume-id> <folder> <new name>
 //!   shoebox-cli new-folder <volume-id> <parent folder> [name]
@@ -325,7 +336,7 @@ fn main() -> anyhow::Result<()> {
             let q = args[1..].join(" ");
             let index = shoebox_lib::search::SearchIndex::open(&cat)?;
             let t = std::time::Instant::now();
-            let (hits, clear) = index.search(&q, 1000)?;
+            let (hits, clear) = index.search(&q, 1000, &cat.hidden_ids()?)?;
             let n_clear = hits.iter().filter(|h| h.1 >= clear).count();
             println!("{n_clear} clear + {} possible for {q:?} in {} ms", hits.len() - n_clear, t.elapsed().as_millis());
             let hits: Vec<_> = hits.into_iter().take(8).collect();
@@ -409,9 +420,11 @@ fn main() -> anyhow::Result<()> {
             // Faces of one person: shoebox-cli person <id>
             let pid: i64 = args.get(1).ok_or_else(|| anyhow::anyhow!("person <id>"))?.parse()?;
             let db = cat.db();
-            let mut stmt = db.prepare(
-                "SELECT id, photo_id, round(x1,3), round(y1,3), round(x2,3), round(y2,3), round(score,3) FROM faces WHERE person_id = ?1 ORDER BY photo_id LIMIT 12",
-            )?;
+            let mut stmt = db.prepare(&format!(
+                "SELECT id, photo_id, round(x1,3), round(y1,3), round(x2,3), round(y2,3), round(score,3) FROM faces
+                  WHERE person_id = ?1 AND {} ORDER BY photo_id LIMIT 12",
+                cat.shown_photo_sql("photo_id")
+            ))?;
             let rows = stmt.query_map([pid], |r| {
                 Ok(format!(
                     "face {:>4} photo {:>4} box {:.3},{:.3}-{:.3},{:.3} score {:.3}",
@@ -618,6 +631,26 @@ fn main() -> anyhow::Result<()> {
                 serde_json::json!({ "file": file, "long": long, "kb": bytes.len() / 1024, "ms": t.elapsed().as_millis() as u64 })
             );
         }
+        Some("private") => {
+            // echo <password> | shoebox-cli private [--new] <photo-id>... | --in '<scope JSON>'
+            let usage =
+                || anyhow::anyhow!("echo <password> | shoebox-cli private [--new] <photo-id>... | --in '<scope JSON>'");
+            let new = args.iter().any(|a| a == "--new");
+            let rest: Vec<&String> = args[1..].iter().filter(|a| *a != "--new").collect();
+            let ids: Vec<i64> = match rest.first().map(|s| s.as_str()) {
+                None => return Err(usage()),
+                Some("--in") => {
+                    let scope: Scope = serde_json::from_str(rest.get(1).ok_or_else(usage)?)?;
+                    cat.list_photos(&scope, Sort::default(), &Filters::default())?.ids
+                }
+                Some(_) => rest.iter().map(|s| s.parse()).collect::<Result<_, _>>()?,
+            };
+            let mut password = String::new();
+            std::io::stdin().read_line(&mut password)?;
+            let password = password.trim_end_matches(['\r', '\n']);
+            let made = shoebox_lib::private::hide_with_password(&cat, password, &ids, new)?;
+            println!("{}", serde_json::json!({ "madePrivate": made }));
+        }
         Some("tags") => {
             // Every tag, or the tags on some photos: shoebox-cli tags [photo-id...]
             let ids = args[1..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
@@ -651,7 +684,7 @@ fn main() -> anyhow::Result<()> {
             tags::rename(&cat, id, new)?;
             println!("{}", serde_json::json!({ "renamed": new }));
         }
-        Some("gear") => println!("{}", serde_json::to_string_pretty(&gear::list(&cat.db())?)?),
+        Some("gear") => println!("{}", serde_json::to_string_pretty(&gear::list(&cat.db(), &cat.shown_sql("p"))?)?),
         Some(cmd @ ("gear-rename" | "gear-split")) => {
             let usage = || anyhow::anyhow!("gear-rename camera|lens <name> <new>  |  gear-split camera|lens <name>");
             let kind = gear::Kind::parse(args.get(1).ok_or_else(usage)?)?;

@@ -396,6 +396,38 @@ fn dominant(vs: &[&[f32]]) -> Vec<f32> {
 
 /// The month a photo was taken (camera local time read as UTC), counted from
 /// January 1970; none when its date is unknown.
+/// People seen only in private photos, while those are hidden: never listed
+/// or suggested, their names would tell.
+fn hidden_people(cat: &Catalog, db: &Connection) -> Result<HashSet<i64>> {
+    if !cat.hides_any() {
+        return Ok(HashSet::new());
+    }
+    let private = cat.hidden_ids_sql();
+    Ok(db
+        .prepare(&format!(
+            "SELECT DISTINCT f.person_id FROM faces f WHERE f.photo_id IN {private} AND f.person_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM faces o WHERE o.person_id = f.person_id AND o.photo_id NOT IN {private})"
+        ))?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Those of `face_ids` in photos shown right now.
+fn shown_faces(cat: &Catalog, face_ids: &[i64]) -> Result<Vec<i64>> {
+    if face_ids.is_empty() || !cat.hides_any() {
+        return Ok(face_ids.to_vec());
+    }
+    let db = cat.read()?;
+    let hidden: HashSet<i64> = db
+        .prepare(&format!(
+            "SELECT id FROM faces WHERE id IN (SELECT value FROM json_each(?1)) AND photo_id IN {}",
+            cat.hidden_ids_sql()
+        ))?
+        .query_map([serde_json::to_string(face_ids)?], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(face_ids.iter().copied().filter(|f| !hidden.contains(f)).collect())
+}
+
 fn month_of(taken_ts: Option<i64>) -> Option<i64> {
     let d = chrono::DateTime::from_timestamp(taken_ts.filter(|t| *t > 0)?, 0)?;
     Some((d.year() as i64 - 1970) * 12 + d.month0() as i64)
@@ -1082,7 +1114,7 @@ impl FaceIndex {
                 j += 1;
             }
             // Short side of each face in preview pixels, as when it was found.
-            let (pw, ph) = image::image_dimensions(cat.data.preview_path(photo)).unwrap_or((1080, 720));
+            let (pw, ph) = cat.copy_dimensions(&cat.data.preview_path(photo)).unwrap_or((1080, 720));
             let taken: Vec<i64> = cat
                 .db()
                 .prepare("SELECT person_id FROM faces WHERE photo_id = ?1 AND person_id IS NOT NULL")?
@@ -1198,12 +1230,14 @@ impl FaceIndex {
         progress: &dyn Fn(&crate::search::AiProgress),
     ) -> Result<()> {
         self.ready.wait()?;
+        // Private photos' previews can only be read while they are unlocked.
         let todo: Vec<i64> = cat
             .db()
             .prepare(&format!(
-                "SELECT id FROM photos WHERE preview_state = {} AND id NOT IN (SELECT photo_id FROM face_scan)
-                 ORDER BY taken_ts DESC",
-                crate::db::PREVIEW_OK
+                "SELECT id FROM photos p WHERE preview_state = {} AND id NOT IN (SELECT photo_id FROM face_scan)
+                   AND {} ORDER BY taken_ts DESC",
+                crate::db::PREVIEW_OK,
+                cat.shown_sql("p")
             ))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
@@ -1230,7 +1264,7 @@ impl FaceIndex {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            let found = match image::open(cat.data.preview_path(*photo_id)) {
+            let found = match cat.open_copy(&cat.data.preview_path(*photo_id)) {
                 Ok(img) => {
                     let rgb = img.to_rgb8();
                     match models.detect(&rgb) {
@@ -1252,7 +1286,7 @@ impl FaceIndex {
                     }
                 }
                 Err(e) => {
-                    log::warn!("faces: photo {photo_id}: preview unreadable: {e}");
+                    log::warn!("faces: photo {photo_id}: preview unreadable: {e:#}");
                     None
                 }
             };
@@ -1361,9 +1395,10 @@ impl FaceIndex {
             for (fid, thumb) in written.iter().zip(&thumbs) {
                 let path = cat.data.face_path(*fid);
                 match thumb {
-                    Some(bytes) => cat.data.write(&path, bytes)?,
+                    // Sealed when the photo is private.
+                    Some(bytes) => cat.write_copy(photo_id, &path, bytes)?,
                     // Not a picture left by an attempt that never finished.
-                    None => cat.data.remove(&path)?,
+                    None => cat.remove_copy(&path)?,
                 }
             }
             // Every face of the photo, those found before a turn included.
@@ -1395,15 +1430,20 @@ impl FaceIndex {
 
     fn people_now(&self, cat: &Catalog) -> Result<Vec<Person>> {
         let db = cat.read()?;
+        // Counted from the photos shown: someone seen only in private photos,
+        // while they are hidden, isn't listed.
         let people = db
-            .prepare(
+            .prepare(&format!(
                 "SELECT p.id, p.name, COUNT(f.id), COUNT(DISTINCT f.photo_id),
-                        (SELECT f2.id FROM faces f2 WHERE f2.person_id = p.id ORDER BY f2.score DESC LIMIT 1),
+                        (SELECT f2.id FROM faces f2 WHERE f2.person_id = p.id AND {} ORDER BY f2.score DESC LIMIT 1),
                         p.ignored, MAX(f.seen) = 0, COUNT(DISTINCT CASE WHEN f.seen = 0 THEN f.photo_id END)
                    FROM people p JOIN faces f ON f.person_id = p.id
+                  WHERE {}
                   GROUP BY p.id
                   ORDER BY p.ignored, p.name IS NULL, COUNT(DISTINCT f.photo_id) DESC, p.id",
-            )?
+                cat.shown_face_sql("f2"),
+                cat.shown_face_sql("f")
+            ))?
             .query_map([], |r| {
                 Ok(Person {
                     id: r.get(0)?,
@@ -1747,6 +1787,7 @@ impl FaceIndex {
     /// for the person they join, so they show up there to be checked.
     pub fn reassign(&self, cat: &Catalog, face_ids: &[i64], to: &FaceTarget) -> Result<Moved> {
         self.ready.wait()?;
+        let face_ids = &shown_faces(cat, face_ids)?[..];
         let mut moved = Moved::default();
         // Fingerprint changes, applied to the people's averages once saved.
         let mut changes: Vec<(i64, Option<i64>, i64)> = Vec::new();
@@ -1911,12 +1952,14 @@ impl FaceIndex {
             return Ok(Vec::new());
         }
         let face = mean(&vs.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let hidden = hidden_people(cat, &db)?;
         let mut out: Vec<LookAlike> = self
             .centroids
             .read()
             .unwrap()
             .alike(&[&face], months, except, LOOKS_LIKE)
             .into_iter()
+            .filter(|(_, _, person_id)| !hidden.contains(person_id))
             .map(|(similarity, _, person_id)| LookAlike { person_id, similarity })
             .collect();
         out.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
@@ -1932,7 +1975,10 @@ impl FaceIndex {
         self.ready.wait()?;
         let faces: Vec<(i64, i64, bool)> = cat
             .read()?
-            .prepare("SELECT id, photo_id, by_hand FROM faces WHERE person_id = ?1 ORDER BY id")?
+            .prepare(&format!(
+                "SELECT id, photo_id, by_hand FROM faces WHERE person_id = ?1 AND {} ORDER BY id",
+                cat.shown_photo_sql("photo_id")
+            ))?
             .query_map([person_id], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut faces_v = Vec::new();
@@ -1982,10 +2028,11 @@ impl FaceIndex {
         let db = cat.read()?;
         // (face, person, photo, by hand, taken)
         let faces: Vec<(i64, i64, i64, bool, Option<i64>)> = db
-            .prepare(
+            .prepare(&format!(
                 "SELECT f.id, f.person_id, f.photo_id, f.by_hand, p.taken_ts FROM faces f
-                   JOIN photos p ON p.id = f.photo_id WHERE f.person_id IS NOT NULL ORDER BY f.id",
-            )?
+                   JOIN photos p ON p.id = f.photo_id WHERE f.person_id IS NOT NULL AND {} ORDER BY f.id",
+                cat.shown_sql("p")
+            ))?
             .query_map([], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, r.get::<_, Option<i64>>(4)?))
             })?
@@ -2097,17 +2144,22 @@ impl FaceIndex {
                 .filter_map(|s| serde_json::from_str::<LeftAsIs>(s).ok())
                 .map(|l| (l.key(), l))
                 .collect();
+            let hidden = hidden_people(cat, &db)?;
             let names: HashMap<i64, String> = db
                 .prepare("SELECT id, name FROM people WHERE name IS NOT NULL AND ignored = 0")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
+                .collect::<rusqlite::Result<HashMap<i64, String>>>()?
+                .into_iter()
+                .filter(|(id, _)| !hidden.contains(id))
+                .collect();
             // (face, person, photo, by hand, when taken), in face order.
             let faces: Vec<(i64, i64, i64, bool, Option<i64>)> = db
-                .prepare(
+                .prepare(&format!(
                     "SELECT f.id, f.person_id, f.photo_id, f.by_hand, ph.taken_ts FROM faces f
                        JOIN people p ON p.id = f.person_id JOIN photos ph ON ph.id = f.photo_id
-                      WHERE p.name IS NOT NULL AND p.ignored = 0 ORDER BY f.id",
-                )?
+                      WHERE p.name IS NOT NULL AND p.ignored = 0 AND {} ORDER BY f.id",
+                    cat.shown_sql("ph")
+                ))?
                 .query_map([], |r| {
                     let taken: Option<i64> = r.get(4)?;
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, taken.filter(|t| *t > 0)))
@@ -2378,6 +2430,7 @@ impl FaceIndex {
     /// The faces found in some photos, photo by photo, left to right.
     pub fn faces_in(&self, cat: &Catalog, photo_ids: &[i64]) -> Result<Vec<PhotoFace>> {
         self.ready.wait()?;
+        let photo_ids = cat.shown_ids(photo_ids)?;
         let db = cat.read()?;
         let mut stmt = db.prepare(
             "SELECT f.id, f.photo_id, f.person_id, p.name, f.x1, f.y1, f.x2, f.y2 FROM faces f
@@ -2540,7 +2593,7 @@ pub fn after_turn(cat: &Catalog, moved: &[(i64, i64)]) -> Result<()> {
     }
     cut_pictures_again(cat, &moved.iter().map(|(_, new)| *new).collect::<Vec<_>>())?;
     for (old, _) in moved {
-        cat.data.remove(&cat.data.face_path(*old))?;
+        cat.remove_copy(&cat.data.face_path(*old))?;
     }
     let path = cat.data.root.join("faces.db");
     if path.is_file() {
@@ -2573,10 +2626,10 @@ pub fn cut_pictures_again(cat: &Catalog, face_ids: &[i64]) -> Result<Vec<i64>> {
     }
     let mut cut = Vec::new();
     for (photo, faces) in by_photo {
-        let img = match image::open(cat.data.preview_path(photo)) {
+        let img = match cat.open_copy(&cat.data.preview_path(photo)) {
             Ok(img) => img,
             Err(e) => {
-                log::warn!("faces: photo {photo}: preview unreadable, face pictures not cut: {e}");
+                log::warn!("faces: photo {photo}: preview unreadable, face pictures not cut: {e:#}");
                 continue;
             }
         };
@@ -2585,7 +2638,7 @@ pub fn cut_pictures_again(cat: &Catalog, face_ids: &[i64]) -> Result<Vec<i64>> {
             let bbox = [(b[0] * w) as f32, (b[1] * h) as f32, (b[2] * w) as f32, (b[3] * h) as f32];
             match face_thumb(&img, &bbox) {
                 Ok(bytes) => {
-                    cat.data.write(&cat.data.face_path(fid), &bytes)?;
+                    cat.write_copy(photo, &cat.data.face_path(fid), &bytes)?;
                     cut.push(fid);
                 }
                 Err(e) => log::warn!("faces: face {fid}: picture can't be cut: {e:#}"),

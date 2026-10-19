@@ -1132,3 +1132,120 @@ describe("missing photos", () => {
     expect(gridIds(host)).not.toContain(102);
   });
 });
+
+describe("private photos", () => {
+  const shortcut = () => key(document.body, "L", { ctrlKey: true, shiftKey: true });
+  /** Ctrl+Shift+L, a password, Open. */
+  const open = async (host: HTMLElement, password: string) => {
+    await shortcut();
+    await wait(30);
+    const dialog = host.querySelector<HTMLElement>(".private-dialog")!;
+    await type(dialog.querySelector<HTMLInputElement>('input[type="password"]')!, password);
+    await click(byText(dialog, "button", "Open"));
+    await wait(600);
+  };
+
+  test("no trace while locked; every password opens its own space, a decoy an empty one", async () => {
+    const be = fakeBackend();
+    be.privateIn("correct horse", [101, 102]);
+    const host = await renderApp();
+    const visible = ALL.filter((id) => id !== 101 && id !== 102);
+
+    // Locked: not in the grid, no Private row, no "Make private".
+    expect(gridIds(host)).toEqual(visible);
+    expect(host.querySelector(".sidebar-scroll")!.textContent).not.toMatch(/Private/);
+    await click(tile(host, 201));
+    expect(host.querySelector(".selection-bar")!.textContent).not.toMatch(/private/i);
+
+    // Another password: never refused, an empty space, nothing of the first's.
+    await open(host, "decoy password");
+    expect(host.querySelector(".private-dialog")).toBeNull();
+    expect(gridIds(host)).toEqual(visible);
+    expect(sidebarItem(host, "Private").textContent).toMatch(/0$/);
+    await shortcut();
+    await wait(600);
+    expect(host.querySelector(".sidebar-scroll")!.textContent).not.toMatch(/Private/);
+
+    // Its own password: its photos everywhere, and all together in Private.
+    await open(host, "correct horse");
+    expect(gridIds(host)).toEqual(ALL);
+    expect(tile(host, 101).querySelector(".badge.private")).not.toBeNull();
+    await click(sidebarItem(host, "Private"));
+    await wait(100);
+    expect(title(host)).toBe("Private");
+    expect(gridIds(host)).toEqual([101, 102]);
+
+    // Open, a photo can be made private: into this space.
+    await click(sidebarItem(host, "All photos"));
+    await wait(100);
+    await click(tile(host, 201));
+    await click(byText(host, ".selection-bar button", "Make private"));
+    await wait(100);
+    expect(be.privateOf("correct horse")).toEqual([101, 102, 201]);
+    expect(tile(host, 201).querySelector(".badge.private")).not.toBeNull();
+
+    // Locking: gone from the grid before the photos' next answer comes.
+    be.delay("list_photos", 1000);
+    await shortcut();
+    await wait(30);
+    expect(gridIds(host)).toEqual(visible.filter((id) => id !== 201));
+    expect(host.querySelector(".sidebar-scroll")!.textContent).not.toMatch(/Private/);
+  });
+
+  test("the first photos made private with a password ask for it again", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await open(host, "brand new one");
+    expect(sidebarItem(host, "Private")).toBeTruthy();
+
+    await click(tile(host, 201));
+    await click(byText(host, ".selection-bar button", "Make private"));
+    await wait(30);
+    const dialog = host.querySelector<HTMLElement>(".private-dialog")!;
+    expect(dialog.textContent).toMatch(/Type the password again/);
+    const box = dialog.querySelector<HTMLInputElement>('input[type="password"]')!;
+    await type(box, "brand new on");
+    await click(byText(dialog, "button", "Make private"));
+    await wait(30);
+    expect(dialog.textContent).toMatch(/aren't the same/);
+    expect(be.privateOf("brand new one")).toEqual([]);
+
+    await type(box, "brand new one");
+    await click(byText(dialog, "button", "Make private"));
+    await wait(300);
+    expect(host.querySelector(".private-dialog")).toBeNull();
+    expect(be.privateOf("brand new one")).toEqual([201]);
+    expect(tile(host, 201).querySelector(".badge.private")).not.toBeNull();
+  });
+});
+
+describe("the Private filter", () => {
+  test("only while private photos are open: private or not, cleared on locking", async () => {
+    const be = fakeBackend();
+    be.privateIn("correct horse", [101, 102]);
+    const host = await renderApp();
+    const chips = () => [...host.querySelectorAll(".filter-chip")].map((c) => c.textContent?.trim());
+    expect(chips()).not.toContain("Private");
+
+    await key(document.body, "L", { ctrlKey: true, shiftKey: true });
+    await wait(30);
+    const dialog = host.querySelector<HTMLElement>(".private-dialog")!;
+    await type(dialog.querySelector<HTMLInputElement>('input[type="password"]')!, "correct horse");
+    await click(byText(dialog, "button", "Open"));
+    await wait(600);
+    expect(chips()).toContain("Private");
+
+    await click(byText(host, ".filter-chip", "Private"));
+    const row = byText(host, ".filter-panel label", /^Private/);
+    await click(row.querySelector("input")!);
+    await wait(300);
+    expect(gridIds(host)).toEqual([101, 102]);
+
+    // Locked: the filter goes with the private photos.
+    await key(document.body, "L", { ctrlKey: true, shiftKey: true });
+    await wait(600);
+    expect(chips()).not.toContain("Private");
+    expect(gridIds(host)).toEqual(ALL.filter((id) => id !== 101 && id !== 102));
+    expect(be.calls.filter((c) => c.cmd === "list_photos").at(-1)?.args.filters).toMatchObject({ private: [] });
+  });
+});

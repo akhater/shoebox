@@ -1,4 +1,4 @@
-import { Focus, ImageOff, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
+import { Focus, ImageOff, LockKeyhole, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { BIN, cull, fmtDeleted, fmtNum, problemsOf, thumbUrl, type MissingPhoto, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
@@ -397,6 +397,12 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                     {marked && (
                       <span className="badge marked">
                         <Trash2 size={13} />
+                      </span>
+                    )}
+                    {/* Private photos are only ever listed while their space is open. */}
+                    {list.private?.[t.index] === 1 && (
+                      <span className={`badge private ${marked ? "next-to-marked" : ""}`} title="Private">
+                        <LockKeyhole size={13} />
                       </span>
                     )}
                     {p.showProblems && problems.length > 0 && !marked && (

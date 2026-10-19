@@ -140,10 +140,13 @@ impl Upright {
 
     /// Looks at every photo with a preview the model hasn't seen yet.
     pub fn check_pending(&self, cat: &Catalog, cancel: &AtomicBool, progress: &dyn Fn(&AiProgress)) -> Result<()> {
+        // Private photos' previews can only be read while they are unlocked.
         let todo: Vec<i64> = cat
             .db()
             .prepare(&format!(
-                "SELECT id FROM photos WHERE sideways IS NULL AND preview_state = {PREVIEW_OK} ORDER BY taken_ts DESC"
+                "SELECT id FROM photos p WHERE sideways IS NULL AND preview_state = {PREVIEW_OK} AND {}
+                  ORDER BY taken_ts DESC",
+                cat.shown_sql("p")
             ))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
@@ -171,9 +174,7 @@ impl Upright {
             let inputs: Vec<(i64, Result<Vec<f32>>)> = self.pool.install(|| {
                 chunk
                     .par_iter()
-                    .map(|id| {
-                        (*id, image::open(cat.data.preview_path(*id)).map(|img| preprocess(&img)).map_err(Into::into))
-                    })
+                    .map(|id| (*id, cat.open_copy(&cat.data.preview_path(*id)).map(|img| preprocess(&img))))
                     .collect()
             });
             for (id, input) in inputs {
@@ -181,9 +182,7 @@ impl Upright {
                     let (turn, sure) = verdict(odds);
                     // A second look, at the photo turned that way: it must then stand upright.
                     let sure_again = turn == 0
-                        || image::open(cat.data.preview_path(id))
-                            .map_err(anyhow::Error::from)
-                            .and_then(|img| confirms(model, &img, turn))?;
+                        || cat.open_copy(&cat.data.preview_path(id)).and_then(|img| confirms(model, &img, turn))?;
                     Ok((if sure_again { turn } else { 0 }, sure))
                 });
                 match looked {
@@ -239,9 +238,11 @@ pub struct Suggestion {
 pub fn suggestions(cat: &Catalog) -> Result<Vec<Suggestion>> {
     let db = cat.read()?;
     let out = db
-        .prepare(
-            "SELECT id, sideways, COALESCE(sideways_p, 0) FROM photos WHERE sideways > 0 ORDER BY sideways_p DESC, id",
-        )?
+        .prepare(&format!(
+            "SELECT id, sideways, COALESCE(sideways_p, 0) FROM photos p WHERE sideways > 0 AND {}
+              ORDER BY sideways_p DESC, id",
+            cat.shown_sql("p")
+        ))?
         .query_map([], |r| Ok(Suggestion { id: r.get(0)?, turn: r.get(1)?, sure: r.get(2)? }))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(out)
@@ -249,6 +250,7 @@ pub fn suggestions(cat: &Catalog) -> Result<Vec<Suggestion>> {
 
 /// Turns these photos the way the model suggests (those it suggests turning).
 pub fn accept(cat: &Catalog, ids: &[i64]) -> Result<crate::turn::TurnReport> {
+    let ids = &cat.shown_ids(ids)?[..];
     let turns: Vec<(i64, i64)> = {
         let db = cat.read()?;
         let mut stmt = db.prepare(

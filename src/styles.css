@@ -3457,3 +3457,86 @@ button.link:hover {
   color: var(--warn);
   cursor: help;
 }
+
+/* Private photos: the unlock dialog, password fields, the lock on their
+   thumbnails and the sidebar's Private row (shown only while unlocked). */
+.private-dialog {
+  width: 380px;
+}
+.private-dialog .modal-head h2,
+.private-tab .inline-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.private-tab .inline-icon {
+  vertical-align: -2px;
+  margin-right: 4px;
+  color: var(--muted);
+}
+.private-tab .inline-icon.open {
+  color: var(--accent);
+}
+.form .lead {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.form input[type="password"] {
+  box-sizing: border-box;
+  width: 100%;
+  background: var(--raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font: inherit;
+}
+.form input[type="password"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.form input[type="password"][aria-invalid="true"] {
+  border-color: var(--warn);
+}
+.form .note {
+  margin: 0;
+}
+.private-tab .confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.private-dialog .modal-foot .forgot {
+  margin-right: auto;
+  font-size: 12px;
+}
+.badge.private {
+  top: 6px;
+  bottom: auto;
+  left: auto;
+  right: 6px;
+  color: #d6d8dd;
+}
+.badge.private.next-to-marked {
+  right: 34px;
+}
+.nav-item .nav-lock {
+  margin-right: 8px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--muted);
+}
+.nav-item .nav-lock:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.nav-item .private-icon {
+  color: var(--accent);
+}
+.viewer-private {
+  color: var(--accent);
+}

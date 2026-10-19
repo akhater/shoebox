@@ -1,4 +1,16 @@
-import { Aperture, Calendar, Camera, ChevronDown, ChevronRight, FileImage, HardDrive, Tag as TagIcon, Users, X } from "lucide-react";
+import {
+  Aperture,
+  Calendar,
+  Camera,
+  ChevronDown,
+  ChevronRight,
+  FileImage,
+  HardDrive,
+  LockKeyhole,
+  Tag as TagIcon,
+  Users,
+  X,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   faceUrl,
@@ -29,6 +41,7 @@ interface Props {
 }
 
 const STATUS_LABEL: Record<string, string> = { online: "Plugged in", offline: "Unplugged", missing: "Missing" };
+const PRIVATE_LABEL: Record<string, string> = { private: "Private", notPrivate: "Not private" };
 
 /** Ticked values first stay listed even when nothing matches them any more. */
 function withPicked(values: FacetValue[], picked: string[]): FacetValue[] {
@@ -99,6 +112,7 @@ export function FilterBar({ facets, filters, onChange, people, lead }: Props) {
             ? v.map((x) => x.toUpperCase()).join(", ")
             : `${v.length} types`,
     status: (v: string[]) => v.map((x) => STATUS_LABEL[x] ?? x).join(", "),
+    private: (v: string[]) => v.map((x) => PRIVATE_LABEL[x] ?? x).join(", "),
   };
 
   const chip = (id: ListKey, label: string, icon: ReactNode, panel: ReactNode) => {
@@ -231,6 +245,19 @@ export function FilterBar({ facets, filters, onChange, people, lead }: Props) {
           onPick={(v) => set("status", v as Filters["status"])}
         />,
       )}
+      {/* Private photos open: private or not. Locked, there is nothing to tell apart (no trace). */}
+      {(facets?.private.length ?? 0) > 0 &&
+        chip(
+          "private",
+          "Private",
+          <LockKeyhole size={14} />,
+          <Checklist
+            values={withPicked(facets?.private ?? [], filters.private)}
+            picked={filters.private}
+            label={(v) => PRIVATE_LABEL[v] ?? v}
+            onPick={(v) => set("private", v as Filters["private"])}
+          />,
+        )}
       {filtersOn(filters) && (
         <button className="btn small ghost" onClick={() => onChange(NO_FILTERS)}>
           Clear filters

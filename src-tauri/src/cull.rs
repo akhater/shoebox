@@ -1045,7 +1045,8 @@ impl QualityIndex {
         progress: &dyn Fn(u64, u64),
     ) -> Result<usize> {
         self.ready.wait()?;
-        let todo = self.pending(cat, ids)?;
+        // Private photos' previews can only be read while their space is open.
+        let todo = self.pending(cat, &cat.shown_ids(ids)?)?;
         if todo.is_empty() {
             return Ok(0);
         }
@@ -1066,10 +1067,10 @@ impl QualityIndex {
                 chunk
                     .par_iter()
                     .filter_map(|(id, fp)| {
-                        let img = match image::open(cat.data.preview_path(*id)) {
+                        let img = match cat.open_copy(&cat.data.preview_path(*id)) {
                             Ok(img) => img.to_rgb8(),
                             Err(e) => {
-                                log::warn!("cull: photo {id}: preview unreadable: {e}");
+                                log::warn!("cull: photo {id}: preview unreadable: {e:#}");
                                 return None;
                             }
                         };
@@ -1289,7 +1290,7 @@ impl QualityIndex {
                 .iter()
                 .filter(|(id, _)| !measured.contains_key(id))
                 .filter_map(|(id, close)| {
-                    let img = image::open(cat.data.preview_path(*id)).ok()?.to_rgb8();
+                    let img = cat.open_copy(&cat.data.preview_path(*id)).ok()?.to_rgb8();
                     let m = measure_taken(&img, of(faces, id), of(points, id), close.slow_shutter);
                     Some(Measured {
                         id: *id,

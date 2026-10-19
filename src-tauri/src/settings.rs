@@ -21,6 +21,9 @@ pub struct Settings {
     /// The catalog file mapped into memory, in MB, through the system's file
     /// cache (shared, given back when other programs need it). 0 = automatic.
     pub catalog_map_mb: u32,
+    /// Private photos lock again after this many minutes without using the
+    /// window (see private.rs). They always lock when it closes.
+    pub private_lock_minutes: u32,
 }
 
 impl Default for Settings {
@@ -33,6 +36,7 @@ impl Default for Settings {
             check_updates: true,
             catalog_cache_mb: 0,
             catalog_map_mb: 0,
+            private_lock_minutes: 5,
         }
     }
 }
@@ -60,6 +64,7 @@ impl Settings {
             self.catalog_cache_mb = self.catalog_cache_mb.clamp(2, 1024);
         }
         self.catalog_map_mb = self.catalog_map_mb.min(32_768);
+        self.private_lock_minutes = self.private_lock_minutes.clamp(1, 240);
         self
     }
 }

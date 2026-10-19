@@ -6,6 +6,26 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **Private photos.** Ctrl+Shift+L (or Settings > Private photos) asks for a
+  password, and every password opens its own private space, like a wallet's
+  passphrase: no password is ever refused, a new one opens an empty space,
+  and none shows another's, so a decoy can't be told from the real one.
+  While a space is open, Make private (selection bar, viewer, a folder's
+  menu) puts photos in it; they show everywhere with a lock, and all
+  together under Private in the sidebar. Locked, they are gone from every
+  view, count, date, folder, tag, People, search, filter and Cull, and from
+  everything the CLI answers; a folder or source holding only private photos
+  isn't listed. Nothing in the window says the feature is in use. Shoebox's
+  own copies of them (previews, thumbnails, face pictures) are sealed on
+  disk; the photo files themselves are never touched. The first photos made
+  private with a password ask for it again, so nothing goes into a mistyped
+  one. A password can't be recovered: its photos stay hidden in Shoebox if
+  it is forgotten. Private photos lock again after 5 minutes without using
+  Shoebox (Settings), and whenever Shoebox closes. While a space is open, a
+  Private filter shows only its private photos, or only the others.
+- `shoebox-cli private [--new] <photo-id>... | --in '<scope JSON>'` makes
+  photos private with a password read from stdin; no command lists, counts or
+  opens a private photo.
 - **Focus points.** F in the viewer, or the Focus points switch on the photo,
   shows where the camera focused, drawn over the photo the way the camera
   makers' own software draws it: the camera's points faint, those that found
@@ -55,6 +75,8 @@ Newest first. Same format and versioning as Argentum.
 
 ### Changed
 
+- **A person's photos and a year's open faster**: their filters find each
+  person's clearest face through an index of its own.
 - **Cull measures the shoot you open, not the whole catalog.** A folder or a
   day opened in Cull is measured from its previews as it opens (about 10 s
   for 600 photos the first time, then at once), and so are the thumbnails on

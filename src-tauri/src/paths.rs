@@ -124,6 +124,12 @@ impl DataDir {
         shard(&self.root.join("faces"), face_id)
     }
 
+    /// Where a private photo's copy at `path` (preview, thumbnail, face
+    /// picture) is kept sealed instead (see private.rs).
+    pub fn sealed_path(path: &Path) -> PathBuf {
+        path.with_extension("sealed")
+    }
+
     /// Where `backup` puts its consistent copies of the databases.
     pub fn backup_dir(&self) -> PathBuf {
         self.root.join("backup")

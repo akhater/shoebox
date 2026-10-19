@@ -53,7 +53,8 @@ pub struct Turned {
 pub fn turn(cat: &Catalog, turns: &[(i64, i64)]) -> Result<TurnReport> {
     let quality = cat.settings().preview_quality;
     let mut report = TurnReport::default();
-    for &(id, by) in turns {
+    let hidden = cat.hidden_ids()?;
+    for &(id, by) in turns.iter().filter(|(id, _)| !hidden.contains(id)) {
         let by = by.rem_euclid(4);
         if by == 0 {
             continue;
@@ -124,12 +125,13 @@ pub fn back(cat: &Catalog, ids: &[i64]) -> Result<TurnReport> {
 pub(crate) fn turn_files(cat: &Catalog, db: &Connection, id: i64, to: i64, quality: u8) -> Result<bool> {
     let to = to.rem_euclid(4) as u8;
     let turned = || -> Result<(u32, u32)> {
+        // Private photos' are sealed: read and written back sealed (unlocked only).
         for (path, q) in [(cat.data.preview_path(id), quality), (cat.data.thumb_path(id), imaging::THUMB_QUALITY)] {
-            if let Some((jpeg, ..)) = imaging::turn_jpeg(&std::fs::read(&path)?, to, q)? {
-                cat.data.write(&path, &jpeg)?;
+            if let Some((jpeg, ..)) = imaging::turn_jpeg(&cat.read_copy(&path)?, to, q)? {
+                cat.write_copy(id, &path, &jpeg)?;
             }
         }
-        Ok(image::image_dimensions(cat.data.thumb_path(id))?)
+        cat.copy_dimensions(&cat.data.thumb_path(id))
     };
     match turned() {
         Ok((w, h)) => {

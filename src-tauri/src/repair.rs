@@ -79,8 +79,10 @@ pub fn check_files(cat: &Catalog, all: bool) -> Result<Checkup> {
         let mut there = HashSet::new();
         let mut fresh = Vec::new();
         for e in WalkDir::new(cat.data.root.join(sub)).min_depth(2).max_depth(2).into_iter().flatten() {
+            // A private photo's copy is sealed (see private.rs).
             let name = e.file_name().to_string_lossy();
-            let Some(id) = name.strip_suffix(".jpg").and_then(|s| s.parse::<i64>().ok()) else { continue };
+            let id = name.strip_suffix(".jpg").or_else(|| name.strip_suffix(".sealed"));
+            let Some(id) = id.and_then(|s| s.parse::<i64>().ok()) else { continue };
             there.insert(id);
             let modified = e.metadata().ok().and_then(|m| m.modified().ok());
             let secs =
@@ -91,7 +93,7 @@ pub fn check_files(cat: &Catalog, all: bool) -> Result<Checkup> {
         }
         c.checked += fresh.len() as u64;
         let damaged = pool.install(|| {
-            fresh.par_iter().filter(|(_, path)| whole_jpeg(path) == Some(false)).map(|(id, _)| *id).collect()
+            fresh.par_iter().filter(|(_, path)| whole_copy(path) == Some(false)).map(|(id, _)| *id).collect()
         });
         (there, damaged)
     };
@@ -165,7 +167,7 @@ pub fn check_files(cat: &Catalog, all: bool) -> Result<Checkup> {
         // A damaged picture goes, so a later check sees it missing, whatever its date.
         for f in &waiting {
             if bad_pictures.contains(f) {
-                cat.data.remove(&cat.data.face_path(*f))?;
+                cat.remove_copy(&cat.data.face_path(*f))?;
             }
         }
         c.faces_waiting = (cuttable.len() as u64 - c.faces_cut_again) + waiting.len() as u64;
@@ -189,20 +191,39 @@ pub fn check_files(cat: &Catalog, all: bool) -> Result<Checkup> {
     Ok(c)
 }
 
-/// A photo's thumbnail made again from its preview, as a scan makes it.
+/// A photo's thumbnail made again from its preview, as a scan makes it
+/// (a private photo's only while unlocked: otherwise read again from its original).
 fn thumb_from_preview(cat: &Catalog, id: i64, thumb_h: u32) -> Result<()> {
-    let bytes = std::fs::read(cat.data.preview_path(id))?;
+    let bytes = cat.read_copy(&cat.data.preview_path(id))?;
     let img = image::load_from_memory(&bytes)?;
     // It shows what the preview shows, turn included.
     let turn = crate::imaging::turn_mark(&bytes);
     let r = crate::imaging::render(&img, img.width().max(img.height()), 80, thumb_h, turn)?;
-    cat.data.write(&cat.data.thumb_path(id), &r.thumb)?;
+    cat.write_copy(id, &cat.data.thumb_path(id), &r.thumb)?;
     // A new revision: the window asks for the new thumbnail.
     cat.db().execute(
         "UPDATE photos SET preview_rev = preview_rev + 1, thumb_w = ?1, thumb_h = ?2 WHERE id = ?3",
         params![r.thumb_w, r.thumb_h, id],
     )?;
     Ok(())
+}
+
+/// A copy as Shoebox writes it: a JPEG, or sealed (a private photo's, see
+/// private.rs). None: it couldn't be opened right now (not a sign of damage).
+fn whole_copy(path: &Path) -> Option<bool> {
+    if path.extension().is_some_and(|e| e == "sealed") { whole_sealed(path) } else { whole_jpeg(path) }
+}
+
+/// A sealed copy: its mark first, and an end that isn't zeros (the seal's
+/// last 16 bytes, which can't all be zero). Its content can only be checked
+/// with the key.
+fn whole_sealed(path: &Path) -> Option<bool> {
+    let mut f = File::open(path).ok()?;
+    let (mut head, mut tail) = ([0u8; 4], [0u8; 16]);
+    if f.read_exact(&mut head).is_err() || f.seek(SeekFrom::End(-16)).is_err() || f.read_exact(&mut tail).is_err() {
+        return Some(false);
+    }
+    Some(&head == crate::private::SEALED_MAGIC && tail.iter().any(|b| *b != 0))
 }
 
 /// A JPEG as Shoebox writes them: its start marker first, its end marker
