@@ -6,6 +6,7 @@ import type {
   FaceTarget,
   Facets,
   Focus,
+  Found,
   LeftAsIs,
   Merged,
   Overview,
@@ -66,6 +67,8 @@ export function fakeBackend() {
   const revs = new Map<number, number>();
   /** Where the camera focused, for the photos a test says. */
   const focusOf = new Map<number, Focus>();
+  /** What Cull found wrong with photos, as their details say it (a test sets them). */
+  const foundIn = new Map<number, Found[]>();
   const turn = (ids: number[], by: (id: number) => number) => {
     const photos = ids.map((id) => {
       const q = ((by(id) % 4) + 4) % 4;
@@ -81,6 +84,11 @@ export function fakeBackend() {
   let unreadable: Shoot["unreadable"] = [];
   /** Frames Cull finds soft where the camera focused (a test sets them, with `focusOf`). */
   const focusMissed = new Set<number>();
+  /** Photos Cull hasn't measured yet (a test sets them), with what it finds once asked (cull_flags). */
+  const unmeasured = new Map<number, number>();
+  const measuredAs = new Map<number, number>();
+  // The fourth photo of each source is blurry.
+  const flagsOf = (id: number) => (unmeasured.has(id) ? 0 : (measuredAs.get(id) ?? (id % 10 === 4 ? 4 : 0)));
   let people: Person[] = [
     { id: 7, name: "Ana", faces: 3, photos: 3, cover: 1, ignored: false, isNew: false, newPhotos: 0 },
     { id: 8, name: null, faces: 2, photos: 2, cover: 2, ignored: false, isNew: false, newPhotos: 0 },
@@ -195,8 +203,7 @@ export function fakeBackend() {
     ext: ps.map(() => "jpg"),
     raw: ps.map(() => 0),
     fresh: ps.map(() => 0),
-    // The fourth photo of each source is blurry.
-    flags: ps.map((p) => (p.id % 10 === 4 ? 4 : 0)),
+    flags: ps.map((p) => flagsOf(p.id)),
     sideways: ps.map((p) => sideways.get(p.id) ?? 0),
   });
 
@@ -284,6 +291,7 @@ export function fakeBackend() {
       turn: turns.get(id) ?? 0,
       sideways: sideways.get(id) ?? 0,
       focus: focusOf.get(id) ?? null,
+      problems: foundIn.get(id) ?? [],
       files: [
         {
           id: id * 10,
@@ -356,6 +364,12 @@ export function fakeBackend() {
         return (a.ids as number[]).length;
       case "cull_shoot":
         return shootOf(sorted(inScope(a.scope as Scope), "oldest"));
+      case "cull_flags":
+        return (a.ids as number[]).map((id) => {
+          if (unmeasured.has(id)) measuredAs.set(id, unmeasured.get(id)!);
+          unmeasured.delete(id);
+          return flagsOf(id);
+        });
       case "cull_progress":
       case "cull_look_closer":
       case "cull_stop":
@@ -479,10 +493,15 @@ export function fakeBackend() {
     sideways,
     turns,
     focusOf,
+    foundIn,
     focusMissed,
     /** What Cull says it couldn't read. */
     unreadableOriginals: (u: Shoot["unreadable"]) => {
       unreadable = u;
+    },
+    /** A photo Cull hasn't measured yet, and what it finds once asked (bits of PROBLEMS). */
+    unmeasured: (id: number, flags: number) => {
+      unmeasured.set(id, flags);
     },
     /** Face finding: someone new, or more photos of someone. */
     addPerson: (p: Person, photoIds: number[]) => {

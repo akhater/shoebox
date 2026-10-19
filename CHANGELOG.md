@@ -42,6 +42,32 @@ Newest first. Same format and versioning as Argentum.
   the point is soft in every frame (focused, then the camera turned to frame
   the shot), the sharpest part decides, as before. The line under the photo
   says where the frames were compared.
+- **Cull finds camera shake.** A camera that moved during a long exposure
+  leaves copies of the picture a few pixels apart, each with crisp edges, so
+  the frame measured as sharp. For photos taken at 1/focal length or slower,
+  Cull now measures how doubled, or smeared one way, the picture is. Gross
+  shake shows on the preview ("Shaken: the picture is smeared"); a closer
+  look at the original finds the rest ("Shaken at 100%: the picture is
+  doubled (1.6 s at 37 mm is slow for a steady hand)"). Of a burst, the
+  steadiest frame is kept. A file without an exposure time is never flagged;
+  a tripod or intentional long exposure can be. Photos measured before are
+  measured again.
+
+### Changed
+
+- **Cull measures the shoot you open, not the whole catalog.** A folder or a
+  day opened in Cull is measured from its previews as it opens (about 10 s
+  for 600 photos the first time, then at once), and so are the thumbnails on
+  screen while Cull's badges are shown and the photo in the viewer's info
+  panel. Every photo used to be measured in the background after each scan,
+  about 20 minutes for a 70,000-photo catalog, for an archive mostly never
+  culled. `shoebox-cli cull` and `measure` measure what they are asked about
+  first; `shoebox-cli quality` still measures every photo.
+- **The info panel says "Focus confirmed"**, the camera's own word, instead of
+  "In focus": the camera locked focus before the shot, which says nothing of
+  shake or motion during it. A **Sharpness** line says what Cull found
+  (blurry, shaken, a face out of focus...), when it found something.
+  `shoebox-cli photo <id>` gives it too.
 
 ## 26.42.5 - 2026-10-18
 

@@ -37,6 +37,23 @@ fn squares_of(path: &Path, w: u32, h: u32, sigma: f32, side: u32) {
     img.save(path).unwrap();
 }
 
+/// Tiles of 60 px, each its own grey (edges everywhere, no pattern), as a
+/// camera shaken during the exposure leaves them: copies added together,
+/// each `(weight, dx, dy)`, `dx, dy` px away.
+fn shaken_tiles(path: &Path, w: u32, h: u32, copies: &[(f32, i32, i32)]) {
+    let grey = |x: i32, y: i32| {
+        let (x, y) = (x.clamp(0, w as i32 - 1) as u32 / 60, y.clamp(0, h as i32 - 1) as u32 / 60);
+        let n = x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663);
+        (40 + n.wrapping_mul(2_654_435_761) % 170) as f32
+    };
+    RgbImage::from_fn(w, h, |x, y| {
+        let v: f32 = copies.iter().map(|&(weight, dx, dy)| weight * grey(x as i32 - dx, y as i32 - dy)).sum();
+        Rgb([v.round() as u8; 3])
+    })
+    .save(path)
+    .unwrap();
+}
+
 fn id_of(cat: &Catalog, name: &str) -> i64 {
     cat.db().query_row("SELECT photo_id FROM files WHERE name = ?1", [name], |r| r.get(0)).unwrap()
 }
@@ -92,6 +109,11 @@ fn a_shoot_is_measured_stacked_and_its_rejects_marked() {
     let flags = quality.flags(&ids);
     assert_eq!(flags[2], Problem::Blurry.bit());
     assert_eq!(flags[1], 0);
+    // And a photo's details (the info panel), with Cull's words.
+    let shaken = quality.photo_detail(&cat, ids[2]).unwrap().problems;
+    assert_eq!(shaken.iter().map(|f| f.problem).collect::<Vec<_>>(), [Problem::Blurry]);
+    assert!(shaken[0].text.starts_with("Blurry everywhere"), "{shaken:?}");
+    assert!(quality.photo_detail(&cat, ids[1]).unwrap().problems.is_empty());
 
     // The disk is here: every original can be looked at closer.
     assert_eq!(shoot.can_look_closer.len(), 5);
@@ -127,6 +149,141 @@ fn a_shoot_is_measured_stacked_and_its_rejects_marked() {
     let asked = std::cell::Cell::new(0);
     quality.index_pending(&cat, &AtomicBool::new(false), &|_| asked.set(asked.get() + 1)).unwrap();
     assert_eq!(asked.get(), 0, "nothing new to measure");
+
+    drop((quality, search, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Cull measures the shoot it is asked about, not the catalog: a shoot opened
+/// says which of its photos to measure, those are measured and no others, and
+/// a photo turned since is measured again, its closer look (of the picture
+/// as it was) dropped.
+#[test]
+fn only_the_shoot_asked_about_is_measured() {
+    let base = std::env::temp_dir().join("shoebox-cull-on-demand");
+    let _ = std::fs::remove_dir_all(&base);
+    let (shoot_a, shoot_b) = (base.join("a"), base.join("b"));
+    for dir in [&shoot_a, &shoot_b] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    squares(&shoot_a.join("A_0001.JPG"), 2000, 1333, 0.0);
+    squares(&shoot_a.join("A_0002.JPG"), 2000, 1333, 12.0);
+    // Not copies of A's (a copy is the same photo).
+    squares_of(&shoot_b.join("B_0001.JPG"), 2000, 1333, 0.0, 50);
+    squares_of(&shoot_b.join("B_0002.JPG"), 2000, 1333, 12.0, 50);
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data).unwrap();
+    let (root_a, root_b) = (cat.add_root(&shoot_a).unwrap(), cat.add_root(&shoot_b).unwrap());
+    for root in [root_a, root_b] {
+        scan_root(&cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
+    }
+    let a: Vec<i64> = ["A_0001.JPG", "A_0002.JPG"].iter().map(|n| id_of(&cat, n)).collect();
+    let b2 = id_of(&cat, "B_0002.JPG");
+    let quality = QualityIndex::open(&cat).unwrap();
+    let search = SearchIndex::open(&cat).unwrap();
+    let scope = Scope::Root { id: root_a };
+    let shoot = || quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap();
+    let never = AtomicBool::new(false);
+
+    // Opened: nothing measured yet, its two photos to measure, in order.
+    let opened = shoot();
+    assert_eq!((opened.measured, opened.to_measure.clone()), (0, a.clone()));
+    assert_eq!(quality.measure(&cat, &opened.to_measure, &never, &|_, _| {}).unwrap(), 2);
+    assert_eq!(quality.measured(), 2, "the other shoot isn't measured");
+    let opened = shoot();
+    assert_eq!(opened.measured, 2);
+    assert!(opened.to_measure.is_empty());
+    assert_eq!(opened.stacks[1].frames[0].problems, [Problem::Blurry]);
+    assert_eq!(quality.measure(&cat, &a, &never, &|_, _| {}).unwrap(), 0, "nothing to measure again");
+
+    // Thumbnails on screen with Cull's badges: measured as they are shown.
+    assert_eq!(quality.flags(&[b2]), [0]);
+    quality.measure(&cat, &[b2], &never, &|_, _| {}).unwrap();
+    assert_eq!(quality.flags(&[b2]), [Problem::Blurry.bit()]);
+    assert_eq!(quality.measured(), 3);
+    // A photo shown in the viewer's info: measured first, its sharpness said.
+    let b1 = id_of(&cat, "B_0001.JPG");
+    assert!(quality.get(b1).is_none());
+    quality.photo_detail(&cat, b1).unwrap();
+    assert!(quality.get(b1).is_some());
+    let said = quality.photo_detail(&cat, b2).unwrap().problems;
+    assert_eq!(said.iter().map(|f| f.problem).collect::<Vec<_>>(), [Problem::Blurry]);
+
+    // Looked at closer, then turned: measured again, without that closer look.
+    quality.look_closer(&cat, &a[..1], &never, &|_, _| {}).unwrap();
+    assert!(quality.get(a[0]).unwrap().close.is_some());
+    cat.db().execute("UPDATE photos SET turn = 1 WHERE id = ?1", [a[0]]).unwrap();
+    let turned = shoot();
+    assert_eq!(turned.to_measure, [a[0]]);
+    assert_eq!(quality.measure(&cat, &turned.to_measure, &never, &|_, _| {}).unwrap(), 1);
+    assert!(quality.get(a[0]).unwrap().close.is_none());
+    assert!(shoot().to_measure.is_empty());
+
+    drop((quality, search, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A camera shaken during a long exposure leaves copies of the picture, each
+/// with crisp edges: on screen the frame looks as sharp as the steady one,
+/// and Cull already keeps the steady one of the burst; at 100% the copies
+/// make it soft, and a shutter too fast for the hand to shake makes them a
+/// pattern instead.
+#[test]
+fn a_frame_shaken_into_copies_is_found_at_100_percent() {
+    let base = std::env::temp_dir().join("shoebox-cull-shake");
+    let _ = std::fs::remove_dir_all(&base);
+    let photos = base.join("photos");
+    std::fs::create_dir_all(&photos).unwrap();
+    // A burst at 1 s: steady, then twice the picture, the second copy
+    // fainter, 26 px away. Then a picture doubled as much, taken at 1/500.
+    let doubled = [(0.7, 0, 0), (0.3, 24, 10)];
+    shaken_tiles(&photos.join("IMG_0001.JPG"), 4000, 2667, &[(1.0, 0, 0)]);
+    shaken_tiles(&photos.join("IMG_0002.JPG"), 4000, 2667, &doubled);
+    shaken_tiles(&photos.join("IMG_0003.JPG"), 4000, 2667, &[(0.7, 0, 0), (0.3, -20, 16)]);
+
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data).unwrap();
+    let root = cat.add_root(&photos).unwrap();
+    scan_root(&cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
+    let ids: Vec<i64> = (1..=3).map(|n| id_of(&cat, &format!("IMG_000{n}.JPG"))).collect();
+    for (id, at, exposure) in [(ids[0], 0, "1s"), (ids[1], 1, "1s"), (ids[2], 60, "1/500")] {
+        cat.db()
+            .execute(
+                "UPDATE photos SET taken_ts = ?1, exposure = ?2, focal = 35 WHERE id = ?3",
+                rusqlite::params![1_700_000_000 + at, exposure, id],
+            )
+            .unwrap();
+    }
+
+    let quality = QualityIndex::open(&cat).unwrap();
+    quality.index_pending(&cat, &AtomicBool::new(false), &|_| {}).unwrap();
+    let search = SearchIndex::open(&cat).unwrap();
+    let scope = Scope::Root { id: root };
+    let shoot = quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap();
+    let shape: Vec<Vec<i64>> = shoot.stacks.iter().map(|s| s.frames.iter().map(|f| f.id).collect()).collect();
+    assert_eq!(shape, [vec![ids[0], ids[1]], vec![ids[2]]]);
+    // On screen nothing is wrong, but of the burst the steady frame is kept.
+    let burst = &shoot.stacks[0];
+    assert!(shoot.stacks.iter().flat_map(|s| &s.frames).all(|f| f.problems.is_empty()), "{:#?}", shoot.stacks);
+    assert_eq!(burst.keeper, 0, "{:?}", quality.report(&cat, ids[1]).unwrap().quality);
+
+    let looked = quality.look_closer(&cat, &shoot.can_look_closer, &AtomicBool::new(false), &|_, _| {}).unwrap();
+    assert_eq!(looked, 3);
+    let shoot = quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap();
+    let burst = &shoot.stacks[0];
+    let report = quality.report(&cat, ids[1]).unwrap();
+    assert_eq!(burst.frames[1].problems, [Problem::Soft], "{:?}", report.quality);
+    assert_eq!(
+        report.problems[0].text,
+        "Shaken at 100%: the picture is doubled (1 s at 35 mm is slow for a steady hand)"
+    );
+    assert_eq!((burst.keeper, burst.frames[0].suggest, burst.frames[1].suggest), (0, Suggest::Keep, Suggest::Reject));
+    assert_eq!(quality.flags(&ids), [0, Problem::Soft.bit(), 0]);
+    // Copies at 1/500: not shake.
+    assert!(shoot.stacks[1].frames[0].problems.is_empty(), "{:?}", quality.report(&cat, ids[2]).unwrap().quality);
+    assert_eq!(shoot.stacks[1].frames[0].suggest, Suggest::Keep);
 
     drop((quality, search, cat));
     let _ = std::fs::remove_dir_all(&base);

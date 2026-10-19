@@ -104,8 +104,8 @@ pub async fn browse(state: State<'_, AppState>) -> Res<Browse> {
 
 #[tauri::command]
 pub async fn get_photo(state: State<'_, AppState>, id: i64) -> Res<PhotoDetail> {
-    let cat = state.cat.clone();
-    blocking(move || cat.photo_detail(id)).await
+    let (cat, quality) = (state.cat.clone(), state.quality.clone());
+    blocking(move || quality.photo_detail(&cat, id)).await
 }
 
 /// Adds a folder and queues its first scan.
@@ -803,11 +803,31 @@ pub async fn unmark_all(state: State<'_, AppState>) -> Res<usize> {
 }
 
 /// Cull: the photos of a view as a shoot - bursts gathered into stacks, what's
-/// wrong with each frame, and what to keep.
+/// wrong with each frame, and what to keep. Its photos not measured yet are
+/// measured in the background: `cull-changed` says when to ask again.
 #[tauri::command]
 pub async fn cull_shoot(state: State<'_, AppState>, scope: Scope, filters: Option<Filters>) -> Res<cull::Shoot> {
-    let (cat, quality, search) = (state.cat.clone(), state.quality.clone(), state.search.clone());
-    blocking(move || quality.shoot(&cat, &search, &scope, &filters.unwrap_or_default())).await
+    let (cat, quality, search, measure) =
+        (state.cat.clone(), state.quality.clone(), state.search.clone(), state.measure.clone());
+    blocking(move || {
+        let shoot = quality.shoot(&cat, &search, &scope, &filters.unwrap_or_default())?;
+        measure.push(&shoot.to_measure);
+        Ok(shoot)
+    })
+    .await
+}
+
+/// What Cull finds wrong with these photos (the thumbnails on screen, while
+/// its badges are on): bits of `cull::Problem`, those not measured yet
+/// measured first, from their previews.
+#[tauri::command]
+pub async fn cull_flags(state: State<'_, AppState>, ids: Vec<i64>) -> Res<Vec<u32>> {
+    let (cat, quality) = (state.cat.clone(), state.quality.clone());
+    blocking(move || {
+        quality.measure(&cat, &ids, &AtomicBool::new(false), &|_, _| {})?;
+        Ok(quality.flags(&ids))
+    })
+    .await
 }
 
 /// Looks closer at these photos' originals (those plugged in) in the

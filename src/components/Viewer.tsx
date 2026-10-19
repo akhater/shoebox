@@ -24,6 +24,7 @@ import {
 import {
   api,
   BIN,
+  BLUR_PROBLEMS,
   faceUrl,
   fmtBytes,
   fmtDay,
@@ -422,6 +423,8 @@ export function Viewer({
         d.focal && `${Math.round(d.focal)} mm`,
       ].filter(Boolean)
     : [];
+  // What Cull measured: a camera that confirmed focus says nothing of shake or motion.
+  const blur = d?.problems.filter((f) => BLUR_PROBLEMS.includes(f.problem)) ?? [];
 
   return (
     <div className="viewer" role="dialog" aria-label="Photo">
@@ -626,6 +629,16 @@ export function Viewer({
                   <dt>Focus</dt>
                   <dd>
                     <FocusSummary focus={d.focus} legend={!!drawFocus} />
+                  </dd>
+                </>
+              )}
+              {blur.length > 0 && (
+                <>
+                  <dt>Sharpness</dt>
+                  <dd className="warn-text">
+                    {blur.map((f) => (
+                      <div key={f.problem}>{f.text}</div>
+                    ))}
                   </dd>
                 </>
               )}

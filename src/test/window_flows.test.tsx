@@ -538,29 +538,46 @@ describe("Cull", () => {
     expect(warn.title).toBe("IMG_303.CR3: IMG_303.CR3: the file couldn't be read");
   });
 
-  test("photos measured in the background don't reload a shoot already measured", async () => {
+  test("faces found in the background don't reload a shoot until they all are", async () => {
     const be = fakeBackend();
     const host = await renderApp();
     await openCull(host, "Trip");
     const shoots = () => be.calls.filter((c) => c.cmd === "cull_shoot").length;
     const before = shoots();
     for (let i = 0; i < 5; i++) {
-      await act(() => emit("ai-progress", { task: "quality", done: i, total: 10, gpu: false, finished: false, error: null }));
+      await act(() => emit("ai-progress", { task: "faces", done: i, total: 10, gpu: false, finished: false, error: null }));
       await wait(500);
     }
     expect(shoots()).toBe(before);
   });
 
+  const problemsToggle = (host: HTMLElement) =>
+    host.querySelector<HTMLElement>('.viewbar [aria-pressed][title*="what Cull found"]')!;
+
   test("what Cull found shows on thumbnails only when asked", async () => {
     fakeBackend();
     const host = await renderApp();
-    const toggle = () => host.querySelector<HTMLElement>('.viewbar [aria-pressed][title*="what Cull found"]')!;
     expect(tile(host, 204).querySelector(".badge.problem")).toBeNull();
-    await click(toggle());
-    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+    await click(problemsToggle(host));
+    expect(problemsToggle(host).getAttribute("aria-pressed")).toBe("true");
     expect(tile(host, 204).querySelector(".badge.problem")!.getAttribute("title")).toBe("Blurry");
     expect(tile(host, 203).querySelector(".badge.problem")).toBeNull();
     expect(localStorage.getItem("shoebox.showProblems")).toBe("1");
+    localStorage.removeItem("shoebox.showProblems");
+  });
+
+  test("with Cull's badges on, the photos on screen are measured and their badges follow", async () => {
+    const be = fakeBackend();
+    be.unmeasured(203, 2); // very dark, once measured
+    const host = await renderApp();
+    await wait(400);
+    const asked = () => be.calls.filter((c) => c.cmd === "cull_flags").flatMap((c) => c.args.ids as number[]);
+    expect(asked()).toEqual([]); // badges off: nothing measured
+    await click(problemsToggle(host));
+    expect(tile(host, 203).querySelector(".badge.problem")).toBeNull();
+    await wait(400);
+    expect(asked()).toContain(203);
+    expect(tile(host, 203).querySelector(".badge.problem")!.getAttribute("title")).toBe("Very dark");
     localStorage.removeItem("shoebox.showProblems");
   });
 });
@@ -634,7 +651,7 @@ describe("the viewer", () => {
     // Off until asked for; the panel says it anyway.
     expect(viewer(host)!.querySelector(".focus-points")).toBeNull();
     expect(focusToggle(host).getAttribute("aria-pressed")).toBe("false");
-    expect(focusLine(host)).toBe("1 of 3 in focus · Single point");
+    expect(focusLine(host)).toBe("Focus confirmed on 1 of 3 · Single point");
 
     await key(document.body, "f");
     expect(focusToggle(host).getAttribute("aria-pressed")).toBe("true");
@@ -664,6 +681,31 @@ describe("the viewer", () => {
     await click(focusToggle(host));
     expect(viewer(host)!.querySelector(".focus-points")).toBeNull();
     expect(focusToggle(host).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  test("a photo the camera focused but Cull finds blurry says both: focus confirmed, then the blur", async () => {
+    const be = fakeBackend();
+    be.focusOf.set(202, { mode: "Expanded point", points: [{ x: 0.1, y: 0.2, w: 0.4, h: 0.5, state: "inFocus" }] });
+    be.foundIn.set(202, [
+      { problem: "bright", text: "Very bright" },
+      { problem: "blurry", text: "Blurry everywhere: 1.6 s at 37 mm is slow for a steady hand" },
+    ]);
+    const host = await renderApp();
+    await doubleClick(tile(host, 202));
+    await wait(50);
+    const row = (name: string) =>
+      [...viewer(host)!.querySelectorAll("dt")].find((dt) => dt.textContent === name)?.nextElementSibling?.textContent;
+    expect(focusLine(host)).toBe("Focus confirmed · Expanded point");
+    // Never broken across lines in the narrow panel.
+    expect(viewer(host)!.querySelector(".focus-summary .nowrap")!.textContent).toBe("Focus confirmed");
+    // Only what is about sharpness: the rest shows in the photo itself.
+    expect(row("Sharpness")).toBe("Blurry everywhere: 1.6 s at 37 mm is slow for a steady hand");
+
+    // Nothing found (or not measured yet): no line.
+    await key(document.body, "ArrowRight");
+    await wait(50);
+    expect(viewer(host)!.querySelector("h2")!.textContent).toBe("IMG_203.jpg");
+    expect(row("Sharpness")).toBeUndefined();
   });
 });
 

@@ -1,6 +1,6 @@
 import { Focus, ImageOff, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { BIN, fmtDeleted, fmtNum, problemsOf, thumbUrl, type MissingPhoto, type PhotoList } from "../api";
+import { BIN, cull, fmtDeleted, fmtNum, problemsOf, thumbUrl, type MissingPhoto, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
 import { TimelineRail } from "./TimelineRail";
 import { turnedStyle } from "./TurnControl";
@@ -274,6 +274,36 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
   const start = firstVisible(layout.rows, viewport.top - OVERSCAN);
   const bottom = viewport.top + viewport.height + OVERSCAN;
   for (let r = start; r < layout.rows.length && layout.rows[r].top < bottom; r++) visible.push(layout.rows[r]);
+  const end = start + visible.length;
+
+  // Cull measures only what it is asked about: with its badges on, the
+  // photos on screen are measured (those not yet) once scrolling stops, and
+  // their badges follow. An answer counts for the list it was asked for.
+  const [measured, setMeasured] = useState<{ list: PhotoList; flags: Map<number, number> } | null>(null);
+  const shownList = useRef(list);
+  shownList.current = list;
+  useEffect(() => {
+    if (!p.showProblems) return;
+    const timer = window.setTimeout(() => {
+      const shown = layout.rows.slice(start, end).flatMap((r) => (r.kind === "photos" ? r.tiles.map((t) => t.index) : []));
+      if (!shown.length) return;
+      cull
+        .flags(shown.map((i) => list.ids[i]))
+        .then((flags) => {
+          if (list !== shownList.current) return;
+          setMeasured((m) => {
+            const known = m?.list === list ? m.flags : new Map<number, number>();
+            if (shown.every((i, k) => flags[k] === (known.get(list.ids[i]) ?? list.flags[i]))) return m;
+            const next = new Map(known);
+            shown.forEach((i, k) => next.set(list.ids[i], flags[k]));
+            return { list, flags: next };
+          });
+        })
+        .catch(() => {});
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [p.showProblems, layout, list, start, end]);
+  const flagsAt = (i: number) => (measured?.list === list ? measured.flags.get(list.ids[i]) : undefined) ?? list.flags[i] ?? 0;
 
   // The date rail, for lists in date order that don't fit on screen.
   const marks = useMemo(
@@ -305,7 +335,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                 const preview = list.preview[t.index];
                 const marked = list.marked[t.index] === 1;
                 const inBin = state === 0 ? p.binned?.get(id) : undefined;
-                const problems = problemsOf(list.flags[t.index] ?? 0);
+                const problems = problemsOf(flagsAt(t.index));
                 const turn = ((((p.turned?.get(id) ?? 0) + (p.previewTurn && selected.has(id) ? p.previewTurn : 0)) % 4) + 4) % 4;
                 return (
                   <button

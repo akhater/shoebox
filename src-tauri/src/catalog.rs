@@ -968,6 +968,7 @@ impl Catalog {
                             turn: r.get(18)?,
                             sideways: r.get(19)?,
                             focus: None,
+                            problems: Vec::new(),
                             files: Vec::new(),
                         },
                     ))
@@ -1977,6 +1978,9 @@ pub struct PhotoDetail {
     pub sideways: i64,
     /// Where the camera focused, as the photo is shown; None when its file doesn't say.
     pub focus: Option<crate::focus::Focus>,
+    /// What Cull found wrong with it, once measured: filled in by
+    /// [`crate::cull::QualityIndex::photo_detail`], empty here.
+    pub problems: Vec<crate::cull::Found>,
     pub files: Vec<FileLoc>,
 }
 

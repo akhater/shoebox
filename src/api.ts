@@ -257,6 +257,8 @@ export interface PhotoDetail {
   sideways: number;
   /** Where the camera focused, as the photo is shown; null when its file doesn't say. */
   focus: Focus | null;
+  /** What Cull found wrong with it, once measured (empty: nothing, or not measured yet). */
+  problems: Found[];
   files: FileLoc[];
 }
 
@@ -488,6 +490,14 @@ export const PROBLEMS: { problem: Problem; bit: number; label: string }[] = [
   { problem: "focusMissed", bit: 128, label: "Focus missed" },
 ];
 export const problemsOf = (flags: number) => PROBLEMS.filter((p) => flags & p.bit);
+/** The problems about sharpness: what the camera's focus confirmation can't tell. */
+export const BLUR_PROBLEMS: Problem[] = ["blurry", "soft", "faceSoft", "focusMissed"];
+
+/** A problem Cull found, in its words ("Blurry everywhere: 1.6 s at 37 mm is slow..."). */
+export interface Found {
+  problem: Problem;
+  text: string;
+}
 
 /** A frame of a shoot in Cull, with what Cull suggests for it and why. */
 export interface CullFrame {
@@ -555,8 +565,11 @@ export const cull = {
   unmarkAll: () => invoke<number>("unmark_all"),
   plan: () => invoke<DeletePlan>("delete_plan"),
   delete: (token: string, volumeIds: number[]) => invoke<DeleteReport>("delete_marked", { token, volumeIds }),
-  /** A view as a shoot: bursts in stacks, problems, suggestions. */
+  /** A view as a shoot: bursts in stacks, problems, suggestions. Its photos not measured yet are
+   *  measured in the background ("cull-changed" says when to ask again). */
   shoot: (scope: Scope, filters: Filters) => invoke<Shoot>("cull_shoot", { scope, filters }),
+  /** What Cull finds wrong with these photos (bits of PROBLEMS), those not measured yet measured first. */
+  flags: (ids: number[]) => invoke<number[]>("cull_flags", { ids }),
   /** Measure these photos again from their originals (those plugged in), in the background. */
   lookCloser: (ids: number[]) => invoke<void>("cull_look_closer", { ids }),
   stop: () => invoke<void>("cull_stop"),
@@ -659,7 +672,7 @@ export function fmtAgo(ts: number | null) {
 }
 
 export interface AiProgress {
-  task: "upright" | "search" | "faces" | "quality";
+  task: "upright" | "search" | "faces";
   done: number;
   total: number;
   gpu: boolean;

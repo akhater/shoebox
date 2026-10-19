@@ -7,15 +7,21 @@
 //! are the user's decisions; suggestions are worked out again whenever they
 //! are asked for.
 //!
-//! Every photo is measured from Shoebox's own preview, in the background, so
-//! photos on unplugged disks are measured too. A preview is small (~1080 px):
+//! A photo is measured from Shoebox's own preview when Cull is asked about it
+//! (a shoot opened in Cull, thumbnails on screen with Cull's badges on), so
+//! photos on unplugged disks are measured too, and the rest of an archive
+//! costs nothing until it is culled. A preview is small (~1080 px):
 //! it shows a blurry photo, not one that is only soft at 100%. So when a
 //! shoot's disk is plugged in, Cull can look closer: its originals are read at
 //! half size (read-only, as always) and measured again. Measures live in
 //! `quality.db`, a file of their own like word search's: they can always be
 //! measured again, so the catalog's backup doesn't need them.
+//!
+//! A camera shaken during a long exposure needs a measure of its own: it
+//! draws the picture several times, each copy with crisp edges, which the
+//! edge blur reads as sharp ([`shake_in`]).
 
-use crate::catalog::{Catalog, Filters, Scope, Sort};
+use crate::catalog::{Catalog, Filters, PhotoDetail, Scope, Sort};
 use crate::db::PREVIEW_OK;
 use crate::focus::{Focus, Point, State};
 use anyhow::{Result, bail};
@@ -29,7 +35,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// Version of how photos are measured: photos measured by an older one are
 /// measured again.
-pub const QUALITY_VERSION: i64 = 1;
+pub const QUALITY_VERSION: i64 = 2;
 
 /// Cull works on a shoot, not a whole archive: views bigger than this ask
 /// for a folder or a day instead.
@@ -53,6 +59,17 @@ const FACE_SOFT_PX: f32 = 6.0;
 const FACE_VS_SHARPEST: f32 = 2.0;
 /// Originals up to this long are read whole for a closer look; longer ones at half size.
 const CLOSE_WHOLE: u32 = 3200;
+/// Shaken ([`shake_in`]): doubled or smeared this much, with a shutter slow
+/// enough for the hand to shake. Seen small, on a preview, only gross shake
+/// shows, and patterns and shallow focus come close: a third above every
+/// photo that wasn't shaken among 1,240 previews of a real catalog. At 100%
+/// (half-size originals): a sixth above the sharp frames of two handheld
+/// test shoots (0.25-2 s) and of 190 other photos taken as slowly; 52 of
+/// the shoots' 63 shaken frames reach it.
+const DOUBLED: f32 = 0.45;
+const SMEARED: f32 = 0.40;
+const DOUBLED_CLOSE: f32 = 0.20;
+const SMEARED_CLOSE: f32 = 0.09;
 /// A face smaller than this share of the long edge isn't the subject.
 const SUBJECT_FACE: f32 = 0.06;
 /// A camera's focus point is measured over at least this share of the long
@@ -101,6 +118,18 @@ pub struct Measures {
     pub black: f32,
     /// Share of the frame's parts with edges in them.
     pub detail: f32,
+    /// How doubled the picture is, 0..1: how strongly the slope of its edges
+    /// comes back a few px further on along one direction, the same over the
+    /// frame, as copies left by a shaken camera do ([`shake_in`]). None: too
+    /// few edges to tell.
+    pub doubled: Option<f32>,
+    /// How smeared it is one way, 0..1: how much longer the slope of its
+    /// edges lasts along one direction than across it.
+    pub smeared: Option<f32>,
+    /// The shutter was open long enough for the hand to shake the camera
+    /// (slower than 1/focal): only then is a doubled or smeared picture put
+    /// down to shake.
+    pub slow_shutter: bool,
     /// How the frame is laid out, to tell frames of one shot from the next pose.
     pub layout: Option<Layout>,
 }
@@ -176,6 +205,26 @@ impl Measures {
     fn full_px(&self, blur: Option<f32>) -> Option<f32> {
         let long = self.long.max(1) as f32;
         blur.map(|b| b * self.full.map_or(2.0 * long, |f| f as f32) / long)
+    }
+
+    /// How shaken this look found the photo, as a share of shaken (1 or
+    /// more is): of the preview's thresholds, or of a closer look's. 0 when
+    /// the shutter was too fast for the hand to shake.
+    fn shake(&self, close: bool) -> f32 {
+        if !self.slow_shutter {
+            return 0.0;
+        }
+        let (doubled, smeared) = if close { (DOUBLED_CLOSE, SMEARED_CLOSE) } else { (DOUBLED, SMEARED) };
+        (self.doubled.unwrap_or(0.0) / doubled).max(self.smeared.unwrap_or(0.0) / smeared)
+    }
+
+    /// How the picture looks shaken, when it is: "doubled" or "smeared".
+    fn shaken(&self, close: bool) -> Option<&'static str> {
+        if self.shake(close) < 1.0 {
+            return None;
+        }
+        let doubled = if close { DOUBLED_CLOSE } else { DOUBLED };
+        Some(if self.doubled.is_some_and(|d| d >= doubled) { "doubled" } else { "smeared" })
     }
 }
 
@@ -285,7 +334,18 @@ pub fn problems(q: &Quality, shot: &Shot) -> Vec<Found> {
         add(Problem::Blurry, text);
         return out;
     }
-    if close && best.full_px(best.sharpest).is_some_and(|s| s >= SOFT_PX) {
+    // Copies of the picture, each with crisp edges: the edge blur misses them.
+    let with_shutter = |text: String| match slow_shutter(shot) {
+        Some(slow) => format!("{text} ({slow})"),
+        None => text,
+    };
+    if let Some(how) = p.shaken(false) {
+        add(Problem::Blurry, with_shutter(format!("Shaken: the picture is {how}")));
+        return out;
+    }
+    if let Some(how) = q.close.as_ref().and_then(|c| c.shaken(true)) {
+        add(Problem::Soft, with_shutter(format!("Shaken at 100%: the picture is {how}")));
+    } else if close && best.full_px(best.sharpest).is_some_and(|s| s >= SOFT_PX) {
         add(Problem::Soft, "Soft at 100%: nothing is quite sharp".into());
     }
     if let (Some(face), Some(face_px)) = (best.rel(best.face), best.full_px(best.face)) {
@@ -311,14 +371,31 @@ pub fn problems(q: &Quality, shot: &Shot) -> Vec<Found> {
     out
 }
 
+impl Shot {
+    pub fn of(info: &ShotInfo) -> Self {
+        Shot { exposure: info.exposure.clone(), focal: info.focal }
+    }
+
+    /// How long the shutter was open, s, and the focal length, mm, when the file says.
+    fn timing(&self) -> Option<(f64, f64)> {
+        let e = self.exposure.as_deref()?;
+        let secs = match e.strip_prefix("1/") {
+            Some(d) => 1.0 / d.parse::<f64>().ok()?,
+            None => e.trim_end_matches('s').parse::<f64>().ok()?,
+        };
+        Some((secs, self.focal.filter(|f| *f > 0.0)?))
+    }
+
+    /// Open long enough for the hand holding the camera to shake it: 1/focal or slower.
+    pub fn shaky(&self) -> bool {
+        self.timing().is_some_and(|(secs, focal)| secs >= 1.0 / focal)
+    }
+}
+
 /// "1/15 s at 200 mm is slow for a steady hand", when it is: slower than 1/focal.
 fn slow_shutter(shot: &Shot) -> Option<String> {
+    let (secs, focal) = shot.timing()?;
     let e = shot.exposure.as_deref()?;
-    let secs = match e.strip_prefix("1/") {
-        Some(d) => 1.0 / d.parse::<f64>().ok()?,
-        None => e.trim_end_matches('s').parse::<f64>().ok()?,
-    };
-    let focal = shot.focal.filter(|f| *f > 0.0)?;
     let shown = if e.ends_with('s') { e.trim_end_matches('s').to_string() } else { e.to_string() };
     (secs > 1.0 / focal && secs > 1.0 / 500.0).then(|| format!("{shown} s at {focal:.0} mm is slow for a steady hand"))
 }
@@ -478,6 +555,217 @@ fn median(v: &mut [f32]) -> f32 {
     v[v.len() / 2]
 }
 
+// Camera shake. A camera shaken during a long exposure draws the picture
+// several times a few px apart, where the hand paused, and smears it in
+// between. Each copy has crisp edges, so the edge blur above reads it sharp.
+// What gives it away is the slope of the picture along the shake: past an
+// edge, it comes back a few px further on (a copy: the picture is doubled)
+// or lasts (a smear), while across the shake it doesn't. Edges are taken one
+// direction at a time, only those facing it, so slanted lettering or a
+// shirt's stripes don't pass for a smear; and over the frame's parts with the
+// most edges, since a shake moves the whole picture while a pattern or a
+// design is in a few parts. A pattern repeats again at twice its period, a
+// copy doesn't. Ranges and thresholds were set on two handheld test shoots
+// (0.25-2 s) labelled at 100%, and checked on 1,240 previews and 470
+// originals of a real catalog.
+
+/// Directions looked along, over a half turn.
+const SHAKE_DIRS: usize = 16;
+/// An edge faces a direction when its slope lies within 21.8° of it (tan):
+/// short of 22.5°, two directions apart, so that an edge square to the
+/// frame faces the same ones, and as many, whichever way it runs.
+const SHAKE_FACING: f32 = 0.4;
+/// Slope (levels per px) a pixel needs to be part of an edge.
+const SHAKE_SLOPE: f32 = 2.0;
+/// The parts looked at: those with the most edges, up to this many, each
+/// with this share of the edges of the part with most at least; and enough
+/// of them to tell.
+const SHAKE_PARTS: usize = 12;
+const SHAKE_PART_SHARE: f64 = 0.1;
+const SHAKE_MIN_PARTS: usize = 3;
+/// A direction counts in a part whose edges facing it carry this share of
+/// those facing its most edged direction, and over this many parts.
+const SHAKE_DIR_SHARE: f64 = 0.1;
+const SHAKE_DIR_PARTS: usize = 2;
+/// Copies are looked for up to the long edge / [`SHAKE_REACH`] px away, and
+/// from [`SHAKE_NEAR`] px (nearer is the edge itself, or a fine pattern on an
+/// original); a smear is measured over [`SMEAR`] px. Edges and patterns are
+/// as wide in px whatever the picture's size, so these are in px, for a
+/// picture seen small (a preview) and for one seen at 100% (a closer look,
+/// [`CLOSE_SCALE`] px or longer).
+const SHAKE_REACH: usize = 60;
+const SHAKE_NEAR: [usize; 2] = [4, 7];
+const SMEAR: [(usize, usize); 2] = [(3, 5), (6, 10)];
+const CLOSE_SCALE: usize = 1600;
+
+/// How doubled and how smeared `fine` is, 0..1 each (see above). None: too
+/// few parts with edges to tell.
+fn shake_in(fine: &Plane) -> Option<(f32, f32)> {
+    let (w, h, v) = (fine.w, fine.h, &fine.v);
+    let long = w.max(h);
+    let scale = usize::from(long >= CLOSE_SCALE);
+    let (near, (from, to)) = (SHAKE_NEAR[scale], SMEAR[scale]);
+    let reach = (long / SHAKE_REACH).max(2 * near);
+    // Slopes are compared up to twice as far (and a px): a pattern repeats there.
+    let far = 2 * reach;
+    let margin = far + 2;
+    if w < 2 * margin + 16 || h < 2 * margin + 16 {
+        return None;
+    }
+    let dirs: Vec<(f32, f32)> = (0..SHAKE_DIRS)
+        .map(|k| {
+            let a = std::f32::consts::PI * k as f32 / SHAKE_DIRS as f32;
+            (a.cos(), a.sin())
+        })
+        .collect();
+    let gradient = |i: usize| ((v[i + 1] - v[i - 1]) * 0.5, (v[i + w] - v[i - w]) * 0.5);
+    // One pixel in `step` (across and down) of `r` on an edge: its index and gradient.
+    let edges = |r: Rect, step: usize| {
+        (r.y0..r.y1).step_by(step).flat_map(move |y| {
+            (r.x0..r.x1).step_by(step).filter_map(move |x| {
+                let i = y * w + x;
+                let (a, b) = gradient(i);
+                (a.abs().max(b.abs()) >= SHAKE_SLOPE).then_some((i, a, b))
+            })
+        })
+    };
+    // The slope at an edge along a direction it faces.
+    let facing = |a: f32, b: f32, (c, s): (f32, f32)| {
+        let along = a * c + b * s;
+        ((b * c - a * s).abs() <= SHAKE_FACING * along.abs()).then_some(along)
+    };
+
+    // The parts with the most edges (their slope's energy per pixel, from
+    // one pixel in 4: enough to rank them).
+    let part = (long / 10).max(24);
+    let mut parts: Vec<(f64, Rect)> = Vec::new();
+    for y in (0..h).step_by(part) {
+        for x in (0..w).step_by(part) {
+            let r = Rect {
+                x0: x.max(margin),
+                y0: y.max(margin),
+                x1: (x + part).min(w - margin),
+                y1: (y + part).min(h - margin),
+            };
+            if r.x1 < r.x0 + 8 || r.y1 < r.y0 + 8 {
+                continue;
+            }
+            let pixels = (r.x1 - r.x0).div_ceil(4) * (r.y1 - r.y0).div_ceil(4);
+            let energy: f64 = edges(r, 4)
+                .map(|(_, a, b)| dirs.iter().filter_map(|&d| facing(a, b, d)).map(|s| (s * s) as f64).sum::<f64>())
+                .sum();
+            parts.push((energy / pixels as f64, r));
+        }
+    }
+    parts.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let most = parts.first().map_or(0.0, |p| p.0);
+    parts.retain(|p| p.0 > 0.0 && p.0 >= SHAKE_PART_SHARE * most);
+    parts.truncate(SHAKE_PARTS);
+    if parts.len() < SHAKE_MIN_PARTS {
+        return None;
+    }
+
+    // Along each direction, how the slope at an edge compares with the slope
+    // r px further on (1..=reach), as a share of its own (1 at r = 0): the
+    // mean over the parts. Each part's edges, the directions they face and
+    // their slope along them are kept for a second look further on.
+    let offset = |k: usize, r: usize| {
+        let (c, s) = dirs[k];
+        (r as f32 * s).round() as isize * w as isize + (r as f32 * c).round() as isize
+    };
+    let offsets: Vec<Vec<isize>> = (0..SHAKE_DIRS).map(|k| (1..=reach).map(|r| offset(k, r)).collect()).collect();
+    let slope_at = |j: isize, (c, s): (f32, f32)| {
+        let (a, b) = gradient(j as usize);
+        a * c + b * s
+    };
+    let mut sums = vec![vec![0f64; reach]; SHAKE_DIRS];
+    let mut counted = [0usize; SHAKE_DIRS];
+    /// A part's edges facing each direction (index, slope along it), and
+    /// their slopes' energy (0 where the direction doesn't count in the part).
+    struct Seen {
+        edges: Vec<Vec<(usize, f32)>>,
+        own: [f64; SHAKE_DIRS],
+    }
+    let mut seen: Vec<Seen> = Vec::new();
+    for (_, r) in &parts {
+        let mut facing_edges = vec![Vec::new(); SHAKE_DIRS];
+        for (i, a, b) in edges(*r, 2) {
+            for (k, &d) in dirs.iter().enumerate() {
+                if let Some(slope) = facing(a, b, d) {
+                    facing_edges[k].push((i, slope));
+                }
+            }
+        }
+        let own: Vec<f64> = facing_edges.iter().map(|e| e.iter().map(|&(_, s)| (s * s) as f64).sum()).collect();
+        let strongest = own.iter().copied().fold(0.0, f64::max);
+        let mut own_counted = [0f64; SHAKE_DIRS];
+        for k in 0..SHAKE_DIRS {
+            if own[k] <= 0.0 || own[k] < SHAKE_DIR_SHARE * strongest {
+                continue;
+            }
+            // One distance at a time, the edges in order: the picture is read in order.
+            for (sum, &o) in sums[k].iter_mut().zip(&offsets[k]) {
+                let along: f64 =
+                    facing_edges[k].iter().map(|&(i, s)| (s * slope_at(i as isize + o, dirs[k])) as f64).sum();
+                *sum += along / own[k];
+            }
+            own_counted[k] = own[k];
+            counted[k] += 1;
+        }
+        seen.push(Seen { edges: facing_edges, own: own_counted });
+    }
+    let curves: Vec<Option<Vec<f32>>> = (0..SHAKE_DIRS)
+        .map(|k| {
+            (counted[k] >= SHAKE_DIR_PARTS).then(|| sums[k].iter().map(|s| (s / counted[k] as f64) as f32).collect())
+        })
+        .collect();
+
+    // Doubled: how far the slope comes back up past its lowest since the
+    // edge, less what comes back at twice that distance (a pattern).
+    let rise = |c: &[f32]| {
+        let (mut low, mut best, mut at) = (f32::MAX, f32::MIN, near);
+        for r in 1..=reach {
+            low = low.min(c[r - 1]);
+            if r >= near && c[r - 1] - low.max(0.0) > best {
+                (best, at) = (c[r - 1] - low.max(0.0), r);
+            }
+        }
+        (best, at)
+    };
+    let mut doubled = 0f32;
+    for (k, c) in curves.iter().enumerate() {
+        let Some(c) = c else { continue };
+        let (best, at) = rise(c);
+        // Twice as far, give or take a px (an edge is a px or two wide).
+        let again = (2 * at - 1..=2 * at + 1)
+            .map(|r| {
+                let twice = offset(k, r);
+                seen.iter()
+                    .filter(|part| part.own[k] > 0.0)
+                    .map(|part| {
+                        let sum: f64 = part.edges[k]
+                            .iter()
+                            .map(|&(i, s)| (s * slope_at(i as isize + twice, dirs[k])) as f64)
+                            .sum();
+                        sum / part.own[k]
+                    })
+                    .sum::<f64>()
+                    / counted[k] as f64
+            })
+            .fold(0.0, f64::max);
+        doubled = doubled.max(best - again as f32);
+    }
+    // Smeared: how much more the slope lasts along a direction than across it.
+    let mut smeared = 0f32;
+    for k in 0..SHAKE_DIRS {
+        if let (Some(along), Some(across)) = (&curves[k], &curves[(k + SHAKE_DIRS / 2) % SHAKE_DIRS]) {
+            let more: f32 = (from..=to).map(|r| along[r - 1] - across[r - 1].max(0.0)).sum();
+            smeared = smeared.max(more / (to - from + 1) as f32);
+        }
+    }
+    Some((doubled, smeared))
+}
+
 /// A face in a photo, as the faces table keeps it: 0..1 of the picture.
 #[derive(Clone, Debug, Default)]
 pub struct FaceBox {
@@ -497,8 +785,19 @@ impl FaceBox {
 }
 
 /// Measures a picture (upright, as shown), with the faces found in it and
-/// the points its camera focused on ([`aimed`]).
+/// the points its camera focused on ([`aimed`]); how shaken it looks too.
 pub fn measure(img: &RgbImage, faces: &[FaceBox], points: &[Point]) -> Measures {
+    measured(img, faces, points, true)
+}
+
+/// [`measure`] for a photo taken with a shutter slow enough for the hand to
+/// shake the camera, or not ([`Shot::shaky`]): only then is how shaken it
+/// looks measured (a quarter to a third more time; and only then does it count).
+pub fn measure_taken(img: &RgbImage, faces: &[FaceBox], points: &[Point], slow_shutter: bool) -> Measures {
+    Measures { slow_shutter, ..measured(img, faces, points, slow_shutter) }
+}
+
+fn measured(img: &RgbImage, faces: &[FaceBox], points: &[Point], shake: bool) -> Measures {
     let fine = Plane::luma(img);
     let (w, h) = (fine.w, fine.h);
     let long = w.max(h);
@@ -535,6 +834,9 @@ pub fn measure(img: &RgbImage, faces: &[FaceBox], points: &[Point]) -> Measures 
         // The second sharpest: one odd part (a reflection, noise) doesn't decide.
         m.sharpest = Some(parts[if parts.len() >= 3 { 1 } else { 0 }]);
         m.typical = Some(parts[parts.len() / 2]);
+    }
+    if let Some((doubled, smeared)) = shake.then(|| shake_in(&fine)).flatten() {
+        (m.doubled, m.smeared) = (Some(doubled), Some(smeared));
     }
 
     // The largest face, if it's big enough to be the subject: around its eyes.
@@ -708,8 +1010,9 @@ impl QualityIndex {
         ids.iter().map(|id| measured.get(id).map_or(0, flags_of)).collect()
     }
 
-    /// Measures every photo that has a preview and no measures yet (or older
-    /// ones, or measured before its faces were looked for), from its preview.
+    /// Measures every photo of the catalog that needs it (`shoebox-cli
+    /// quality`). The window only measures what Cull is asked about: see
+    /// [`Self::measure`].
     pub fn index_pending(
         &self,
         cat: &Catalog,
@@ -719,45 +1022,46 @@ impl QualityIndex {
         self.ready.wait()?;
         let ready = cat.preview_ready()?;
         self.forget_stale(&ready)?;
-        let looked: HashSet<i64> = cat
-            .db()
-            .prepare("SELECT photo_id FROM face_scan")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let pointed: HashSet<i64> = cat
-            .db()
-            .prepare("SELECT id FROM photos WHERE focus IS NOT NULL")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let todo: Vec<(i64, String)> = {
-            let measured = self.measured.read().unwrap();
-            let without = self.without_faces.read().unwrap();
-            let unpointed = self.without_focus.read().unwrap();
-            ready
-                .into_iter()
-                .filter(|(id, _)| {
-                    !measured.contains_key(id)
-                        || (without.contains(id) && looked.contains(id))
-                        || (unpointed.contains(id) && pointed.contains(id))
-                })
-                .collect()
-        };
-        if todo.is_empty() {
-            return Ok(());
-        }
-        let mut p =
-            crate::search::AiProgress { task: "quality".into(), total: todo.len() as u64, ..Default::default() };
-        progress(&p);
-        log::info!("cull: measuring {} photos", todo.len());
+        let ids: Vec<i64> = ready.into_iter().map(|(id, _)| id).collect();
         let started = std::time::Instant::now();
-        let mut measured = 0;
+        let measured = self.measure(cat, &ids, cancel, &|done, total| {
+            progress(&crate::search::AiProgress { task: "quality".into(), done, total, ..Default::default() })
+        })?;
+        if measured > 0 {
+            log::info!("cull: {measured} photos measured in {:.1} s", started.elapsed().as_secs_f64());
+        }
+        Ok(())
+    }
+
+    /// Measures those of `ids` that need it, from their previews: not
+    /// measured yet, or measured from another picture (turned since, or an id
+    /// now another photo's), or before their faces were looked for or their
+    /// focus points read. Returns how many were measured.
+    pub fn measure(
+        &self,
+        cat: &Catalog,
+        ids: &[i64],
+        cancel: &AtomicBool,
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<usize> {
+        self.ready.wait()?;
+        let todo = self.pending(cat, ids)?;
+        if todo.is_empty() {
+            return Ok(0);
+        }
+        let total = todo.len() as u64;
+        progress(0, total);
+        let (mut measured, mut done) = (0, 0);
         for chunk in todo.chunks(64) {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             let ids: Vec<i64> = chunk.iter().map(|(id, _)| *id).collect();
-            let faces = faces_of(&cat.db(), &ids)?;
-            let points = points_of(&cat.db(), &ids)?;
+            let (faces, points, looked) = {
+                let db = cat.read()?;
+                (faces_of(&db, &ids)?, points_of(&db, &ids)?, looked_of(&db, &ids)?)
+            };
+            let shaky = shaky_of(cat, &ids)?;
             let rows: Vec<Measured> = self.pool.install(|| {
                 chunk
                     .par_iter()
@@ -769,7 +1073,7 @@ impl QualityIndex {
                                 return None;
                             }
                         };
-                        let m = measure(&img, of(&faces, id), of(&points, id));
+                        let m = measure_taken(&img, of(&faces, id), of(&points, id), shaky.contains(id));
                         Some(Measured {
                             id: *id,
                             fingerprint: fp.clone(),
@@ -782,37 +1086,84 @@ impl QualityIndex {
             });
             self.store_previews(&rows)?;
             measured += rows.len();
-            p.done += chunk.len() as u64;
-            progress(&p);
+            done += chunk.len() as u64;
+            progress(done, total);
         }
-        log::info!("cull: {measured} of {} photos measured in {:.1} s", p.done, started.elapsed().as_secs_f64());
-        Ok(())
+        Ok(measured)
+    }
+
+    /// Those of `ids` [`Self::measure`] would measure (with a preview), in
+    /// their order, with what their preview shows. Per photo, through
+    /// indexes: a view costs what it shows.
+    fn pending(&self, cat: &Catalog, ids: &[i64]) -> Result<Vec<(i64, String)>> {
+        let mut todo = Vec::new();
+        for chunk in ids.chunks(500) {
+            let (shown, looked, pointed) = {
+                let db = cat.read()?;
+                (fingerprints_of(&db, chunk)?, looked_of(&db, chunk)?, pointed_of(&db, chunk)?)
+            };
+            let stored: HashMap<i64, String> = self
+                .db
+                .lock()
+                .unwrap()
+                .prepare(
+                    "SELECT photo_id, fingerprint FROM quality
+                     WHERE version = ?1 AND photo_id IN (SELECT value FROM json_each(?2))",
+                )?
+                .query_map(params![QUALITY_VERSION, serde_json::to_string(chunk)?], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let measured = self.measured.read().unwrap();
+            let without = self.without_faces.read().unwrap();
+            let unpointed = self.without_focus.read().unwrap();
+            todo.extend(chunk.iter().filter_map(|id| {
+                let fp = shown.get(id)?;
+                let fresh = measured.contains_key(id)
+                    && stored.get(id) == Some(fp)
+                    && !(without.contains(id) && looked.contains(id))
+                    && !(unpointed.contains(id) && pointed.contains(id));
+                (!fresh).then(|| (*id, fp.clone()))
+            }));
+        }
+        Ok(todo)
+    }
+
+    /// Forgets measures that no longer fit their photo, catalog-wide: it left
+    /// the catalog, was turned, or its id now belongs to another photo. Cheap
+    /// (Cull's measures are of the shoots it was asked about), for after a
+    /// scan.
+    pub fn forget_gone(&self, cat: &Catalog) -> Result<usize> {
+        self.ready.wait()?;
+        self.forget_stale(&cat.preview_ready()?)
     }
 
     fn store_previews(&self, rows: &[Measured]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
+        let mut closes = Vec::with_capacity(rows.len());
         {
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
             for r in rows {
-                // A photo's closer look stays: it doesn't depend on its preview.
-                tx.execute(
+                // A photo's closer look stays while it is of the same picture:
+                // it doesn't depend on the preview.
+                let close: Option<String> = tx.query_row(
                     "INSERT INTO quality (photo_id, fingerprint, version, faces, focus, preview)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT (photo_id) DO UPDATE SET fingerprint = ?2, version = ?3, faces = ?4, focus = ?5,
-                         preview = ?6, close = CASE WHEN fingerprint = ?2 AND version = ?3 THEN close END",
+                         preview = ?6, close = CASE WHEN fingerprint = ?2 AND version = ?3 THEN close END
+                     RETURNING close",
                     params![r.id, r.fingerprint, QUALITY_VERSION, r.faces, r.focus, serde_json::to_string(&r.m)?],
+                    |row| row.get(0),
                 )?;
+                closes.push(close.and_then(|c| serde_json::from_str(&c).ok()));
             }
             tx.commit()?;
         }
         let mut measured = self.measured.write().unwrap();
         let mut without = self.without_faces.write().unwrap();
         let mut unpointed = self.without_focus.write().unwrap();
-        for r in rows {
-            let close = measured.get(&r.id).and_then(|q| q.close);
+        for (r, close) in rows.iter().zip(closes) {
             measured.insert(r.id, Quality { preview: r.m, close });
             for (set, has) in [(&mut *without, r.faces), (&mut *unpointed, r.focus)] {
                 if has {
@@ -890,11 +1241,12 @@ impl QualityIndex {
             let faces = faces_of(&cat.db(), chunk)?;
             let points = points_of(&cat.db(), chunk)?;
             let fingerprints = fingerprints_of(&cat.db(), chunk)?;
+            let shaky = shaky_of(cat, chunk)?;
             let results: Vec<(i64, std::result::Result<Measures, String>)> = self.pool.install(|| {
                 chunk
                     .par_iter()
                     .with_max_len(1)
-                    .map(|id| (*id, closer_look(cat, *id, of(&faces, id), of(&points, id))))
+                    .map(|id| (*id, closer_look(cat, *id, of(&faces, id), of(&points, id), shaky.contains(id))))
                     .collect()
             });
             let mut found = Vec::new();
@@ -936,14 +1288,15 @@ impl QualityIndex {
             found
                 .iter()
                 .filter(|(id, _)| !measured.contains_key(id))
-                .filter_map(|(id, _)| {
+                .filter_map(|(id, close)| {
                     let img = image::open(cat.data.preview_path(*id)).ok()?.to_rgb8();
+                    let m = measure_taken(&img, of(faces, id), of(points, id), close.slow_shutter);
                     Some(Measured {
                         id: *id,
                         fingerprint: fingerprints.get(id)?.clone(),
                         faces: faces.contains_key(id),
                         focus: points.contains_key(id),
-                        m: measure(&img, of(faces, id), of(points, id)),
+                        m,
                     })
                 })
                 .collect()
@@ -995,6 +1348,7 @@ impl QualityIndex {
             (faces_of(&db, &list.ids)?, points_of(&db, &list.ids)?)
         };
         let vectors = search.vectors(&list.ids);
+        let to_measure = self.pending(cat, &list.ids)?.into_iter().map(|(id, _)| id).collect();
         let measured = self.measured.read().unwrap();
         let frames: Vec<FrameIn> = list
             .ids
@@ -1009,7 +1363,7 @@ impl QualityIndex {
                     camera: info.camera.clone(),
                     vector: vectors.get(id).cloned(),
                     quality: measured.get(id).copied(),
-                    shot: Shot { exposure: info.exposure.clone(), focal: info.focal },
+                    shot: Shot::of(&info),
                     row: FrameRow {
                         id: *id,
                         name: info.name.clone(),
@@ -1053,13 +1407,20 @@ impl QualityIndex {
             can_look_closer: can_look,
             unreadable,
             stacks,
+            to_measure,
         })
     }
 }
 
 /// A photo's original, read at half its size (whole when small, read-only),
 /// and measured; or why it couldn't be.
-fn closer_look(cat: &Catalog, id: i64, faces: &[FaceBox], points: &[Point]) -> std::result::Result<Measures, String> {
+fn closer_look(
+    cat: &Catalog,
+    id: i64,
+    faces: &[FaceBox],
+    points: &[Point],
+    slow_shutter: bool,
+) -> std::result::Result<Measures, String> {
     let (path, kind, turn) = cat.original(id).map_err(|e| format!("{e:#}"))?;
     let full = cat.full_size(id);
     let long = full.map_or(3000, |l| if l <= CLOSE_WHOLE { l } else { l / 2 });
@@ -1068,7 +1429,7 @@ fn closer_look(cat: &Catalog, id: i64, faces: &[FaceBox], points: &[Point]) -> s
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     // Turned as its preview is: the faces' boxes and the focus points are on the photo as it stands.
     let img = crate::imaging::turned(loaded.image.map_err(|e| format!("{name}: {e}"))?, turn).to_rgb8();
-    let mut m = measure(&img, faces, points);
+    let mut m = measure_taken(&img, faces, points, slow_shutter);
     m.full = full.filter(|&f| f >= m.long);
     Ok(m)
 }
@@ -1113,6 +1474,11 @@ fn points_of(db: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<Point>>> {
         out.insert(r.get(0)?, focus.as_ref().map(aimed).unwrap_or_default());
     }
     Ok(out)
+}
+
+/// Those of these photos whose shutter was slow enough for the hand to shake ([`Shot::shaky`]).
+fn shaky_of(cat: &Catalog, ids: &[i64]) -> Result<HashSet<i64>> {
+    Ok(cat.shot_info(ids)?.into_iter().filter(|(_, info)| Shot::of(info).shaky()).map(|(id, _)| id).collect())
 }
 
 /// A photo's own in a map of photos' things (none if it has none).
@@ -1164,6 +1530,24 @@ fn fingerprints_of(db: &Connection, ids: &[i64]) -> Result<HashMap<i64, String>>
     Ok(out)
 }
 
+/// Those of these photos already looked at for faces.
+fn looked_of(db: &Connection, ids: &[i64]) -> Result<HashSet<i64>> {
+    let out = db
+        .prepare("SELECT photo_id FROM face_scan WHERE photo_id IN (SELECT value FROM json_each(?1))")?
+        .query_map([serde_json::to_string(ids)?], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(out)
+}
+
+/// Those of these photos whose focus points the catalog has.
+fn pointed_of(db: &Connection, ids: &[i64]) -> Result<HashSet<i64>> {
+    let out = db
+        .prepare("SELECT id FROM photos WHERE focus IS NOT NULL AND id IN (SELECT value FROM json_each(?1))")?
+        .query_map([serde_json::to_string(ids)?], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Bursts, and what to keep.
 
@@ -1183,6 +1567,11 @@ pub struct Shoot {
     /// Originals a closer look couldn't read, and why.
     pub unreadable: Vec<Unreadable>,
     pub stacks: Vec<Stack>,
+    /// Photos to measure from their previews ([`QualityIndex::measure`]):
+    /// not measured yet, or to measure again. The shoot is asked for again
+    /// once they are.
+    #[serde(skip)]
+    pub to_measure: Vec<i64>,
 }
 
 /// Frames of the same shot, in the order they were taken.
@@ -1389,11 +1778,14 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
         frames.iter().map(|f| f.quality.map(|q| if all_close { *q.best() } else { q.preview })).collect();
     let compared = Compared::of(&looks);
     let blur: Vec<Option<f32>> = looks.iter().map(|m| m.as_ref().and_then(|m| compared.blur(m))).collect();
+    // Shake short of a problem counts too: of frames all shaken a little,
+    // the steadiest is kept.
+    let shake: Vec<f32> = looks.iter().map(|m| m.as_ref().map_or(0.0, |m| m.shake(all_close).min(1.0))).collect();
     let score = |i: usize| -> f32 {
         let major = found[i].iter().filter(|p| p.problem.major()).count() as f32;
         let minor = found[i].len() as f32 - major;
         let blown = frames[i].quality.map_or(0.0, |q| q.preview.blown);
-        blur[i].unwrap_or(5.0) + 5.0 * major + 0.5 * minor + 2.0 * blown
+        blur[i].unwrap_or(5.0) + 5.0 * major + 0.5 * minor + 2.0 * blown + shake[i]
     };
     let keeper = (0..frames.len()).min_by(|a, b| score(*a).total_cmp(&score(*b))).unwrap_or(0);
     // Versions of one capture (a RAW and its camera JPEG or an export) are
@@ -1478,9 +1870,25 @@ impl QualityIndex {
         self.ready.wait()?;
         let quality = self.get(id);
         let info = cat.shot_info(&[id])?.remove(&id).unwrap_or_default();
-        let shot = Shot { exposure: info.exposure, focal: info.focal };
+        let shot = Shot::of(&info);
         let problems = quality.map(|q| problems(&q, &shot)).unwrap_or_default();
         Ok(Report { id, quality, problems })
+    }
+
+    /// A photo's details with what Cull found wrong with it: a camera that
+    /// confirmed focus says nothing of shake or motion after. A photo not
+    /// measured yet is measured first (one preview, a few ms). Never waits for
+    /// the measures to be read (nothing until then, as the grid's badges).
+    pub fn photo_detail(&self, cat: &Catalog, id: i64) -> Result<PhotoDetail> {
+        if self.ready.is_open()
+            && let Err(e) = self.measure(cat, &[id], &AtomicBool::new(false), &|_, _| {})
+        {
+            log::warn!("cull: photo {id}: not measured: {e:#}");
+        }
+        let mut d = cat.photo_detail(id)?;
+        let shot = Shot { exposure: d.exposure.clone(), focal: d.focal };
+        d.problems = self.get(id).map(|q| problems(&q, &shot)).unwrap_or_default();
+        Ok(d)
     }
 }
 
@@ -1539,6 +1947,97 @@ mod tests {
     fn shake_in_one_direction_counts() {
         let m = measure(&moved(&squares(480, 320, 0.0), 6), &[], &[]);
         assert!(m.sharpest.unwrap() > 2.0, "{m:?}");
+    }
+
+    /// Tiles of `side` px, each its own grey: edges everywhere, but no
+    /// pattern (squares of two greys repeat themselves diagonally).
+    fn tiles(w: u32, h: u32, side: u32) -> RgbImage {
+        RgbImage::from_fn(w, h, |x, y| {
+            let n = (x / side).wrapping_mul(73_856_093) ^ (y / side).wrapping_mul(19_349_663);
+            Rgb([(40 + n.wrapping_mul(2_654_435_761) % 170) as u8; 3])
+        })
+    }
+
+    /// `img` as a camera shaken during the exposure leaves it: copies of it
+    /// added together, each `(weight, dx, dy)`, `dx, dy` px away.
+    fn ghosted(img: &RgbImage, copies: &[(f32, i32, i32)]) -> RgbImage {
+        let (w, h) = (img.width() as i32, img.height() as i32);
+        RgbImage::from_fn(img.width(), img.height(), |x, y| {
+            let mut sum = [0f32; 3];
+            for &(weight, dx, dy) in copies {
+                let p = img.get_pixel((x as i32 - dx).clamp(0, w - 1) as u32, (y as i32 - dy).clamp(0, h - 1) as u32);
+                for (s, v) in sum.iter_mut().zip(p.0) {
+                    *s += weight * v as f32;
+                }
+            }
+            Rgb(sum.map(|s| s.round() as u8))
+        })
+    }
+
+    /// Measured as a closer look at a photo taken with a slow shutter (or not).
+    fn looked_closer(img: &RgbImage, slow_shutter: bool) -> Quality {
+        let preview = Measures { slow_shutter, ..measure(&squares(1080, 720, 0.0), &[], &[]) };
+        Quality { preview, close: Some(Measures { slow_shutter, ..measure(img, &[], &[]) }) }
+    }
+
+    #[test]
+    fn copies_left_by_a_shaken_camera_are_found_where_edge_blur_sees_none() {
+        // At 100%: the picture twice, the second copy fainter, 13 px away.
+        let sharp = tiles(2400, 1600, 30);
+        let shaken = ghosted(&sharp, &[(0.7, 0, 0), (0.3, 12, 5)]);
+        let (s, g) = (measure(&sharp, &[], &[]), measure(&shaken, &[], &[]));
+        // Each copy has crisp edges: as sharp as the picture without shake.
+        assert!(g.sharpest.unwrap() < 0.6, "{g:?}");
+        assert!(s.doubled.unwrap() < 0.05 && s.smeared.unwrap() < 0.05, "{s:?}");
+        assert!(g.doubled.unwrap() >= DOUBLED_CLOSE, "{g:?}");
+        let q = looked_closer(&shaken, true);
+        let shot = Shot { exposure: Some("1s".into()), focal: Some(35.0) };
+        let found = problems(&q, &shot);
+        assert_eq!(found.iter().map(|f| f.problem).collect::<Vec<_>>(), [Problem::Soft], "{found:?}");
+        assert_eq!(found[0].text, "Shaken at 100%: the picture is doubled (1 s at 35 mm is slow for a steady hand)");
+        // Copies anywhere (three, two directions) are as doubled.
+        let thrice = ghosted(&sharp, &[(0.5, 0, 0), (0.3, 10, 8), (0.2, 26, 12)]);
+        assert!(measure(&thrice, &[], &[]).doubled.unwrap() >= DOUBLED_CLOSE);
+        // Taken at 1/500, the hand can't have shaken it: a pattern, a design.
+        assert!(found_in(&looked_closer(&shaken, false)).is_empty());
+        assert!(found_in(&looked_closer(&sharp, true)).is_empty());
+    }
+
+    #[test]
+    fn a_smear_one_way_is_found_and_patterns_are_not_copies() {
+        let smeared = measure(&moved(&tiles(1080, 720, 24), 6), &[], &[]);
+        assert!(smeared.smeared.unwrap() >= SMEARED, "{smeared:?}");
+        // Blurred all round (out of focus): not smeared one way.
+        let soft = measure(&image::imageops::blur(&tiles(1080, 720, 24), 3.0), &[], &[]);
+        assert!(soft.smeared.unwrap() < 0.1, "{soft:?}");
+        // Stripes repeat every 12 px: they come back at twice that too, a copy doesn't.
+        let stripes = RgbImage::from_fn(2400, 1600, |x, _| if x % 12 < 6 { Rgb([60; 3]) } else { Rgb([190; 3]) });
+        let m = measure(&stripes, &[], &[]);
+        assert!(m.doubled.unwrap() < 0.1, "{m:?}");
+        // Nothing with edges: nothing to tell.
+        assert_eq!(measure(&RgbImage::from_pixel(1080, 720, Rgb([128; 3])), &[], &[]).doubled, None);
+    }
+
+    fn found_in(q: &Quality) -> Vec<Problem> {
+        problems(q, &Shot::default()).iter().map(|f| f.problem).collect()
+    }
+
+    #[test]
+    fn of_frames_all_shaken_a_little_the_steadiest_is_kept() {
+        // Equally sharp edges; the second frame's copies faint, below a problem.
+        let shaken = |id: i64, doubled: f32| {
+            let mut f = frame(id, 100 + id, None, 0.4);
+            let q = f.quality.as_mut().unwrap();
+            (q.preview.slow_shutter, q.preview.doubled) = (true, Some(doubled));
+            f
+        };
+        let s = &suggest(vec![shaken(1, 0.4), shaken(2, 0.1), shaken(3, 0.3)])[0];
+        assert_eq!(s.keeper, 1, "{:?}", s.frames);
+        assert!(s.frames.iter().all(|f| f.problems.is_empty()));
+        // Doubled enough on screen: blurry, rejected.
+        let s = &suggest(vec![shaken(1, 0.6), shaken(2, 0.1)])[0];
+        assert_eq!(s.frames[0].problems, [Problem::Blurry]);
+        assert_eq!((s.keeper, s.frames[0].suggest), (1, Suggest::Reject));
     }
 
     #[test]
@@ -1842,5 +2341,9 @@ mod tests {
         assert!(slow("1/400", 200.0).is_none());
         assert_eq!(slow("0.5s", 35.0).unwrap(), "0.5 s at 35 mm is slow for a steady hand");
         assert!(slow("1/1000", 1200.0).is_none(), "faster than 1/500 is never slow");
+        // Shake is possible from 1/focal on; unknown without both.
+        let shaky = |e: Option<&str>, f: Option<f64>| Shot { exposure: e.map(String::from), focal: f }.shaky();
+        assert!(shaky(Some("1/50"), Some(50.0)) && shaky(Some("2s"), Some(17.0)));
+        assert!(!shaky(Some("1/125"), Some(35.0)) && !shaky(Some("1s"), None) && !shaky(None, Some(35.0)));
     }
 }

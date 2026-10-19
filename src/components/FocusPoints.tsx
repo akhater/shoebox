@@ -57,22 +57,29 @@ export const FocusPoints = memo(function FocusPoints({ focus, faded }: { focus: 
   );
 });
 
-/** The info panel's line about focus: what was in focus or chosen, then the
- *  mode. With the points shown, each part has its colour (the legend). */
+/** The info panel's line about focus: where the camera confirmed focus or
+ *  what was chosen, then the mode. With the points shown, each part has its
+ *  colour (the legend). Confirmed is the camera's word when it focused, not
+ *  that the photo is sharp: shake and motion come after (Sharpness says). */
 export function FocusSummary({ focus, legend }: { focus: Focus; legend: boolean }) {
   const n = focus.points.length;
   const layout = focus.points.some((p) => p.state === "other");
   const count = (s: FocusState) => focus.points.filter((p) => p.state === s).length;
   const [inFocus, chosen, area] = [count("inFocus"), count("chosen"), count("area")];
   const part = (key: FocusState, text: string) => (
-    <span key={key}>
+    <span key={key} className="nowrap">
       {legend && <i className={`af-swatch ${key}`} />}
       {text}
     </span>
   );
   const parts: ReactNode[] = [];
   if (inFocus) {
-    parts.push(part("inFocus", layout ? `${inFocus} of ${n} in focus` : inFocus === 1 ? "In focus" : `${inFocus} points in focus`));
+    const text = layout
+      ? `Focus confirmed on ${inFocus} of ${n}`
+      : inFocus === 1
+        ? "Focus confirmed"
+        : `Focus confirmed on ${inFocus} points`;
+    parts.push(part("inFocus", text));
   }
   if (chosen) {
     const text = inFocus

@@ -30,6 +30,8 @@
 //!   shoebox-cli photo <id>       one photo's details; each copy's volumeId and folder make the
 //!                                scope of its folder ("Go to folder") for list:
 //!                                {"kind":"folder","volumeId":3,"relPath":"<folder>"}
+//!                                "problems": what Cull found wrong with it, once measured (blurry,
+//!                                focus missed...): a camera that confirmed focus says nothing of shake
 //!   shoebox-cli backup           consistent copies of the databases in backup\ (run it
 //!                                before each Kopia snapshot; see .kopiaignore)
 //!   shoebox-cli list [oldest|newest|name|added] [limit] [filters] [scope]   photos in grid order
@@ -164,9 +166,11 @@
 //!
 //! Cull's assistant (JSON out). It only suggests, keep or reject; a reject is a mark
 //! for deletion as above (`mark` / `unmark`), and nothing touches a file:
-//!   shoebox-cli quality                   measure the photos not measured yet, from their
-//!                                         previews (the window does it in the background)
-//!   shoebox-cli measure <photo-id>...     a photo's measures and what's wrong with it. Blur is
+//!   shoebox-cli quality                   measure every photo of the catalog not measured yet,
+//!                                         from its preview (`cull` and the window measure only
+//!                                         the shoot they are asked about)
+//!   shoebox-cli measure <photo-id>...     a photo's measures (taken first if it has none yet)
+//!                                         and what's wrong with it. Blur is
 //!                                         a Gaussian sigma in px of the picture measured
 //!                                         ("long" px wide); "close" = measured from the original
 //!   shoebox-cli cull [filters] [scope] [--closer]   a view as a shoot, as Cull shows it (up to
@@ -722,7 +726,8 @@ fn main() -> anyhow::Result<()> {
         }
         Some("photo") => {
             let id: i64 = args.get(1).ok_or_else(|| anyhow::anyhow!("photo <id>"))?.parse()?;
-            println!("{}", serde_json::to_string_pretty(&cat.photo_detail(id)?)?);
+            let quality = cull::QualityIndex::open(&cat)?;
+            println!("{}", serde_json::to_string_pretty(&quality.photo_detail(&cat, id)?)?);
         }
         Some(cmd @ ("mark" | "unmark")) => {
             let n = if cmd == "unmark" && args.get(1).is_some_and(|a| a == "--all") {
@@ -780,6 +785,7 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("measure <photo-id>...");
             }
             let quality = cull::QualityIndex::open(&cat)?;
+            quality.measure(&cat, &ids, &cancel, &|_, _| {})?;
             let reports = ids.iter().map(|id| quality.report(&cat, *id)).collect::<anyhow::Result<Vec<_>>>()?;
             println!("{}", serde_json::to_string_pretty(&reports)?);
         }
@@ -792,6 +798,11 @@ fn main() -> anyhow::Result<()> {
             let quality = cull::QualityIndex::open(&cat)?;
             let search = shoebox_lib::search::SearchIndex::open(&cat)?;
             let mut shoot = quality.shoot(&cat, &search, &scope, &filters)?;
+            if !shoot.to_measure.is_empty() {
+                quality.measure(&cat, &shoot.to_measure, &cancel, &|d, t| eprint!("\r  measured {d}/{t}"))?;
+                eprintln!();
+                shoot = quality.shoot(&cat, &search, &scope, &filters)?;
+            }
             if closer && !shoot.can_look_closer.is_empty() {
                 quality
                     .look_closer(&cat, &shoot.can_look_closer, &cancel, &|d, t| eprint!("\r  looked closer {d}/{t}"))?;
