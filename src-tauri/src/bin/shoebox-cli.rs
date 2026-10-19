@@ -30,6 +30,8 @@
 //!   shoebox-cli photo <id>       one photo's details; each copy's volumeId and folder make the
 //!                                scope of its folder ("Go to folder") for list:
 //!                                {"kind":"folder","volumeId":3,"relPath":"<folder>"}
+//!                                "problems": what Cull found wrong with it, once measured (blurry,
+//!                                focus missed...): a camera that confirmed focus says nothing of shake
 //!   shoebox-cli backup           consistent copies of the databases in backup\ (run it
 //!                                before each Kopia snapshot; see .kopiaignore)
 //!   shoebox-cli list [oldest|newest|name|added] [limit] [filters] [scope]   photos in grid order
@@ -722,7 +724,8 @@ fn main() -> anyhow::Result<()> {
         }
         Some("photo") => {
             let id: i64 = args.get(1).ok_or_else(|| anyhow::anyhow!("photo <id>"))?.parse()?;
-            println!("{}", serde_json::to_string_pretty(&cat.photo_detail(id)?)?);
+            let quality = cull::QualityIndex::open(&cat)?;
+            println!("{}", serde_json::to_string_pretty(&quality.photo_detail(&cat, id)?)?);
         }
         Some(cmd @ ("mark" | "unmark")) => {
             let n = if cmd == "unmark" && args.get(1).is_some_and(|a| a == "--all") {

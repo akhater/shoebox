@@ -6,6 +6,7 @@ import type {
   FaceTarget,
   Facets,
   Focus,
+  Found,
   LeftAsIs,
   Merged,
   Overview,
@@ -66,6 +67,8 @@ export function fakeBackend() {
   const revs = new Map<number, number>();
   /** Where the camera focused, for the photos a test says. */
   const focusOf = new Map<number, Focus>();
+  /** What Cull found wrong with photos, as their details say it (a test sets them). */
+  const foundIn = new Map<number, Found[]>();
   const turn = (ids: number[], by: (id: number) => number) => {
     const photos = ids.map((id) => {
       const q = ((by(id) % 4) + 4) % 4;
@@ -284,6 +287,7 @@ export function fakeBackend() {
       turn: turns.get(id) ?? 0,
       sideways: sideways.get(id) ?? 0,
       focus: focusOf.get(id) ?? null,
+      problems: foundIn.get(id) ?? [],
       files: [
         {
           id: id * 10,
@@ -479,6 +483,7 @@ export function fakeBackend() {
     sideways,
     turns,
     focusOf,
+    foundIn,
     focusMissed,
     /** What Cull says it couldn't read. */
     unreadableOriginals: (u: Shoot["unreadable"]) => {

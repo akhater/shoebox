@@ -257,6 +257,8 @@ export interface PhotoDetail {
   sideways: number;
   /** Where the camera focused, as the photo is shown; null when its file doesn't say. */
   focus: Focus | null;
+  /** What Cull found wrong with it, once measured (empty: nothing, or not measured yet). */
+  problems: Found[];
   files: FileLoc[];
 }
 
@@ -488,6 +490,14 @@ export const PROBLEMS: { problem: Problem; bit: number; label: string }[] = [
   { problem: "focusMissed", bit: 128, label: "Focus missed" },
 ];
 export const problemsOf = (flags: number) => PROBLEMS.filter((p) => flags & p.bit);
+/** The problems about sharpness: what the camera's focus confirmation can't tell. */
+export const BLUR_PROBLEMS: Problem[] = ["blurry", "soft", "faceSoft", "focusMissed"];
+
+/** A problem Cull found, in its words ("Blurry everywhere: 1.6 s at 37 mm is slow..."). */
+export interface Found {
+  problem: Problem;
+  text: string;
+}
 
 /** A frame of a shoot in Cull, with what Cull suggests for it and why. */
 export interface CullFrame {

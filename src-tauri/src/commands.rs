@@ -104,8 +104,8 @@ pub async fn browse(state: State<'_, AppState>) -> Res<Browse> {
 
 #[tauri::command]
 pub async fn get_photo(state: State<'_, AppState>, id: i64) -> Res<PhotoDetail> {
-    let cat = state.cat.clone();
-    blocking(move || cat.photo_detail(id)).await
+    let (cat, quality) = (state.cat.clone(), state.quality.clone());
+    blocking(move || quality.photo_detail(&cat, id)).await
 }
 
 /// Adds a folder and queues its first scan.

@@ -634,7 +634,7 @@ describe("the viewer", () => {
     // Off until asked for; the panel says it anyway.
     expect(viewer(host)!.querySelector(".focus-points")).toBeNull();
     expect(focusToggle(host).getAttribute("aria-pressed")).toBe("false");
-    expect(focusLine(host)).toBe("1 of 3 in focus · Single point");
+    expect(focusLine(host)).toBe("Focus confirmed on 1 of 3 · Single point");
 
     await key(document.body, "f");
     expect(focusToggle(host).getAttribute("aria-pressed")).toBe("true");
@@ -664,6 +664,31 @@ describe("the viewer", () => {
     await click(focusToggle(host));
     expect(viewer(host)!.querySelector(".focus-points")).toBeNull();
     expect(focusToggle(host).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  test("a photo the camera focused but Cull finds blurry says both: focus confirmed, then the blur", async () => {
+    const be = fakeBackend();
+    be.focusOf.set(202, { mode: "Expanded point", points: [{ x: 0.1, y: 0.2, w: 0.4, h: 0.5, state: "inFocus" }] });
+    be.foundIn.set(202, [
+      { problem: "bright", text: "Very bright" },
+      { problem: "blurry", text: "Blurry everywhere: 1.6 s at 37 mm is slow for a steady hand" },
+    ]);
+    const host = await renderApp();
+    await doubleClick(tile(host, 202));
+    await wait(50);
+    const row = (name: string) =>
+      [...viewer(host)!.querySelectorAll("dt")].find((dt) => dt.textContent === name)?.nextElementSibling?.textContent;
+    expect(focusLine(host)).toBe("Focus confirmed · Expanded point");
+    // Never broken across lines in the narrow panel.
+    expect(viewer(host)!.querySelector(".focus-summary .nowrap")!.textContent).toBe("Focus confirmed");
+    // Only what is about sharpness: the rest shows in the photo itself.
+    expect(row("Sharpness")).toBe("Blurry everywhere: 1.6 s at 37 mm is slow for a steady hand");
+
+    // Nothing found (or not measured yet): no line.
+    await key(document.body, "ArrowRight");
+    await wait(50);
+    expect(viewer(host)!.querySelector("h2")!.textContent).toBe("IMG_203.jpg");
+    expect(row("Sharpness")).toBeUndefined();
   });
 });
 

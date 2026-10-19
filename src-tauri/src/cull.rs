@@ -15,7 +15,7 @@
 //! `quality.db`, a file of their own like word search's: they can always be
 //! measured again, so the catalog's backup doesn't need them.
 
-use crate::catalog::{Catalog, Filters, Scope, Sort};
+use crate::catalog::{Catalog, Filters, PhotoDetail, Scope, Sort};
 use crate::db::PREVIEW_OK;
 use crate::focus::{Focus, Point, State};
 use anyhow::{Result, bail};
@@ -1481,6 +1481,16 @@ impl QualityIndex {
         let shot = Shot { exposure: info.exposure, focal: info.focal };
         let problems = quality.map(|q| problems(&q, &shot)).unwrap_or_default();
         Ok(Report { id, quality, problems })
+    }
+
+    /// A photo's details with what Cull found wrong with it: a camera that
+    /// confirmed focus says nothing of shake or motion after. Never waits for
+    /// the measures to be read (nothing until then, as the grid's badges).
+    pub fn photo_detail(&self, cat: &Catalog, id: i64) -> Result<PhotoDetail> {
+        let mut d = cat.photo_detail(id)?;
+        let shot = Shot { exposure: d.exposure.clone(), focal: d.focal };
+        d.problems = self.get(id).map(|q| problems(&q, &shot)).unwrap_or_default();
+        Ok(d)
     }
 }
 

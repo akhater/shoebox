@@ -92,6 +92,11 @@ fn a_shoot_is_measured_stacked_and_its_rejects_marked() {
     let flags = quality.flags(&ids);
     assert_eq!(flags[2], Problem::Blurry.bit());
     assert_eq!(flags[1], 0);
+    // And a photo's details (the info panel), with Cull's words.
+    let shaken = quality.photo_detail(&cat, ids[2]).unwrap().problems;
+    assert_eq!(shaken.iter().map(|f| f.problem).collect::<Vec<_>>(), [Problem::Blurry]);
+    assert!(shaken[0].text.starts_with("Blurry everywhere"), "{shaken:?}");
+    assert!(quality.photo_detail(&cat, ids[1]).unwrap().problems.is_empty());
 
     // The disk is here: every original can be looked at closer.
     assert_eq!(shoot.can_look_closer.len(), 5);
