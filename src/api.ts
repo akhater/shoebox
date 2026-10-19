@@ -565,8 +565,11 @@ export const cull = {
   unmarkAll: () => invoke<number>("unmark_all"),
   plan: () => invoke<DeletePlan>("delete_plan"),
   delete: (token: string, volumeIds: number[]) => invoke<DeleteReport>("delete_marked", { token, volumeIds }),
-  /** A view as a shoot: bursts in stacks, problems, suggestions. */
+  /** A view as a shoot: bursts in stacks, problems, suggestions. Its photos not measured yet are
+   *  measured in the background ("cull-changed" says when to ask again). */
   shoot: (scope: Scope, filters: Filters) => invoke<Shoot>("cull_shoot", { scope, filters }),
+  /** What Cull finds wrong with these photos (bits of PROBLEMS), those not measured yet measured first. */
+  flags: (ids: number[]) => invoke<number[]>("cull_flags", { ids }),
   /** Measure these photos again from their originals (those plugged in), in the background. */
   lookCloser: (ids: number[]) => invoke<void>("cull_look_closer", { ids }),
   stop: () => invoke<void>("cull_stop"),
@@ -669,7 +672,7 @@ export function fmtAgo(ts: number | null) {
 }
 
 export interface AiProgress {
-  task: "upright" | "search" | "faces" | "quality";
+  task: "upright" | "search" | "faces";
   done: number;
   total: number;
   gpu: boolean;

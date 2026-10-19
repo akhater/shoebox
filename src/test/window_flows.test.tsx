@@ -538,29 +538,46 @@ describe("Cull", () => {
     expect(warn.title).toBe("IMG_303.CR3: IMG_303.CR3: the file couldn't be read");
   });
 
-  test("photos measured in the background don't reload a shoot already measured", async () => {
+  test("faces found in the background don't reload a shoot until they all are", async () => {
     const be = fakeBackend();
     const host = await renderApp();
     await openCull(host, "Trip");
     const shoots = () => be.calls.filter((c) => c.cmd === "cull_shoot").length;
     const before = shoots();
     for (let i = 0; i < 5; i++) {
-      await act(() => emit("ai-progress", { task: "quality", done: i, total: 10, gpu: false, finished: false, error: null }));
+      await act(() => emit("ai-progress", { task: "faces", done: i, total: 10, gpu: false, finished: false, error: null }));
       await wait(500);
     }
     expect(shoots()).toBe(before);
   });
 
+  const problemsToggle = (host: HTMLElement) =>
+    host.querySelector<HTMLElement>('.viewbar [aria-pressed][title*="what Cull found"]')!;
+
   test("what Cull found shows on thumbnails only when asked", async () => {
     fakeBackend();
     const host = await renderApp();
-    const toggle = () => host.querySelector<HTMLElement>('.viewbar [aria-pressed][title*="what Cull found"]')!;
     expect(tile(host, 204).querySelector(".badge.problem")).toBeNull();
-    await click(toggle());
-    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+    await click(problemsToggle(host));
+    expect(problemsToggle(host).getAttribute("aria-pressed")).toBe("true");
     expect(tile(host, 204).querySelector(".badge.problem")!.getAttribute("title")).toBe("Blurry");
     expect(tile(host, 203).querySelector(".badge.problem")).toBeNull();
     expect(localStorage.getItem("shoebox.showProblems")).toBe("1");
+    localStorage.removeItem("shoebox.showProblems");
+  });
+
+  test("with Cull's badges on, the photos on screen are measured and their badges follow", async () => {
+    const be = fakeBackend();
+    be.unmeasured(203, 2); // very dark, once measured
+    const host = await renderApp();
+    await wait(400);
+    const asked = () => be.calls.filter((c) => c.cmd === "cull_flags").flatMap((c) => c.args.ids as number[]);
+    expect(asked()).toEqual([]); // badges off: nothing measured
+    await click(problemsToggle(host));
+    expect(tile(host, 203).querySelector(".badge.problem")).toBeNull();
+    await wait(400);
+    expect(asked()).toContain(203);
+    expect(tile(host, 203).querySelector(".badge.problem")!.getAttribute("title")).toBe("Very dark");
     localStorage.removeItem("shoebox.showProblems");
   });
 });

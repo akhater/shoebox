@@ -166,9 +166,11 @@
 //!
 //! Cull's assistant (JSON out). It only suggests, keep or reject; a reject is a mark
 //! for deletion as above (`mark` / `unmark`), and nothing touches a file:
-//!   shoebox-cli quality                   measure the photos not measured yet, from their
-//!                                         previews (the window does it in the background)
-//!   shoebox-cli measure <photo-id>...     a photo's measures and what's wrong with it. Blur is
+//!   shoebox-cli quality                   measure every photo of the catalog not measured yet,
+//!                                         from its preview (`cull` and the window measure only
+//!                                         the shoot they are asked about)
+//!   shoebox-cli measure <photo-id>...     a photo's measures (taken first if it has none yet)
+//!                                         and what's wrong with it. Blur is
 //!                                         a Gaussian sigma in px of the picture measured
 //!                                         ("long" px wide); "close" = measured from the original
 //!   shoebox-cli cull [filters] [scope] [--closer]   a view as a shoot, as Cull shows it (up to
@@ -783,6 +785,7 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("measure <photo-id>...");
             }
             let quality = cull::QualityIndex::open(&cat)?;
+            quality.measure(&cat, &ids, &cancel, &|_, _| {})?;
             let reports = ids.iter().map(|id| quality.report(&cat, *id)).collect::<anyhow::Result<Vec<_>>>()?;
             println!("{}", serde_json::to_string_pretty(&reports)?);
         }
@@ -795,6 +798,11 @@ fn main() -> anyhow::Result<()> {
             let quality = cull::QualityIndex::open(&cat)?;
             let search = shoebox_lib::search::SearchIndex::open(&cat)?;
             let mut shoot = quality.shoot(&cat, &search, &scope, &filters)?;
+            if !shoot.to_measure.is_empty() {
+                quality.measure(&cat, &shoot.to_measure, &cancel, &|d, t| eprint!("\r  measured {d}/{t}"))?;
+                eprintln!();
+                shoot = quality.shoot(&cat, &search, &scope, &filters)?;
+            }
             if closer && !shoot.can_look_closer.is_empty() {
                 quality
                     .look_closer(&cat, &shoot.can_look_closer, &cancel, &|d, t| eprint!("\r  looked closer {d}/{t}"))?;

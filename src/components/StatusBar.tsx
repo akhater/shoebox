@@ -81,23 +81,19 @@ export function StatusBar({ photo, selected, overview, progress, aiProgress, que
           <b>
             {aiProgress.task === "faces"
               ? "Finding faces"
-              : aiProgress.task === "quality"
-                ? "Checking sharpness and exposure"
-                : aiProgress.task === "upright"
-                  ? "Looking for sideways photos"
-                  : "Preparing word search"}
+              : aiProgress.task === "upright"
+                ? "Looking for sideways photos"
+                : "Preparing word search"}
           </b>{" "}
           · {fmtNum(aiProgress.done)} of {fmtNum(aiProgress.total)} photos
           <span className="muted">
-            {aiProgress.task === "quality"
-              ? " · for Cull's suggestions"
-              : ` · on the ${aiProgress.gpu ? "GPU" : "CPU"} · ${
-                  aiProgress.task === "faces"
-                    ? "People fills in as it goes"
-                    : aiProgress.task === "upright"
-                      ? "nothing is turned until you say so"
-                      : "search works on the ones done"
-                }`}
+            {` · on the ${aiProgress.gpu ? "GPU" : "CPU"} · ${
+              aiProgress.task === "faces"
+                ? "People fills in as it goes"
+                : aiProgress.task === "upright"
+                  ? "nothing is turned until you say so"
+                  : "search works on the ones done"
+            }`}
           </span>
         </span>
         <span className="grow" />

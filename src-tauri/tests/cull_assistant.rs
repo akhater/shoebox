@@ -154,6 +154,76 @@ fn a_shoot_is_measured_stacked_and_its_rejects_marked() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Cull measures the shoot it is asked about, not the catalog: a shoot opened
+/// says which of its photos to measure, those are measured and no others, and
+/// a photo turned since is measured again, its closer look (of the picture
+/// as it was) dropped.
+#[test]
+fn only_the_shoot_asked_about_is_measured() {
+    let base = std::env::temp_dir().join("shoebox-cull-on-demand");
+    let _ = std::fs::remove_dir_all(&base);
+    let (shoot_a, shoot_b) = (base.join("a"), base.join("b"));
+    for dir in [&shoot_a, &shoot_b] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    squares(&shoot_a.join("A_0001.JPG"), 2000, 1333, 0.0);
+    squares(&shoot_a.join("A_0002.JPG"), 2000, 1333, 12.0);
+    // Not copies of A's (a copy is the same photo).
+    squares_of(&shoot_b.join("B_0001.JPG"), 2000, 1333, 0.0, 50);
+    squares_of(&shoot_b.join("B_0002.JPG"), 2000, 1333, 12.0, 50);
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data).unwrap();
+    let (root_a, root_b) = (cat.add_root(&shoot_a).unwrap(), cat.add_root(&shoot_b).unwrap());
+    for root in [root_a, root_b] {
+        scan_root(&cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
+    }
+    let a: Vec<i64> = ["A_0001.JPG", "A_0002.JPG"].iter().map(|n| id_of(&cat, n)).collect();
+    let b2 = id_of(&cat, "B_0002.JPG");
+    let quality = QualityIndex::open(&cat).unwrap();
+    let search = SearchIndex::open(&cat).unwrap();
+    let scope = Scope::Root { id: root_a };
+    let shoot = || quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap();
+    let never = AtomicBool::new(false);
+
+    // Opened: nothing measured yet, its two photos to measure, in order.
+    let opened = shoot();
+    assert_eq!((opened.measured, opened.to_measure.clone()), (0, a.clone()));
+    assert_eq!(quality.measure(&cat, &opened.to_measure, &never, &|_, _| {}).unwrap(), 2);
+    assert_eq!(quality.measured(), 2, "the other shoot isn't measured");
+    let opened = shoot();
+    assert_eq!(opened.measured, 2);
+    assert!(opened.to_measure.is_empty());
+    assert_eq!(opened.stacks[1].frames[0].problems, [Problem::Blurry]);
+    assert_eq!(quality.measure(&cat, &a, &never, &|_, _| {}).unwrap(), 0, "nothing to measure again");
+
+    // Thumbnails on screen with Cull's badges: measured as they are shown.
+    assert_eq!(quality.flags(&[b2]), [0]);
+    quality.measure(&cat, &[b2], &never, &|_, _| {}).unwrap();
+    assert_eq!(quality.flags(&[b2]), [Problem::Blurry.bit()]);
+    assert_eq!(quality.measured(), 3);
+    // A photo shown in the viewer's info: measured first, its sharpness said.
+    let b1 = id_of(&cat, "B_0001.JPG");
+    assert!(quality.get(b1).is_none());
+    quality.photo_detail(&cat, b1).unwrap();
+    assert!(quality.get(b1).is_some());
+    let said = quality.photo_detail(&cat, b2).unwrap().problems;
+    assert_eq!(said.iter().map(|f| f.problem).collect::<Vec<_>>(), [Problem::Blurry]);
+
+    // Looked at closer, then turned: measured again, without that closer look.
+    quality.look_closer(&cat, &a[..1], &never, &|_, _| {}).unwrap();
+    assert!(quality.get(a[0]).unwrap().close.is_some());
+    cat.db().execute("UPDATE photos SET turn = 1 WHERE id = ?1", [a[0]]).unwrap();
+    let turned = shoot();
+    assert_eq!(turned.to_measure, [a[0]]);
+    assert_eq!(quality.measure(&cat, &turned.to_measure, &never, &|_, _| {}).unwrap(), 1);
+    assert!(quality.get(a[0]).unwrap().close.is_none());
+    assert!(shoot().to_measure.is_empty());
+
+    drop((quality, search, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// A camera shaken during a long exposure leaves copies of the picture, each
 /// with crisp edges: on screen the frame looks as sharp as the steady one,
 /// and Cull already keeps the steady one of the burst; at 100% the copies

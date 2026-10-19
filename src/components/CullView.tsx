@@ -115,10 +115,8 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
   }, [scope, filters]);
   useEffect(load, [load]);
 
-  // Measures come in (a closer look; the background pass while some of these
-  // photos aren't measured yet): reloaded, at most every 1.5 s.
-  const waiting = useRef(false);
-  waiting.current = !!shoot && shoot.measured < shoot.photos;
+  // Measures come in (this shoot's, measured as it opens; a closer look), or
+  // faces and descriptions are done: reloaded, at most every 1.5 s.
   const timer = useRef<number | undefined>(undefined);
   const loadSoon = useCallback(() => {
     if (timer.current) return;
@@ -137,7 +135,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
       listen<CloserProgress>("cull-progress", (e) => setCloser(e.payload.finished ? null : e.payload)),
       listen("cull-changed", loadSoon),
       listen<AiProgress>("ai-progress", (e) => {
-        if (e.payload.finished || (e.payload.task === "quality" && waiting.current)) loadSoon();
+        if (e.payload.finished) loadSoon();
       }),
     ];
     return () => subs.forEach((p) => p.then((un) => un()));

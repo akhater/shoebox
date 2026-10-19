@@ -7,8 +7,10 @@
 //! are the user's decisions; suggestions are worked out again whenever they
 //! are asked for.
 //!
-//! Every photo is measured from Shoebox's own preview, in the background, so
-//! photos on unplugged disks are measured too. A preview is small (~1080 px):
+//! A photo is measured from Shoebox's own preview when Cull is asked about it
+//! (a shoot opened in Cull, thumbnails on screen with Cull's badges on), so
+//! photos on unplugged disks are measured too, and the rest of an archive
+//! costs nothing until it is culled. A preview is small (~1080 px):
 //! it shows a blurry photo, not one that is only soft at 100%. So when a
 //! shoot's disk is plugged in, Cull can look closer: its originals are read at
 //! half size (read-only, as always) and measured again. Measures live in
@@ -1008,8 +1010,9 @@ impl QualityIndex {
         ids.iter().map(|id| measured.get(id).map_or(0, flags_of)).collect()
     }
 
-    /// Measures every photo that has a preview and no measures yet (or older
-    /// ones, or measured before its faces were looked for), from its preview.
+    /// Measures every photo of the catalog that needs it (`shoebox-cli
+    /// quality`). The window only measures what Cull is asked about: see
+    /// [`Self::measure`].
     pub fn index_pending(
         &self,
         cat: &Catalog,
@@ -1019,45 +1022,45 @@ impl QualityIndex {
         self.ready.wait()?;
         let ready = cat.preview_ready()?;
         self.forget_stale(&ready)?;
-        let looked: HashSet<i64> = cat
-            .db()
-            .prepare("SELECT photo_id FROM face_scan")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let pointed: HashSet<i64> = cat
-            .db()
-            .prepare("SELECT id FROM photos WHERE focus IS NOT NULL")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let todo: Vec<(i64, String)> = {
-            let measured = self.measured.read().unwrap();
-            let without = self.without_faces.read().unwrap();
-            let unpointed = self.without_focus.read().unwrap();
-            ready
-                .into_iter()
-                .filter(|(id, _)| {
-                    !measured.contains_key(id)
-                        || (without.contains(id) && looked.contains(id))
-                        || (unpointed.contains(id) && pointed.contains(id))
-                })
-                .collect()
-        };
-        if todo.is_empty() {
-            return Ok(());
-        }
-        let mut p =
-            crate::search::AiProgress { task: "quality".into(), total: todo.len() as u64, ..Default::default() };
-        progress(&p);
-        log::info!("cull: measuring {} photos", todo.len());
+        let ids: Vec<i64> = ready.into_iter().map(|(id, _)| id).collect();
         let started = std::time::Instant::now();
-        let mut measured = 0;
+        let measured = self.measure(cat, &ids, cancel, &|done, total| {
+            progress(&crate::search::AiProgress { task: "quality".into(), done, total, ..Default::default() })
+        })?;
+        if measured > 0 {
+            log::info!("cull: {measured} photos measured in {:.1} s", started.elapsed().as_secs_f64());
+        }
+        Ok(())
+    }
+
+    /// Measures those of `ids` that need it, from their previews: not
+    /// measured yet, or measured from another picture (turned since, or an id
+    /// now another photo's), or before their faces were looked for or their
+    /// focus points read. Returns how many were measured.
+    pub fn measure(
+        &self,
+        cat: &Catalog,
+        ids: &[i64],
+        cancel: &AtomicBool,
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<usize> {
+        self.ready.wait()?;
+        let todo = self.pending(cat, ids)?;
+        if todo.is_empty() {
+            return Ok(0);
+        }
+        let total = todo.len() as u64;
+        progress(0, total);
+        let (mut measured, mut done) = (0, 0);
         for chunk in todo.chunks(64) {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             let ids: Vec<i64> = chunk.iter().map(|(id, _)| *id).collect();
-            let faces = faces_of(&cat.db(), &ids)?;
-            let points = points_of(&cat.db(), &ids)?;
+            let (faces, points, looked) = {
+                let db = cat.read()?;
+                (faces_of(&db, &ids)?, points_of(&db, &ids)?, looked_of(&db, &ids)?)
+            };
             let shaky = shaky_of(cat, &ids)?;
             let rows: Vec<Measured> = self.pool.install(|| {
                 chunk
@@ -1083,37 +1086,84 @@ impl QualityIndex {
             });
             self.store_previews(&rows)?;
             measured += rows.len();
-            p.done += chunk.len() as u64;
-            progress(&p);
+            done += chunk.len() as u64;
+            progress(done, total);
         }
-        log::info!("cull: {measured} of {} photos measured in {:.1} s", p.done, started.elapsed().as_secs_f64());
-        Ok(())
+        Ok(measured)
+    }
+
+    /// Those of `ids` [`Self::measure`] would measure (with a preview), in
+    /// their order, with what their preview shows. Per photo, through
+    /// indexes: a view costs what it shows.
+    fn pending(&self, cat: &Catalog, ids: &[i64]) -> Result<Vec<(i64, String)>> {
+        let mut todo = Vec::new();
+        for chunk in ids.chunks(500) {
+            let (shown, looked, pointed) = {
+                let db = cat.read()?;
+                (fingerprints_of(&db, chunk)?, looked_of(&db, chunk)?, pointed_of(&db, chunk)?)
+            };
+            let stored: HashMap<i64, String> = self
+                .db
+                .lock()
+                .unwrap()
+                .prepare(
+                    "SELECT photo_id, fingerprint FROM quality
+                     WHERE version = ?1 AND photo_id IN (SELECT value FROM json_each(?2))",
+                )?
+                .query_map(params![QUALITY_VERSION, serde_json::to_string(chunk)?], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let measured = self.measured.read().unwrap();
+            let without = self.without_faces.read().unwrap();
+            let unpointed = self.without_focus.read().unwrap();
+            todo.extend(chunk.iter().filter_map(|id| {
+                let fp = shown.get(id)?;
+                let fresh = measured.contains_key(id)
+                    && stored.get(id) == Some(fp)
+                    && !(without.contains(id) && looked.contains(id))
+                    && !(unpointed.contains(id) && pointed.contains(id));
+                (!fresh).then(|| (*id, fp.clone()))
+            }));
+        }
+        Ok(todo)
+    }
+
+    /// Forgets measures that no longer fit their photo, catalog-wide: it left
+    /// the catalog, was turned, or its id now belongs to another photo. Cheap
+    /// (Cull's measures are of the shoots it was asked about), for after a
+    /// scan.
+    pub fn forget_gone(&self, cat: &Catalog) -> Result<usize> {
+        self.ready.wait()?;
+        self.forget_stale(&cat.preview_ready()?)
     }
 
     fn store_previews(&self, rows: &[Measured]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
+        let mut closes = Vec::with_capacity(rows.len());
         {
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
             for r in rows {
-                // A photo's closer look stays: it doesn't depend on its preview.
-                tx.execute(
+                // A photo's closer look stays while it is of the same picture:
+                // it doesn't depend on the preview.
+                let close: Option<String> = tx.query_row(
                     "INSERT INTO quality (photo_id, fingerprint, version, faces, focus, preview)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT (photo_id) DO UPDATE SET fingerprint = ?2, version = ?3, faces = ?4, focus = ?5,
-                         preview = ?6, close = CASE WHEN fingerprint = ?2 AND version = ?3 THEN close END",
+                         preview = ?6, close = CASE WHEN fingerprint = ?2 AND version = ?3 THEN close END
+                     RETURNING close",
                     params![r.id, r.fingerprint, QUALITY_VERSION, r.faces, r.focus, serde_json::to_string(&r.m)?],
+                    |row| row.get(0),
                 )?;
+                closes.push(close.and_then(|c| serde_json::from_str(&c).ok()));
             }
             tx.commit()?;
         }
         let mut measured = self.measured.write().unwrap();
         let mut without = self.without_faces.write().unwrap();
         let mut unpointed = self.without_focus.write().unwrap();
-        for r in rows {
-            let close = measured.get(&r.id).and_then(|q| q.close);
+        for (r, close) in rows.iter().zip(closes) {
             measured.insert(r.id, Quality { preview: r.m, close });
             for (set, has) in [(&mut *without, r.faces), (&mut *unpointed, r.focus)] {
                 if has {
@@ -1298,6 +1348,7 @@ impl QualityIndex {
             (faces_of(&db, &list.ids)?, points_of(&db, &list.ids)?)
         };
         let vectors = search.vectors(&list.ids);
+        let to_measure = self.pending(cat, &list.ids)?.into_iter().map(|(id, _)| id).collect();
         let measured = self.measured.read().unwrap();
         let frames: Vec<FrameIn> = list
             .ids
@@ -1356,6 +1407,7 @@ impl QualityIndex {
             can_look_closer: can_look,
             unreadable,
             stacks,
+            to_measure,
         })
     }
 }
@@ -1478,6 +1530,24 @@ fn fingerprints_of(db: &Connection, ids: &[i64]) -> Result<HashMap<i64, String>>
     Ok(out)
 }
 
+/// Those of these photos already looked at for faces.
+fn looked_of(db: &Connection, ids: &[i64]) -> Result<HashSet<i64>> {
+    let out = db
+        .prepare("SELECT photo_id FROM face_scan WHERE photo_id IN (SELECT value FROM json_each(?1))")?
+        .query_map([serde_json::to_string(ids)?], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(out)
+}
+
+/// Those of these photos whose focus points the catalog has.
+fn pointed_of(db: &Connection, ids: &[i64]) -> Result<HashSet<i64>> {
+    let out = db
+        .prepare("SELECT id FROM photos WHERE focus IS NOT NULL AND id IN (SELECT value FROM json_each(?1))")?
+        .query_map([serde_json::to_string(ids)?], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Bursts, and what to keep.
 
@@ -1497,6 +1567,11 @@ pub struct Shoot {
     /// Originals a closer look couldn't read, and why.
     pub unreadable: Vec<Unreadable>,
     pub stacks: Vec<Stack>,
+    /// Photos to measure from their previews ([`QualityIndex::measure`]):
+    /// not measured yet, or to measure again. The shoot is asked for again
+    /// once they are.
+    #[serde(skip)]
+    pub to_measure: Vec<i64>,
 }
 
 /// Frames of the same shot, in the order they were taken.
@@ -1801,9 +1876,15 @@ impl QualityIndex {
     }
 
     /// A photo's details with what Cull found wrong with it: a camera that
-    /// confirmed focus says nothing of shake or motion after. Never waits for
+    /// confirmed focus says nothing of shake or motion after. A photo not
+    /// measured yet is measured first (one preview, a few ms). Never waits for
     /// the measures to be read (nothing until then, as the grid's badges).
     pub fn photo_detail(&self, cat: &Catalog, id: i64) -> Result<PhotoDetail> {
+        if self.ready.is_open()
+            && let Err(e) = self.measure(cat, &[id], &AtomicBool::new(false), &|_, _| {})
+        {
+            log::warn!("cull: photo {id}: not measured: {e:#}");
+        }
         let mut d = cat.photo_detail(id)?;
         let shot = Shot { exposure: d.exposure.clone(), focal: d.focal };
         d.problems = self.get(id).map(|q| problems(&q, &shot)).unwrap_or_default();

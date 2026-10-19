@@ -127,6 +127,7 @@ pub struct AppState {
     pub faces: Arc<faces::FaceIndex>,
     pub quality: Arc<cull::QualityIndex>,
     pub upright: Arc<upright::Upright>,
+    pub measure: Arc<MeasureQueue>,
     pub closer: Arc<CloserQueue>,
     pub ai: Arc<AiQueue>,
     /// A folder being moved to another disk (one at a time), and its Stop.
@@ -157,6 +158,71 @@ impl AiQueue {
             k = self.wake.wait(k).unwrap();
         }
         *k = false;
+    }
+}
+
+/// Photos of a shoot opened in Cull that need measuring, from their
+/// previews: the latest asked for first.
+#[derive(Default)]
+pub struct MeasureQueue {
+    queue: Mutex<VecDeque<i64>>,
+    wake: Condvar,
+}
+
+impl MeasureQueue {
+    pub fn push(&self, ids: &[i64]) {
+        if ids.is_empty() {
+            return;
+        }
+        let asked: HashSet<i64> = ids.iter().copied().collect();
+        let mut q = self.queue.lock().unwrap();
+        q.retain(|id| !asked.contains(id));
+        for id in ids.iter().rev() {
+            q.push_front(*id);
+        }
+        self.wake.notify_one();
+    }
+
+    /// Up to `n` photos, waiting for some.
+    fn take(&self, n: usize) -> Vec<i64> {
+        let mut q = self.queue.lock().unwrap();
+        while q.is_empty() {
+            q = self.wake.wait(q).unwrap();
+        }
+        let n = n.min(q.len());
+        q.drain(..n).collect()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.lock().unwrap().is_empty()
+    }
+}
+
+/// Measures the shoots Cull opens, a few photos at a time, so a shoot opened
+/// since goes first. Says `cull-changed` as measures come in (every 2 s at
+/// most) and once they all have.
+fn measure_worker(app: AppHandle, cat: Arc<Catalog>, quality: Arc<cull::QualityIndex>, q: Arc<MeasureQueue>) {
+    let never = AtomicBool::new(false);
+    let (mut said, mut unsaid) = (Instant::now(), false);
+    // Photos measured since the queue was last empty, and since when.
+    let mut run: Option<(usize, Instant)> = None;
+    loop {
+        let ids = q.take(64);
+        let (count, _) = run.get_or_insert_with(|| (0, Instant::now()));
+        let measured = quality.measure(&cat, &ids, &never, &|_, _| {}).unwrap_or_else(|e| {
+            log::warn!("cull: measuring failed: {e:#}");
+            0
+        });
+        *count += measured;
+        unsaid |= measured > 0;
+        let all = q.is_empty();
+        if unsaid && (all || said.elapsed() > Duration::from_secs(2)) {
+            (said, unsaid) = (Instant::now(), false);
+            let _ = app.emit("cull-changed", ());
+        }
+        if all && let Some((n, at)) = run.take().filter(|(n, _)| *n > 0) {
+            log::info!("cull: {n} photos measured in {:.1} s", at.elapsed().as_secs_f64());
+        }
     }
 }
 
@@ -266,6 +332,11 @@ impl Ready {
                 None => state = self.wake.wait(state).unwrap_or_else(|e| e.into_inner()),
             }
         }
+    }
+
+    /// Read, and read well: what waiting would return at once.
+    pub fn is_open(&self) -> bool {
+        matches!(*self.state.lock().unwrap_or_else(|e| e.into_inner()), Some(Ok(())))
     }
 }
 
@@ -386,9 +457,10 @@ fn model_worker(app: AppHandle, q: Arc<ModelQueue>, ai: Arc<AiQueue>) {
 
 /// Looks for sideways photos first (the turns it suggests wait for the user),
 /// describes new photos for word search, then finds and groups their faces,
-/// on the GPU, from Shoebox's previews; then measures them for Cull (no
-/// model needed). A feature whose model isn't here (Settings > AI models) is
-/// skipped.
+/// on the GPU, from Shoebox's previews: every photo, since search and People
+/// cover the whole catalog. A feature whose model isn't here (Settings > AI
+/// models) is skipped. Cull's measures aren't taken here: Cull works on one
+/// shoot at a time and measures it when it opens it ([`measure_worker`]).
 fn ai_worker(
     app: AppHandle,
     cat: Arc<Catalog>,
@@ -409,9 +481,12 @@ fn ai_worker(
         let checked = if usable(models::UPRIGHT) { upright.check_pending(&cat, &q.cancel, &report) } else { Ok(()) };
         let searched = if usable(models::CLIP) { index.index_pending(&cat, &q.cancel, &report) } else { Ok(()) };
         let found = if usable(models::FACES) { faces.index_pending(&cat, &q.cancel, &report) } else { Ok(()) };
-        // After faces: a face's sharpness is measured where it was found.
-        let measured = quality.index_pending(&cat, &q.cancel, &report);
-        let result = checked.and(searched).and(found).and(measured);
+        // Cull measures a shoot when it opens it; measures of photos gone or
+        // turned since are dropped here, so none is shown for another picture.
+        if let Err(e) = quality.forget_gone(&cat) {
+            log::warn!("cull: forgetting old measures failed: {e:#}");
+        }
+        let result = checked.and(searched).and(found);
         let last = q.current.lock().unwrap().take();
         let mut done = last.unwrap_or_else(|| search::AiProgress { task: "search".into(), ..Default::default() });
         done.finished = true;
@@ -710,6 +785,7 @@ pub fn run() {
     let face_index = faces::FaceIndex::open_in_background(cat.clone()).expect("open face index");
     let quality = cull::QualityIndex::open_in_background(&cat).expect("open Cull's measures");
     let upright = Arc::new(upright::Upright::default());
+    let measure = Arc::new(MeasureQueue::default());
     let closer = Arc::new(CloserQueue::default());
     let ai = Arc::new(AiQueue::default());
     let model_queue = Arc::new(ModelQueue::default());
@@ -755,6 +831,7 @@ pub fn run() {
             faces: face_index.clone(),
             quality: quality.clone(),
             upright: upright.clone(),
+            measure: measure.clone(),
             closer: closer.clone(),
             ai: ai.clone(),
             moving: Arc::default(),
@@ -772,6 +849,9 @@ pub fn run() {
             std::thread::Builder::new().name("ai".into()).spawn(move || ai_worker(handle, c, i, f, qi, u, a))?;
             // Describe whatever isn't yet, from the start.
             ai.kick();
+            let handle = app.handle().clone();
+            let (c, qi, mq) = (cat.clone(), quality.clone(), measure.clone());
+            std::thread::Builder::new().name("measure".into()).spawn(move || measure_worker(handle, c, qi, mq))?;
             let handle = app.handle().clone();
             let (c, qi, cq) = (cat.clone(), quality.clone(), closer.clone());
             std::thread::Builder::new().name("closer".into()).spawn(move || closer_worker(handle, c, qi, cq))?;
@@ -854,6 +934,7 @@ pub fn run() {
             commands::mark_photos,
             commands::unmark_all,
             commands::cull_shoot,
+            commands::cull_flags,
             commands::cull_look_closer,
             commands::cull_stop,
             commands::cull_progress,
