@@ -131,6 +131,30 @@
 //!                                              while it is open ('' = no name); it must have
 //!                                              private photos (the name is kept with them)
 //!
+//! Dates (catalog only, never written into photos; JSON out). A camera whose clock was wrong
+//! dates its photos wrong: the date shown and sorted by can be corrected, the date the file
+//! gives kept ("takenOriginal" in `photo <id>`) and given back with --back:
+//!   shoebox-cli dates-check [--days N] [--all] [scope JSON]   folders named with a date
+//!       ("2006-11-04 Birthday", or a range: "2005-02-26 03-04 Trip"; a folder in one takes
+//!       its date) whose photos from one camera are more than N days (3) from that date and
+//!       from the other photos there. Nothing changes. Each finding: the folder ("dated":
+//!       the one whose name gives the date), the camera ("fileDate": the photos have no date
+//!       of their own, theirs is the file's), its "photos", "daysOff", and "shift": the
+//!       seconds that move its first photo to the folder's day, time of day kept
+//!       (dates-shift <its photos> --by <shift>s). Scope: a folder and those in it, e.g.
+//!       {"kind":"folder","volumeId":3,"relPath":"<folder>"}, {"kind":"root","id":2},
+//!       {"kind":"volume","id":3}. Findings left as is (dates-leave) are left out, "left" says
+//!       how many; --all lists them too, with "left": true
+//!   shoebox-cli dates-shift <photo-id>... --by <amount> | --to YYYY-MM-DD | --back
+//!       move their dates: by an amount (264d, -1h, 2h30m, 22809600s), the first of them to a
+//!       day (time of day kept, the others by as much), or back to their files' dates. Its
+//!       output goes to dates-undo
+//!   shoebox-cli dates-undo '<dates-shift JSON>'   each photo back by as much
+//!   shoebox-cli dates-leave '<finding JSON>'... [--back]   "Leave as is": right as it is (a
+//!       trip, a folder named after the day its photos were copied): dates-check leaves it out.
+//!       A finding is {"folderId":..,"key":"..","first":..} (the whole finding will do), or a
+//!       JSON list of them. --back: in the check again
+//!
 //! Folders (on the disk and in the catalog in one step; JSON out):
 //!   shoebox-cli rename-folder <volume-id> <folder> <new name>
 //!   shoebox-cli new-folder <volume-id> <parent folder> [name]
@@ -208,7 +232,7 @@
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::{self, Progress};
-use shoebox_lib::{cull, focus, gear, organize, tags, upright};
+use shoebox_lib::{cull, dates, focus, gear, organize, tags, upright};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -520,6 +544,62 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("people-leave '<finding JSON>'... [--back]");
             }
             let n = shoebox_lib::faces::leave_as_is(&cat, &findings, !back)?;
+            let said = if back { "back" } else { "left" };
+            println!("{}", serde_json::json!({ said: n }));
+        }
+        Some("dates-check") => {
+            let mut days = dates::DAYS;
+            let mut scope = Scope::All;
+            let mut rest = args[1..].iter();
+            while let Some(a) = rest.next() {
+                match a.as_str() {
+                    "--all" => {}
+                    "--days" => {
+                        days = rest.next().ok_or_else(|| anyhow::anyhow!("--days <N>"))?.parse()?;
+                    }
+                    json => scope = serde_json::from_str(json)?,
+                }
+            }
+            let within = dates::within(&cat, &scope)?;
+            let all = args[1..].iter().any(|a| a == "--all");
+            let t = std::time::Instant::now();
+            let check = dates::check(&cat, within.as_ref().map(|(v, r)| (*v, r.as_str())), days, all)?;
+            eprintln!("checked {} folders, {} photos, in {} ms", check.folders, check.photos, t.elapsed().as_millis());
+            println!("{}", serde_json::to_string_pretty(&check)?);
+        }
+        Some("dates-shift") => {
+            let usage = || anyhow::anyhow!("dates-shift <photo-id>... --by <amount> | --to YYYY-MM-DD | --back");
+            let at = args.iter().position(|a| a.starts_with("--")).ok_or_else(usage)?;
+            let ids = args[1..at].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+            if ids.is_empty() {
+                return Err(usage());
+            }
+            let how = match (args[at].as_str(), args.get(at + 1)) {
+                ("--by", Some(amount)) => dates::Change::By { seconds: dates::parse_amount(amount)? },
+                ("--to", Some(day)) => dates::Change::To { date: day.clone() },
+                ("--back", _) => dates::Change::Back,
+                _ => return Err(usage()),
+            };
+            println!("{}", serde_json::to_string_pretty(&dates::change(&cat, &ids, &how)?)?);
+        }
+        Some("dates-undo") => {
+            let json = args.get(1).ok_or_else(|| anyhow::anyhow!("dates-undo '<JSON from dates-shift>'"))?;
+            let done: dates::Shifted = serde_json::from_str(json)?;
+            println!("{}", serde_json::to_string_pretty(&dates::undo(&cat, &done)?)?);
+        }
+        Some("dates-leave") => {
+            let back = args[1..].iter().any(|a| a == "--back");
+            let mut findings: Vec<dates::LeftDates> = Vec::new();
+            for a in args[1..].iter().filter(|a| *a != "--back") {
+                match serde_json::from_str::<serde_json::Value>(a)? {
+                    list @ serde_json::Value::Array(_) => findings.extend(serde_json::from_value::<Vec<_>>(list)?),
+                    one => findings.push(serde_json::from_value(one)?),
+                }
+            }
+            if findings.is_empty() {
+                anyhow::bail!("dates-leave '<finding JSON>'... [--back]");
+            }
+            let n = dates::leave_as_is(&cat, &findings, !back)?;
             let said = if back { "back" } else { "left" };
             println!("{}", serde_json::json!({ said: n }));
         }
