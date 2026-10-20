@@ -2400,6 +2400,87 @@ button.link:hover {
   object-fit: cover;
 }
 
+/* Check dates: photos from one camera far from their folder's date */
+.dates-modal .check-card-head .small {
+  overflow-wrap: anywhere;
+}
+.date-thumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0;
+  overflow: hidden;
+}
+.date-thumbs img {
+  flex: none;
+  height: 56px;
+  width: auto;
+  max-width: 84px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--raised);
+}
+.date-thumbs .more {
+  flex: none;
+  padding-left: 4px;
+}
+
+/* Fix dates: move some photos' dates, in the catalog only */
+.fix-dates-modal {
+  width: 540px;
+}
+.fix-dates-modal > p {
+  line-height: 1.45;
+}
+.fix-dates-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0;
+}
+.fix-dates-choices label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 2;
+  cursor: pointer;
+}
+.fix-dates-choices label.check > input {
+  flex: none;
+  accent-color: var(--accent);
+}
+.fix-dates-choices input[type="date"],
+.fix-dates-choices input[type="number"],
+.fix-dates-choices select {
+  background: var(--raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font: inherit;
+}
+.fix-dates-choices input[type="number"] {
+  width: 64px;
+}
+.fix-dates-preview {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.fix-dates-preview dt {
+  color: var(--muted);
+}
+.fix-dates-preview dd {
+  margin: 0;
+}
+.fix-dates-back {
+  margin-right: auto;
+}
+
 /* "Who is this?": move faces to someone else */
 .who-modal {
   width: 440px;

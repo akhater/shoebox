@@ -367,8 +367,34 @@ fn migrate(conn: &Connection) -> Result<()> {
         }
         conn.execute_batch(&format!("BEGIN; {columns} {SCHEMA_PRIVATE} COMMIT;"))?;
     }
+    // Corrected dates: looked for at every open too.
+    if !has("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dates_left'")? {
+        let column = if has("SELECT 1 FROM pragma_table_info('photos') WHERE name = 'taken_original'")? {
+            ""
+        } else {
+            "ALTER TABLE photos ADD COLUMN taken_original INTEGER;"
+        };
+        conn.execute_batch(&format!("BEGIN; {column} {SCHEMA_DATES} COMMIT;"))?;
+    }
     Ok(())
 }
+
+/// Dates the user corrected (see dates.rs). `photos.taken_original`: the date
+/// the photo's file gives, kept once the user moves `taken_ts` (the date
+/// shown and sorted by) away from it; NULL while nobody did. Few photos: an
+/// index of their own keeps counting them as small as they are.
+/// `dates_left`: findings of the date check the user looked at and kept
+/// ("Leave as is"), by folder, camera and the day of its first photo.
+const SCHEMA_DATES: &str = r#"
+CREATE INDEX IF NOT EXISTS photos_corrected ON photos (id) WHERE taken_original IS NOT NULL;
+CREATE TABLE IF NOT EXISTS dates_left (
+    folder_id   INTEGER NOT NULL,
+    camera      TEXT    NOT NULL,
+    first_day   TEXT    NOT NULL,
+    left_at     INTEGER NOT NULL,
+    PRIMARY KEY (folder_id, camera, first_day)
+) WITHOUT ROWID;
+"#;
 
 /// Private photos (see private.rs): `photos.private` = 1 hides a photo unless
 /// the space it is in is open; `photos.seal_to` is the public key its copies

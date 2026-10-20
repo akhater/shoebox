@@ -11,6 +11,7 @@ use crate::catalog::{
     Scope, Sort, Stats,
 };
 use crate::cull;
+use crate::dates::{self, DateCheck, Dates, LeftDates, Shifted};
 use crate::gear;
 use crate::models;
 use crate::organize::{self, DeletePlan, DeleteReport};
@@ -367,6 +368,80 @@ pub async fn check_people(state: State<'_, AppState>, all: bool) -> Res<crate::f
 pub async fn leave_as_is(state: State<'_, AppState>, findings: Vec<crate::faces::LeftAsIs>, left: bool) -> Res<usize> {
     let cat = state.cat.clone();
     in_order(move || crate::faces::leave_as_is(&cat, &findings, left)).await
+}
+
+/// "Check dates": folders named with a date whose photos from one camera say
+/// another (a camera clock set wrong), in a folder and those in it, or the
+/// whole catalog. `all`: those left as is too, flagged.
+#[tauri::command]
+pub async fn check_dates(
+    state: State<'_, AppState>,
+    volume_id: Option<i64>,
+    rel_path: Option<String>,
+    all: bool,
+) -> Res<DateCheck> {
+    let cat = state.cat.clone();
+    blocking(move || {
+        let within = volume_id.map(|v| (v, rel_path.as_deref().unwrap_or("")));
+        dates::check(&cat, within, dates::DAYS, all)
+    })
+    .await
+}
+
+/// "Leave as is" on findings of the date check (not `left`: back in it).
+#[tauri::command]
+pub async fn leave_dates(state: State<'_, AppState>, findings: Vec<LeftDates>, left: bool) -> Res<usize> {
+    let cat = state.cat.clone();
+    in_order(move || dates::leave_as_is(&cat, &findings, left)).await
+}
+
+/// Some photos' dates, as "Fix dates" shows them before a change.
+#[tauri::command]
+pub async fn dates_of(state: State<'_, AppState>, ids: Vec<i64>) -> Res<Dates> {
+    let cat = state.cat.clone();
+    blocking(move || dates::of(&cat, &ids)).await
+}
+
+/// Moves photos' dates, in the catalog only (never a file): by an amount,
+/// to a day keeping the time of day, or back to their files' dates.
+#[tauri::command]
+pub async fn change_dates(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    how: dates::Change,
+) -> Res<Shifted> {
+    let (cat, faces) = (state.cat.clone(), state.faces.clone());
+    let done = in_order(move || {
+        let done = dates::change(&cat, &ids, &how)?;
+        redate_faces(&cat, &faces, &done);
+        Ok(done)
+    })
+    .await?;
+    let _ = app.emit("catalog-changed", ());
+    Ok(done)
+}
+
+/// Undo of a date change: each photo back by as much.
+#[tauri::command]
+pub async fn undo_dates(app: AppHandle, state: State<'_, AppState>, done: Shifted) -> Res<Shifted> {
+    let (cat, faces) = (state.cat.clone(), state.faces.clone());
+    let back = in_order(move || {
+        let back = dates::undo(&cat, &done)?;
+        redate_faces(&cat, &faces, &back);
+        Ok(back)
+    })
+    .await?;
+    let _ = app.emit("catalog-changed", ());
+    Ok(back)
+}
+
+/// The faces of photos whose dates moved count for their new month. The
+/// dates have changed either way: a failure here is only logged.
+fn redate_faces(cat: &crate::catalog::Catalog, faces: &crate::faces::FaceIndex, done: &Shifted) {
+    if let Err(e) = faces.redated(cat, &done.photos) {
+        log::warn!("faces: the corrected dates' months weren't updated: {e:#}");
+    }
 }
 
 /// "Who is this?": faces go to someone, someone new, or (not them, don't

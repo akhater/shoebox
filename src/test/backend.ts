@@ -3,6 +3,8 @@ import type {
   CandidateDay,
   CullFrame,
   CullStack,
+  DateChange,
+  DateCheck,
   FaceTarget,
   Facets,
   Filters,
@@ -18,6 +20,7 @@ import type {
   Placement,
   Problem,
   Scope,
+  Shifted,
   Shoot,
   Sort,
 } from "../api";
@@ -68,6 +71,57 @@ export function fakeBackend() {
   const revs = new Map<number, number>();
   /** Where the camera focused, for the photos a test says. */
   const focusOf = new Map<number, Focus>();
+  /** Dates moved by "Fix dates": seconds added to each photo's date. */
+  const shifts = new Map<number, number>();
+  const fileDate = (id: number) => JAN_2026 + id * 3600;
+  const takenOf = (id: number) => fileDate(id) + (shifts.get(id) ?? 0);
+  const redate = (moves: [number, number][]): Shifted => {
+    const done = moves
+      .filter(([, by]) => by !== 0)
+      .map(([id, by]) => {
+        const from = takenOf(id);
+        shifts.set(id, (shifts.get(id) ?? 0) + by);
+        return { id, by, from, to: from + by };
+      });
+    return { photos: done, unchanged: moves.length - done.length };
+  };
+  /** The date check's one finding (Trip's photos, five days early) was left as is. */
+  let datesLeft = false;
+  const dateCheck = (): DateCheck => {
+    const ids = photosOf(30);
+    const first = takenOf(ids[0]);
+    return {
+      days: 3,
+      folders: 1,
+      photos: 4,
+      corrected: [...shifts.values()].filter(Boolean).length,
+      left: datesLeft ? 1 : 0,
+      findings: [
+        {
+          folderId: 3,
+          volumeId: 1,
+          relPath: "2026-01-06 Trip\\Guest",
+          dated: "2026-01-06 Trip",
+          from: "2026-01-06",
+          to: "2026-01-06",
+          camera: "EOS 30D",
+          serial: null,
+          fileDate: false,
+          key: "EOS 30D||camera",
+          photos: ids,
+          first,
+          last: takenOf(ids[3]),
+          daysOff: -5,
+          shift: 5 * 86_400,
+          others: 0,
+          othersFrom: null,
+          othersTo: null,
+          corrected: 0,
+          left: datesLeft,
+        },
+      ],
+    };
+  };
   /** What Cull found wrong with photos, as their details say it (a test sets them). */
   const foundIn = new Map<number, Found[]>();
   /** Private photos, by password: each password is its own space, never refused. */
@@ -323,8 +377,9 @@ export function fakeBackend() {
     return {
       id,
       kind: "image",
-      takenTs: JAN_2026 + id * 3600,
+      takenTs: takenOf(id),
       takenFromCamera: true,
+      takenOriginal: shifts.get(id) ? fileDate(id) : null,
       make: null,
       model: null,
       camera: null,
@@ -522,6 +577,33 @@ export function fakeBackend() {
         const space = mine();
         return (a.ids as number[]).filter((id) => space.delete(id)).length;
       }
+      case "check_dates":
+        return dateCheck();
+      case "leave_dates":
+        datesLeft = a.left as boolean;
+        return 1;
+      case "dates_of": {
+        const ids = a.ids as number[];
+        const ts = ids.map(takenOf);
+        return {
+          photos: ids.length,
+          dated: ids.length,
+          first: Math.min(...ts),
+          last: Math.max(...ts),
+          corrected: ids.filter((id) => shifts.get(id)).length,
+          folder: null,
+          folderDate: null,
+        };
+      }
+      case "change_dates": {
+        const ids = a.ids as number[];
+        const how = a.how as DateChange;
+        const firstDay = Math.floor(Math.min(...ids.map(takenOf)) / 86_400) * 86_400;
+        const by = how.kind === "by" ? how.seconds : how.kind === "to" ? Date.parse(`${how.date}T00:00:00Z`) / 1000 - firstDay : 0;
+        return redate(ids.map((id) => [id, how.kind === "back" ? -(shifts.get(id) ?? 0) : by]));
+      }
+      case "undo_dates":
+        return redate((a.done as Shifted).photos.map((p) => [p.id, -p.by]));
       case "get_settings":
         return { privateLockMinutes: 5 };
       case "scan_status":
@@ -567,6 +649,8 @@ export function fakeBackend() {
     inBin,
     sideways,
     turns,
+    /** Seconds each photo's date was moved by Fix dates (0 or none: as its file says). */
+    shifts,
     focusOf,
     foundIn,
     /** Photos private under a password (its space), as a test sets them. */

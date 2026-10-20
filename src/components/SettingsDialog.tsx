@@ -40,6 +40,8 @@ interface Props {
   /** What the last look for a newer Shoebox found. */
   update: UpdateStatus | null;
   onRegenerateAll: () => void;
+  /** "Check dates" for the whole catalog (Settings closes). */
+  onCheckDates: () => void;
   privateStatus: PrivateStatus | null;
   /** Private photos opened or locked here. */
   onPrivateStatus: (s: PrivateStatus) => void;
@@ -54,6 +56,7 @@ export function SettingsDialog({
   version,
   update,
   onRegenerateAll,
+  onCheckDates,
   privateStatus,
   onPrivateStatus,
   onUnlockPrivate,
@@ -253,6 +256,15 @@ export function SettingsDialog({
                   Save &amp; rebuild previews
                 </button>
                 <small>Reads every photo on the plugged-in disks again with the size and quality above.</small>
+              </div>
+              <div className="row">
+                <button className="btn small" disabled={busy} onClick={onCheckDates}>
+                  Check dates…
+                </button>
+                <small>
+                  Folders named with a date (2006-11-04 Birthday) whose photos from one camera say another: a camera clock set
+                  wrong. Fixed in the catalog only, never in the files.
+                </small>
               </div>
             </div>
             <div className="field">

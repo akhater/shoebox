@@ -473,6 +473,29 @@ impl Averages {
         }
     }
 
+    /// A face of `person` now taken in month `to` rather than `from` (its
+    /// photo's date corrected): their whole-life sum stays as it is.
+    fn move_month(&mut self, person: i64, v: &[f32], from: Option<i64>, to: Option<i64>) {
+        if from == to {
+            return;
+        }
+        let months = self.months.entry(person).or_default();
+        if let Some(m) = from
+            && let Some(e) = months.get_mut(&m)
+        {
+            e.0.iter_mut().zip(v).for_each(|(s, x)| *s -= x);
+            e.1 = e.1.saturating_sub(1);
+            if e.1 == 0 {
+                months.remove(&m);
+            }
+        }
+        if let Some(m) = to {
+            let e = months.entry(m).or_insert_with(|| (vec![0.0; DIM], 0));
+            e.0.iter_mut().zip(v).for_each(|(s, x)| *s += x);
+            e.1 += 1;
+        }
+    }
+
     /// `others` become part of `into`.
     fn merge(&mut self, into: i64, others: &[i64]) {
         for o in others {
@@ -1159,6 +1182,42 @@ impl FaceIndex {
             0
         });
         Ok((loose.len(), people_made.saturating_sub(joined)))
+    }
+
+    /// Photos whose dates the user corrected (see dates.rs): their named
+    /// faces count for the month they were taken in now, so new faces are
+    /// compared with how each person looked then.
+    pub fn redated(&self, cat: &Catalog, photos: &[crate::dates::Redated]) -> Result<()> {
+        let months: HashMap<i64, (Option<i64>, Option<i64>)> = photos
+            .iter()
+            .map(|p| (p.id, (month_of(Some(p.from)), month_of(Some(p.to)))))
+            .filter(|(_, (from, to))| from != to)
+            .collect();
+        if months.is_empty() {
+            return Ok(());
+        }
+        self.ready.wait()?;
+        let faces: Vec<(i64, i64, i64)> = cat
+            .read()?
+            .prepare(
+                "SELECT id, person_id, photo_id FROM faces
+                  WHERE photo_id IN (SELECT value FROM json_each(?1)) AND person_id IS NOT NULL ORDER BY id",
+            )?
+            .query_map([serde_json::to_string(&months.keys().collect::<Vec<_>>())?], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut moves = Vec::with_capacity(faces.len());
+        for (face, person, photo) in faces {
+            if let Some(v) = self.vector(face)? {
+                moves.push((person, v, months[&photo]));
+            }
+        }
+        let mut c = self.centroids.write().unwrap();
+        for (person, v, (from, to)) in moves {
+            c.move_month(person, &v, from, to);
+        }
+        Ok(())
     }
 
     fn vector(&self, face_id: i64) -> Result<Option<Vec<f32>>> {

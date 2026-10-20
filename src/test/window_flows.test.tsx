@@ -301,12 +301,74 @@ describe("selection bar", () => {
     const bar = host.querySelector(".selection-bar")!;
     expect(bar.querySelector(".selection-count")!.textContent).toBe("2 selected");
     const names = [...bar.querySelectorAll("button")].map((b) => b.getAttribute("aria-label") ?? b.textContent?.trim());
-    expect(names).toEqual(["Clear selection", "Tag…", "Turn left", "Turn right", "Not Ana…"]);
+    expect(names).toEqual(["Clear selection", "Tag…", "Fix dates…", "Turn left", "Turn right", "Not Ana…"]);
 
     await click(bar.querySelector('[aria-label="Clear selection"]')!);
     expect(host.querySelector(".selection-bar")).toBeNull();
     expect(tile(host, 101).classList).not.toContain("is-selected");
     expect(above()).toBe(before);
+  });
+});
+
+describe("fixing dates", () => {
+  const asked = (be: ReturnType<typeof fakeBackend>, cmd: string) => be.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
+
+  test("Fix dates in the selection bar moves the selected photos' dates; Undo in the status bar puts them back", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(tile(host, 201));
+    await click(tile(host, 202), { ctrlKey: true });
+    await click(byText(host, ".selection-bar button", "Fix dates…"));
+    await wait(50);
+    const dialog = host.querySelector<HTMLElement>(".fix-dates-modal")!;
+    expect(asked(be, "dates_of").map((a) => [...(a.ids as number[])].sort())).toEqual([[201, 202]]);
+    // Two days and an hour later.
+    await click(dialog.querySelectorAll('input[type="radio"]')[1]);
+    await type(dialog.querySelector<HTMLInputElement>('[aria-label="Days"]')!, "2");
+    await type(dialog.querySelector<HTMLInputElement>('[aria-label="Hours"]')!, "1");
+    expect(dialog.querySelector(".fix-dates-preview")!.textContent).toMatch(/→/);
+    await click(byText(dialog, ".modal-foot button", /^Move/));
+    await wait(100);
+    expect(host.querySelector(".fix-dates-modal")).toBeNull();
+    expect(asked(be, "change_dates").map((a) => a.how)).toEqual([{ kind: "by", seconds: 2 * 86_400 + 3600 }]);
+    expect(be.shifts.get(201)).toBe(2 * 86_400 + 3600);
+    expect(host.querySelector(".statusbar .status-left")?.textContent).toMatch(/^Moved 2 photos 2 days 1 h later/);
+
+    await click(byText(host, ".statusbar button", "Undo"));
+    await wait(100);
+    expect(asked(be, "undo_dates")).toHaveLength(1);
+    expect(be.shifts.get(201)).toBe(0);
+    expect(host.querySelector(".statusbar .status-left")?.textContent).toBe("The photos' dates are as before.");
+  });
+
+  test("Check dates from a folder's menu: a card moves a camera's photos to the folder's date, with Undo, or leaves them as is", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    const source = byText(host, ".sidebar-scroll [data-nav]", /Trip/);
+    await act(async () => {
+      source.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 20, clientY: 20 }));
+    });
+    await click(byText(host, ".folder-menu button", "Check dates…"));
+    await wait(50);
+    const dialog = host.querySelector<HTMLElement>(".dates-modal")!;
+    expect(asked(be, "check_dates")).toEqual([{ volumeId: 1, relPath: "Trip", all: true }]);
+    expect(dialog.querySelector("h2")!.textContent).toBe("Check dates in Trip");
+    const card = dialog.querySelector<HTMLElement>(".check-card")!;
+    expect(card.querySelector("strong")!.textContent).toBe("EOS 30D · 4 photos");
+    expect(card.textContent).toMatch(/5 days before the folder's date/);
+
+    await click(byText(card, "button", /^Move to /));
+    await wait(100);
+    expect(asked(be, "change_dates")).toEqual([{ ids: photosOf(30), how: { kind: "to", date: "2026-01-06" } }]);
+    expect(card.querySelector(".check-card-foot")!.textContent).toMatch(/^Moved 4 photos/);
+    await click(byText(card, "button", "Undo"));
+    await wait(100);
+    expect(photosOf(30).map((id) => be.shifts.get(id))).toEqual([0, 0, 0, 0]);
+
+    await click(byText(card, "button", "Leave as is"));
+    await wait(100);
+    expect(asked(be, "leave_dates")).toHaveLength(1);
+    expect(card.querySelector(".check-card-foot")!.textContent).toMatch(/^Left as is/);
   });
 });
 

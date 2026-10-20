@@ -622,8 +622,20 @@ export function Viewer({
               <dt>Taken</dt>
               <dd>
                 {d.takenTs ? fmtDay(d.takenTs) : "Unknown"}
-                {!d.takenFromCamera && d.takenTs ? <span className="muted"> (file date)</span> : null}
+                {d.takenOriginal != null ? (
+                  <span className="muted"> (corrected)</span>
+                ) : !d.takenFromCamera && d.takenTs ? (
+                  <span className="muted"> (file date)</span>
+                ) : null}
               </dd>
+              {d.takenOriginal != null && (
+                <>
+                  <dt>{d.takenFromCamera ? "Camera said" : "File said"}</dt>
+                  <dd className="muted" title="The date in the file, kept as it is: Fix dates can put it back">
+                    {fmtDay(d.takenOriginal)}
+                  </dd>
+                </>
+              )}
               {d.camera && (
                 <>
                   <dt>Camera</dt>

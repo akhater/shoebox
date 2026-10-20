@@ -253,6 +253,8 @@ export interface PhotoDetail {
   kind: "raw" | "image";
   takenTs: number | null;
   takenFromCamera: boolean;
+  /** The date its file gives, when you corrected `takenTs` ("Fix dates"); null otherwise. */
+  takenOriginal: number | null;
   make: string | null;
   model: string | null;
   /** Camera and lens as shown everywhere (their Gear names); null when the file doesn't say. */
@@ -661,6 +663,100 @@ export const turnApi = {
   accept: (ids: number[]) => invoke<TurnReport>("sideways_accept", { ids }),
   /** Fine as they are: never suggested again. */
   leave: (ids: number[]) => invoke<number>("sideways_leave", { ids }),
+};
+
+/** What the date check found: folders named with a date whose photos from one camera are
+ *  days away from it and from the other photos there (a camera clock set wrong). */
+export interface DateCheck {
+  /** Photos further than this many days from their folder's dates are listed. */
+  days: number;
+  /** Folders looked at (named with a date, or in one) and their photos with a date. */
+  folders: number;
+  photos: number;
+  /** Photos of the whole catalog whose date was corrected. */
+  corrected: number;
+  /** Findings left as is (listed only when all were asked for, `left` set). */
+  left: number;
+  findings: DateFinding[];
+}
+
+/** Photos from one camera in one folder, days away from the folder's dates. */
+export interface DateFinding {
+  folderId: number;
+  volumeId: number;
+  relPath: string;
+  /** The folder whose name gives the date: the same one, or a folder it is in. */
+  dated: string;
+  /** Its dates, "2006-11-04" (the same day twice unless a range). */
+  from: string;
+  to: string;
+  camera: string | null;
+  serial: string | null;
+  /** No date in the files: theirs is the time the file was written. */
+  fileDate: boolean;
+  /** The camera, as "Leave as is" keeps it. */
+  key: string;
+  /** Oldest first. */
+  photos: number[];
+  first: number;
+  last: number;
+  /** Days from the folder's dates (negative: before them). */
+  daysOff: number;
+  /** Seconds that move the first photo to the folder's day, its time of day kept. */
+  shift: number;
+  /** The other photos there that agree with the folder's dates, and their first and last day. */
+  others: number;
+  othersFrom: string | null;
+  othersTo: string | null;
+  /** Photos among them whose date was corrected already. */
+  corrected: number;
+  left: boolean;
+}
+
+/** A finding left as is (a finding itself will do). */
+export interface LeftDates {
+  folderId: number;
+  key: string;
+  first: number;
+}
+
+/** How to move some photos' dates. */
+export type DateChange =
+  /** Later by this many seconds (earlier when negative). */
+  | { kind: "by"; seconds: number }
+  /** The first of them to this day ("2006-11-04"), its time of day kept; the others by as much. */
+  | { kind: "to"; date: string }
+  /** Back to the dates their files give. */
+  | { kind: "back" };
+
+/** What a date change did: `undo` puts exactly that back. */
+export interface Shifted {
+  photos: { id: number; by: number; from: number; to: number }[];
+  /** Left as they were: no date, already there, or it would fall before 1970. */
+  unchanged: number;
+}
+
+/** Some photos' dates, as "Fix dates" shows them first. */
+export interface PhotoDates {
+  photos: number;
+  dated: number;
+  first: number | null;
+  last: number | null;
+  corrected: number;
+  /** The folder whose name dates most of them, and its first day. */
+  folder: string | null;
+  folderDate: string | null;
+}
+
+/** Dates corrected in the catalog only (a camera clock set wrong): never written into a photo. */
+export const datesApi = {
+  /** In a folder and those in it (a source: its folder; a disk: relPath ""), or the whole catalog. */
+  check: (where: { volumeId: number; relPath: string } | null, all = true) =>
+    invoke<DateCheck>("check_dates", { volumeId: where?.volumeId ?? null, relPath: where?.relPath ?? null, all }),
+  leave: (findings: LeftDates[], left: boolean) => invoke<number>("leave_dates", { findings, left }),
+  of: (ids: number[]) => invoke<PhotoDates>("dates_of", { ids }),
+  change: (ids: number[], how: DateChange) => invoke<Shifted>("change_dates", { ids, how }),
+  undo: (done: Shifted) => invoke<Shifted>("undo_dates", { done }),
 };
 
 const nf = new Intl.NumberFormat();
