@@ -1197,7 +1197,8 @@ describe("missing photos", () => {
 
 describe("private photos", () => {
   const shortcut = () => key(document.body, "L", { ctrlKey: true, shiftKey: true });
-  /** Ctrl+Shift+L, a password, Open. */
+  const notice = (host: HTMLElement) => host.querySelector<HTMLElement>(".private-notice");
+  /** Ctrl+Shift+L, a password, Open; the warning that follows, read (`warned`: it came). */
   const open = async (host: HTMLElement, password: string) => {
     await shortcut();
     await wait(30);
@@ -1205,6 +1206,9 @@ describe("private photos", () => {
     await type(dialog.querySelector<HTMLInputElement>('input[type="password"]')!, password);
     await click(byText(dialog, "button", "Open"));
     await wait(600);
+    const warned = notice(host) != null;
+    if (warned) await click(byText(notice(host)!, "button", "I understand"));
+    return warned;
   };
 
   test("no trace while locked; every password opens its own space, a decoy an empty one", async () => {
@@ -1281,6 +1285,158 @@ describe("private photos", () => {
   });
 });
 
+describe("naming a private space", () => {
+  const shortcut = () => key(document.body, "L", { ctrlKey: true, shiftKey: true });
+  const open = async (host: HTMLElement, password: string) => {
+    await shortcut();
+    await wait(30);
+    const dialog = host.querySelector<HTMLElement>(".private-dialog")!;
+    await type(dialog.querySelector<HTMLInputElement>('input[type="password"]')!, password);
+    await click(byText(dialog, "button", "Open"));
+    await wait(600);
+    const notice = host.querySelector<HTMLElement>(".private-notice");
+    if (notice) await click(byText(notice, "button", "I understand"));
+  };
+  const lock = async () => {
+    await shortcut();
+    await wait(600);
+  };
+
+  test("named from the Private view's title: shown next to Private while its password has it open", async () => {
+    const be = fakeBackend();
+    be.privateIn("correct horse", [101, 102]);
+    const host = await renderApp();
+    await open(host, "correct horse");
+    await click(sidebarItem(host, "Private"));
+    await wait(100);
+    expect(title(host)).toBe("Private");
+
+    await click(host.querySelector(".toolbar .title-name")!);
+    const box = host.querySelector<HTMLInputElement>(".title-name-input")!;
+    await type(box, "Family");
+    await key(box, "Enter");
+    await wait(100);
+    expect(be.calls.filter((c) => c.cmd === "private_rename").map((c) => c.args.name)).toEqual(["Family"]);
+    expect(title(host)).toBe("Private · Family");
+    expect(sidebarItem(host, "Private").textContent).toMatch(/^Private · Family/);
+
+    // Escape leaves it as it was.
+    await click(host.querySelector(".toolbar .title-name")!);
+    const again = host.querySelector<HTMLInputElement>(".title-name-input")!;
+    await type(again, "Oops");
+    await key(again, "Escape");
+    await wait(100);
+    expect(title(host)).toBe("Private · Family");
+    expect(be.calls.filter((c) => c.cmd === "private_rename")).toHaveLength(1);
+
+    // Another password: not its name. Its own again: named.
+    await lock();
+    expect(host.querySelector(".sidebar-scroll")!.textContent).not.toMatch(/Family/);
+    await open(host, "decoy password");
+    expect(sidebarItem(host, "Private").textContent).not.toMatch(/Family/);
+    await lock();
+    await open(host, "correct horse");
+    expect(sidebarItem(host, "Private").textContent).toMatch(/^Private · Family/);
+  });
+
+  test("renamed from its sidebar row too, in place: right-click > Rename, or F2", async () => {
+    const be = fakeBackend();
+    be.privateIn("correct horse", [101, 102]);
+    const host = await renderApp();
+    await open(host, "correct horse");
+    const row = () => sidebarItem(host, "Private");
+    const box = () => host.querySelector<HTMLInputElement>(".sidebar-scroll input.rename")!;
+
+    await act(async () => {
+      row().dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 90 }));
+    });
+    await click(byText(host, ".folder-menu button", /^Name this private space/));
+    await type(box(), "Family");
+    await key(box(), "Enter");
+    await wait(100);
+    expect(row().textContent).toMatch(/^Private · Family/);
+
+    // F2: the name to change; Escape leaves it.
+    await key(row(), "F2");
+    expect(box().value).toBe("Family");
+    await type(box(), "Oops");
+    await key(box(), "Escape");
+    await wait(100);
+    expect(row().textContent).toMatch(/^Private · Family/);
+    expect(be.calls.filter((c) => c.cmd === "private_rename").map((c) => c.args.name)).toEqual(["Family"]);
+  });
+});
+
+describe("the warning when a password opens private photos", () => {
+  const shortcut = () => key(document.body, "L", { ctrlKey: true, shiftKey: true });
+  const notice = (host: HTMLElement) => host.querySelector<HTMLElement>(".private-notice");
+  const typeIn = async (host: HTMLElement, password: string) => {
+    const dialog = host.querySelector<HTMLElement>(".private-dialog")!;
+    await type(dialog.querySelector<HTMLInputElement>('input[type="password"]')!, password);
+    await click(byText(dialog, "button", "Open"));
+    await wait(600);
+  };
+
+  test("always for an empty space, for one with photos until Don't show again", async () => {
+    const be = fakeBackend();
+    be.privateIn("correct horse", [101, 102]);
+    const host = await renderApp();
+
+    // A password with no photos: what it can't undo, and a way back in case of a typo.
+    await shortcut();
+    await wait(30);
+    await typeIn(host, "correct hrose");
+    expect(notice(host)!.textContent).toMatch(/This password has no private photos/);
+    expect(notice(host)!.textContent).toMatch(/can't be recovered/);
+    expect(notice(host)!.textContent).toMatch(/Every password opens its own space/);
+    expect(notice(host)!.textContent).toMatch(/photo files aren't locked/);
+    await click(byText(notice(host)!, "button", "Try another password"));
+    await wait(100);
+    expect(notice(host)).toBeNull();
+    expect(be.calls.filter((c) => c.cmd === "private_lock")).toHaveLength(1);
+    expect(host.querySelector(".private-dialog")).not.toBeNull();
+    expect(gridIds(host)).toEqual(ALL.filter((id) => id !== 101 && id !== 102));
+
+    // A password with photos: warned too, no way back offered; turned off here.
+    await typeIn(host, "correct horse");
+    expect(gridIds(host)).toEqual(ALL);
+    expect(notice(host)!.textContent).toMatch(/About private passwords/);
+    expect(byText(notice(host)!, "button", "I understand")).toBeTruthy();
+    expect([...notice(host)!.querySelectorAll("button")].map((b) => b.textContent)).not.toContain("Try another password");
+    await click(byText(notice(host)!, "label", /Don't show this again/).querySelector("input")!);
+    await click(byText(notice(host)!, "button", "I understand"));
+    await wait(100);
+    expect(notice(host)).toBeNull();
+    expect(be.calls.filter((c) => c.cmd === "save_settings").at(-1)?.args.settings).toMatchObject({
+      privateWarning: false,
+      privateLockMinutes: 5,
+    });
+
+    // Off: not again for a password with photos...
+    await shortcut();
+    await wait(300);
+    await shortcut();
+    await wait(30);
+    await typeIn(host, "correct horse");
+    expect(notice(host)).toBeNull();
+    expect(gridIds(host)).toEqual(ALL);
+
+    // ...but always for an empty space, new or not.
+    await shortcut();
+    await wait(300);
+    await shortcut();
+    await wait(30);
+    await typeIn(host, "decoy password");
+    expect(notice(host)!.textContent).toMatch(/This password has no private photos/);
+
+    // Locking (here, by the shortcut) takes the warning away with the space.
+    await shortcut();
+    await wait(300);
+    expect(notice(host)).toBeNull();
+    expect(gridIds(host)).toEqual(ALL.filter((id) => id !== 101 && id !== 102));
+  });
+});
+
 describe("the Private filter", () => {
   test("only while private photos are open: private or not, cleared on locking", async () => {
     const be = fakeBackend();
@@ -1295,6 +1451,7 @@ describe("the Private filter", () => {
     await type(dialog.querySelector<HTMLInputElement>('input[type="password"]')!, "correct horse");
     await click(byText(dialog, "button", "Open"));
     await wait(600);
+    await click(byText(host, ".private-notice button", "I understand"));
     expect(chips()).toContain("Private");
 
     await click(byText(host, ".filter-chip", "Private"));

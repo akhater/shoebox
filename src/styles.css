@@ -3545,6 +3545,7 @@ button.link:hover {
   width: 380px;
 }
 .private-dialog .modal-head h2,
+.private-notice .modal-head h2,
 .private-tab .inline-icon {
   display: inline-flex;
   align-items: center;
@@ -3587,6 +3588,44 @@ button.link:hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+/* The warning once a password opens a space: what a password can't undo. */
+.private-notice {
+  width: 480px;
+}
+.private-notice .modal-head h2 svg {
+  color: var(--accent);
+}
+.private-notice .empty-space {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  line-height: 1.5;
+}
+.notice-points {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.notice-points li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.notice-points li svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--accent);
+}
+.notice-points strong {
+  color: var(--text);
+  font-weight: 600;
 }
 .private-dialog .modal-foot .forgot {
   margin-right: auto;

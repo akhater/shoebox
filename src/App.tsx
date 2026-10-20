@@ -62,6 +62,7 @@ import {
   type PhotoList,
   PRIVATE_SHORTCUT,
   privateApi,
+  privateTitle,
   type PrivateStatus,
   type Progress,
   type Report,
@@ -89,7 +90,7 @@ import { FindMoreDialog } from "./components/FindMoreDialog";
 import { TagEditor } from "./components/Tags";
 import { NameEditor, PeopleView, PersonSearch } from "./components/PeopleView";
 import { PhotoGrid } from "./components/PhotoGrid";
-import { PrivateDialog } from "./components/Private";
+import { PrivateDialog, PrivateNotice, SpaceNameEditor } from "./components/Private";
 import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
 import { Sidebar, type FolderTarget } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
@@ -307,6 +308,11 @@ export default function App() {
     { mode: "unlock" } | { mode: "confirm"; hide: (password: string) => Promise<number> } | null
   >(null);
   const unlocked = privateStatus?.unlocked ?? false;
+  // Once a password opens a space, what it can't undo (PrivateNotice): always for an empty
+  // space, otherwise until "Don't show this again" (times it was, for an open Settings).
+  const [privateNotice, setPrivateNotice] = useState<{ photos: number } | null>(null);
+  const [privateQuieted, setPrivateQuieted] = useState(0);
+  const privateSeq = useRef(0);
   // A message about a missing AI model offers to open Settings > AI models.
   // (Its shoebox-cli hint is for agents, not the window.)
   const modelHint = (text: string): Message =>
@@ -642,9 +648,11 @@ export default function App() {
       .catch(() => {});
   }, []);
   const privateChanged = useLatest((s: PrivateStatus) => {
+    privateSeq.current++;
     setPrivateStatus(s);
     setPrivateAsk(null);
     if (!s.unlocked) {
+      setPrivateNotice(null);
       setLoaded((v) => ({ ...v, list: withoutPrivate(v.list) }));
       setViewerId(null);
       setSelected(new Set());
@@ -657,6 +665,38 @@ export default function App() {
     refresh();
   });
   const lockPrivate = useLatest(() => run(privateApi.lock().then(privateChanged)));
+  // A password just opened a space: the warning, unless it has photos and was turned off.
+  const privateOpened = useLatest((s: PrivateStatus) => {
+    privateChanged(s);
+    if (!s.unlocked) return;
+    const seq = privateSeq.current;
+    const warn = () => seq === privateSeq.current && setPrivateNotice({ photos: s.photos });
+    if (s.photos === 0) warn();
+    else
+      api.settings().then(
+        (st) => st.privateWarning !== false && warn(),
+        () => warn(),
+      );
+  });
+  const privateNoticeDone = useLatest((quiet: boolean) => {
+    setPrivateNotice(null);
+    if (quiet)
+      run(
+        api
+          .settings()
+          .then((st) => api.saveSettings({ ...st, privateWarning: false }))
+          .then(() => setPrivateQuieted((n) => n + 1)),
+      );
+  });
+  // From the warning of an empty space: maybe a typo, so lock it and ask again.
+  const privateRetry = useLatest(() =>
+    run(
+      privateApi
+        .lock()
+        .then(privateChanged)
+        .then(() => setPrivateAsk({ mode: "unlock" })),
+    ),
+  );
   // Ctrl+Shift+L, from anywhere: a password, or lock.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -711,6 +751,18 @@ export default function App() {
     }
   });
   const makeFolderPrivate = useLatest((s: Scope) => hidePrivate((confirm) => privateApi.hideIn(s, confirm)));
+  /** Names the space open now, from the Private view's title. An empty one keeps it until locked. */
+  const renamePrivate = useLatest((name: string) => {
+    setNamingTitle(false);
+    if (name.trim() === (privateStatus?.name ?? "")) return;
+    run(
+      privateApi.rename(name).then((s) => {
+        setPrivateStatus(s);
+        if (s.name && s.photos === 0)
+          setMessage({ text: `Named “${s.name}”: kept with the first photos you make private in it.` });
+      }),
+    );
+  });
 
   // Culling: the mark shows at once; the list isn't reloaded, so a photo
   // unmarked in "Marked for deletion" stays put until the next refresh.
@@ -1331,7 +1383,8 @@ export default function App() {
     if (scope.kind === "missing") return { title: "Missing" };
     if (scope.kind === "marked") return { title: "Marked for deletion" };
     if (scope.kind === "sideways") return { title: "Sideways" };
-    if (scope.kind === "private") return { title: "Private", sub: `Hidden everywhere once you lock (${PRIVATE_SHORTCUT})` };
+    if (scope.kind === "private")
+      return { title: privateTitle(privateStatus?.name), sub: `Hidden everywhere once you lock (${PRIVATE_SHORTCUT})` };
     if (scope.kind === "date") return { title: fmtDateKey(scope.key) };
     if (scope.kind === "camera" || scope.kind === "lens") {
       const items = (scope.kind === "camera" ? browse?.gear.cameras : browse?.gear.lenses) ?? [];
@@ -1357,7 +1410,7 @@ export default function App() {
       if (r) return { title: r.relPath ? r.name : v.label, sub: r.path, offline: !v.online, lost: v.online && !r.found };
     }
     return { title: "" };
-  }, [scope, overview, peopleList, browse]);
+  }, [scope, overview, peopleList, browse, privateStatus?.name]);
 
   const empty = overview && overview.volumes.length === 0;
   // What Cull would work on: the photos shown, as filtered.
@@ -1441,6 +1494,8 @@ export default function App() {
           setFocusId(null);
         }}
         privateUnlocked={unlocked}
+        privateName={privateStatus?.name ?? null}
+        onRenamePrivate={renamePrivate}
         onLockPrivate={lockPrivate}
         onMakePrivate={makeFolderPrivate}
         onAddFolder={addFolder}
@@ -1534,6 +1589,24 @@ export default function App() {
                     <span className="btn-label">{personHere.ignored ? "Show again" : "Ignore"}</span>
                   </button>
                 </>
+              )
+            ) : view === "photos" && scope.kind === "private" ? (
+              namingTitle ? (
+                <SpaceNameEditor
+                  name={privateStatus?.name ?? null}
+                  onRename={renamePrivate}
+                  onCancel={() => setNamingTitle(false)}
+                />
+              ) : (
+                <h1>
+                  <button
+                    className="title-name"
+                    onClick={() => setNamingTitle(true)}
+                    title={privateStatus?.name ? "Rename this private space" : "Name this private space"}
+                  >
+                    <span className="ellipsis">{scopeInfo.title}</span> <Pencil size={14} />
+                  </button>
+                </h1>
               )
             ) : (
               <h1>{view === "people" ? "People" : view === "cull" ? `Cull · ${scopeInfo.title}` : scopeInfo.title}</h1>
@@ -1881,6 +1954,7 @@ export default function App() {
                 !deleteOpen &&
                 !settingsOpen &&
                 !privateAsk &&
+                !privateNotice &&
                 !straysFor &&
                 !tagging &&
                 !reassigning &&
@@ -2131,6 +2205,7 @@ export default function App() {
           privateStatus={privateStatus}
           onPrivateStatus={privateChanged}
           onUnlockPrivate={() => setPrivateAsk({ mode: "unlock" })}
+          privateQuieted={privateQuieted}
           onClose={() => setSettingsTab(null)}
         />
       )}
@@ -2158,13 +2233,16 @@ export default function App() {
       {privateAsk && (
         <PrivateDialog
           mode={privateAsk.mode}
-          onUnlocked={privateChanged}
+          onUnlocked={privateOpened}
           onConfirmed={async (password) => {
             if (privateAsk.mode === "confirm") await privateAsk.hide(password);
             setPrivateAsk(null);
           }}
           onClose={() => setPrivateAsk(null)}
         />
+      )}
+      {privateNotice && (
+        <PrivateNotice photos={privateNotice.photos} onDone={privateNoticeDone} onRetry={privateRetry} />
       )}
     </div>
   );

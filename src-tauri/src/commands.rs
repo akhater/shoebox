@@ -904,6 +904,13 @@ pub async fn private_lock(app: AppHandle, state: State<'_, AppState>) -> Res<pri
     Ok(s)
 }
 
+/// Names the space open now ("" = no name).
+#[tauri::command]
+pub async fn private_rename(state: State<'_, AppState>, name: String) -> Res<private::Status> {
+    let cat = state.cat.clone();
+    in_order(move || private::rename(&cat, &name)).await
+}
+
 /// Makes photos private in the space open now. Its first ones need the
 /// password again (`confirm`).
 #[tauri::command]

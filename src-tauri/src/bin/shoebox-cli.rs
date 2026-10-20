@@ -126,6 +126,10 @@
 //!                                              first line of stdin (those of a view with --in,
 //!                                              e.g. a folder); --new: a password with no
 //!                                              private photos yet (a typo would start a space)
+//!   shoebox-cli private --name '<name>'          names the space of the password read from
+//!                                              stdin, shown next to Private in the window
+//!                                              while it is open ('' = no name); it must have
+//!                                              private photos (the name is kept with them)
 //!
 //! Dates (catalog only, never written into photos; JSON out). A camera whose clock was wrong
 //! dates its photos wrong: the date shown and sorted by can be corrected, the date the file
@@ -712,9 +716,23 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Some("private") => {
-            // echo <password> | shoebox-cli private [--new] <photo-id>... | --in '<scope JSON>'
-            let usage =
-                || anyhow::anyhow!("echo <password> | shoebox-cli private [--new] <photo-id>... | --in '<scope JSON>'");
+            // echo <password> | shoebox-cli private [--new] <photo-id>... | --in '<scope JSON>' | --name '<name>'
+            let usage = || {
+                anyhow::anyhow!(
+                    "echo <password> | shoebox-cli private [--new] <photo-id>... | --in '<scope JSON>' | --name '<name>'"
+                )
+            };
+            let read_password = || -> anyhow::Result<String> {
+                let mut password = String::new();
+                std::io::stdin().read_line(&mut password)?;
+                Ok(password.trim_end_matches(['\r', '\n']).to_string())
+            };
+            if args.get(1).map(|s| s.as_str()) == Some("--name") {
+                let name = args.get(2).ok_or_else(usage)?;
+                shoebox_lib::private::rename_with_password(&cat, &read_password()?, name)?;
+                println!("{}", serde_json::json!({ "named": true }));
+                return Ok(());
+            }
             let new = args.iter().any(|a| a == "--new");
             let rest: Vec<&String> = args[1..].iter().filter(|a| *a != "--new").collect();
             let ids: Vec<i64> = match rest.first().map(|s| s.as_str()) {
@@ -725,10 +743,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 Some(_) => rest.iter().map(|s| s.parse()).collect::<Result<_, _>>()?,
             };
-            let mut password = String::new();
-            std::io::stdin().read_line(&mut password)?;
-            let password = password.trim_end_matches(['\r', '\n']);
-            let made = shoebox_lib::private::hide_with_password(&cat, password, &ids, new)?;
+            let made = shoebox_lib::private::hide_with_password(&cat, &read_password()?, &ids, new)?;
             println!("{}", serde_json::json!({ "madePrivate": made }));
         }
         Some("tags") => {

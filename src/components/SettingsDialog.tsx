@@ -47,6 +47,8 @@ interface Props {
   onPrivateStatus: (s: PrivateStatus) => void;
   /** The password dialog. */
   onUnlockPrivate: () => void;
+  /** Times the private-photos warning was turned off from itself ("Don't show this again"). */
+  privateQuieted: number;
   onClose: () => void;
 }
 
@@ -60,6 +62,7 @@ export function SettingsDialog({
   privateStatus,
   onPrivateStatus,
   onUnlockPrivate,
+  privateQuieted,
   onClose,
 }: Props) {
   const [tab, setTab] = useState(initialTab);
@@ -80,6 +83,11 @@ export function SettingsDialog({
       un.then((f) => f());
     };
   }, []);
+
+  // Turned off from the warning itself while this dialog is open: shown here, and kept by Save.
+  useEffect(() => {
+    if (privateQuieted) setS((now) => now && { ...now, privateWarning: false });
+  }, [privateQuieted]);
 
   const busy = moving !== null && !moving.error;
 
@@ -156,6 +164,15 @@ export function SettingsDialog({
               setS((now) => now && { ...now, privateLockMinutes });
               try {
                 await api.saveSettings({ ...(await api.settings()), privateLockMinutes });
+              } catch (e) {
+                setError(String(e));
+              }
+            }}
+            warning={s?.privateWarning}
+            onWarning={async (privateWarning) => {
+              setS((now) => now && { ...now, privateWarning });
+              try {
+                await api.saveSettings({ ...(await api.settings()), privateWarning });
               } catch (e) {
                 setError(String(e));
               }

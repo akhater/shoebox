@@ -24,6 +24,11 @@ pub struct Settings {
     /// Private photos lock again after this many minutes without using the
     /// window (see private.rs). They always lock when it closes.
     pub private_lock_minutes: u32,
+    /// The window warns, each time a password opens private photos, that a
+    /// password can't be recovered and that each one is its own space. Off
+    /// only silences it for a password holding photos: a password opening an
+    /// empty space (new, or mistyped) is always warned about.
+    pub private_warning: bool,
 }
 
 impl Default for Settings {
@@ -37,6 +42,7 @@ impl Default for Settings {
             catalog_cache_mb: 0,
             catalog_map_mb: 0,
             private_lock_minutes: 5,
+            private_warning: true,
         }
     }
 }

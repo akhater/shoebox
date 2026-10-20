@@ -130,7 +130,10 @@ export function fakeBackend() {
   const mine = () => (open == null ? new Set<number>() : (spaces.get(open) ?? new Set<number>()));
   const isPrivate = (id: number) => [...spaces.values()].some((s) => s.has(id));
   const shownPhotos = () => photos.filter((p) => !isPrivate(p.id) || mine().has(p.id));
-  const status = () => ({ unlocked: open != null });
+  /** Names by password; an empty space's is forgotten once locked, as Shoebox does. */
+  const names = new Map<string, string>();
+  const status = () => ({ unlocked: open != null, photos: mine().size, name: (open != null && names.get(open)) || null });
+  let settings: Record<string, unknown> = { privateLockMinutes: 5, privateWarning: true };
   const hide = (ids: number[], confirm: unknown) => {
     if (open == null) throw new Error("Private photos are locked.");
     if (mine().size === 0 && confirm == null) throw new Error("Type the password again: no photos are private with it yet.");
@@ -563,7 +566,12 @@ export function fakeBackend() {
         open = a.password as string;
         return status();
       case "private_lock":
+        if (open != null && mine().size === 0) names.delete(open);
         open = null;
+        return status();
+      case "private_rename":
+        if (open == null) throw new Error("Private photos are locked.");
+        names.set(open, String(a.name).trim());
         return status();
       case "private_hide":
         return hide(a.ids as number[], a.confirm);
@@ -605,7 +613,10 @@ export function fakeBackend() {
       case "undo_dates":
         return redate((a.done as Shifted).photos.map((p) => [p.id, -p.by]));
       case "get_settings":
-        return { privateLockMinutes: 5 };
+        return { ...settings };
+      case "save_settings":
+        settings = { ...(a.settings as Record<string, unknown>) };
+        return { ...settings };
       case "scan_status":
         return { current: null, queued: [] };
       case "update_status":

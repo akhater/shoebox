@@ -952,6 +952,7 @@ pub fn run() {
             commands::private_status,
             commands::private_unlock,
             commands::private_lock,
+            commands::private_rename,
             commands::private_hide,
             commands::private_hide_in,
             commands::private_show,
