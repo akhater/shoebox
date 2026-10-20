@@ -17,6 +17,15 @@ Newest first. Same format and versioning as Argentum.
   stay two faces. Faces found twice before this are mended once, at the next
   start (`shoebox-cli turned-twice [--apply]` lists or mends them). Findings
   of the people check left as is about a turned face now stay left.
+- **Faces of photos turned before now get their upright fingerprint.** A
+  face found again after a turn used to be dropped as already there, so it
+  kept the loose box and the fingerprint found while the photo stood
+  sideways: often unlike anyone, alone in a person of its own. Photos turned
+  (or said to stand right) are looked at for faces once more, in the
+  background, after the next start (`shoebox-cli turned-again [--apply]`
+  counts or queues them). A face found again keeps its person when the user
+  put it there, or when its fingerprint is unchanged or still looks like
+  them; otherwise it is sorted again.
 
 ## 26.43.1 - 2026-10-20
 

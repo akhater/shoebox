@@ -38,6 +38,10 @@ const AROUND_FACES: u32 = 5;
 const AROUND_MONTHS: i64 = 12;
 /// Less alike than the same person, but enough to suggest who a face may be.
 const LOOKS_LIKE: f32 = 0.3;
+/// A face found again with a fingerprint this like the one it had is the same
+/// find: the same fingerprint when its photo was turned after its faces were
+/// found the right way up, nearly when found well even sideways.
+const SAME_FIND: f32 = 0.9;
 /// Faces smaller than this (short side, in the preview) give fingerprints too
 /// weak to group automatically. They are kept, ungrouped, for a later pass on
 /// the full-size photo.
@@ -70,6 +74,9 @@ const JOIN_RULES: &str = "1";
 /// Bump to look once more, at start, for turned photos holding the same
 /// face twice ([`FaceIndex::mend_turned`]).
 const MEND_TURNED: &str = "1";
+/// Bump to look once more, at start, at the faces of turned photos
+/// ([`look_again_turned`]).
+const LOOK_AGAIN_TURNED: &str = "1";
 const DIM: usize = 512;
 
 /// A person as the look for people found twice saw them: their faces
@@ -1009,6 +1016,20 @@ pub struct FoundTwice {
     pub took_place: bool,
 }
 
+/// Turned photos to be looked at again for faces ([`look_again_turned`]).
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LookAgain {
+    /// Photos the user turned, or said how they stand, holding faces.
+    pub photos: usize,
+    /// Their faces.
+    pub faces: usize,
+    /// Of those photos, the ones waiting to be looked at for faces.
+    pub waiting: usize,
+    /// Queued; false: only counted.
+    pub done: bool,
+}
+
 pub struct FaceIndex {
     /// faces.db: one fingerprint per face.
     db: Mutex<Connection>,
@@ -1101,6 +1122,19 @@ impl FaceIndex {
                 }
                 // Faces still work; the next start tries again.
                 Err(e) => log::warn!("faces: mending turned photos failed: {e:#}"),
+            }
+        }
+        // Turned photos whose faces kept what was found while they stood
+        // the wrong way are looked at again once.
+        let looked: Option<String> = cat
+            .db()
+            .query_row("SELECT value FROM meta WHERE key = 'turned_faces_looked_again'", [], |r| r.get(0))
+            .optional()?;
+        if looked.as_deref() != Some(LOOK_AGAIN_TURNED) {
+            match look_again_turned(cat, true) {
+                Ok(l) => log::info!("faces: {} turned photos to look at again", l.waiting),
+                // Faces still work; the next start tries again.
+                Err(e) => log::warn!("faces: queueing turned photos failed: {e:#}"),
             }
         }
         // Catalogs grouped under older rules get regrouped once, and so does
@@ -1387,8 +1421,9 @@ impl FaceIndex {
     /// it stood the wrong way ([`turn_faces`]). A face found again takes the
     /// old one's place, with its box and fingerprint from the photo upright,
     /// so no face is in it twice; the old face's person stays when it was the
-    /// user's word, or when the face upright still looks like them (see
-    /// [`Before::keeps_place`]). Faces found only then, or only before, stay.
+    /// user's word, or when the face upright is unchanged or still looks like
+    /// them (see [`Before::keeps_place`]). Faces found only then, or only
+    /// before, stay.
     pub fn store(
         &self,
         cat: &Catalog,
@@ -2814,13 +2849,16 @@ impl Before {
     }
 
     /// This face's place, for it found again with the fingerprint `v`, when
-    /// it should keep it: always when the user put it there; when Shoebox
-    /// did (from a fingerprint taken the wrong way up, often poor), only while
-    /// the face still looks like the rest of that person, and that person
-    /// isn't already someone else in the photo (`taken`). None: it is sorted
-    /// again from `v`, as a new face.
+    /// it should keep it: always when the user put it there, or when its
+    /// fingerprint is unchanged ([`SAME_FIND`]: nothing to sort again, even
+    /// when that person is in the photo twice, which the people check tells).
+    /// When Shoebox put it there from a fingerprint taken the wrong way up,
+    /// often poor, only while the face still looks like the rest of that
+    /// person, and that person isn't already someone else in the photo
+    /// (`taken`). None: it is sorted again from `v`, as a new face.
     fn keeps_place(&self, c: &Averages, v: Option<&[f32]>, taken: &[i64]) -> Option<Place> {
-        if self.by_hand {
+        let unchanged = |v: &[f32]| self.v.as_deref().is_some_and(|was| dot(was, v) >= SAME_FIND);
+        if self.by_hand || (self.person.is_some() && v.is_some_and(unchanged)) {
             return Some(self.place());
         }
         let (person, v) = (self.person?, v?);
@@ -2999,6 +3037,54 @@ pub fn after_turn(cat: &Catalog, moved: &[(i64, i64)]) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+/// Photos the user turned, or said how they stand, whose faces may still
+/// hold what was found while the photo stood the wrong way: until a face
+/// found again took the old one's place ([`FaceIndex::store`]), looking at a
+/// turned photo again dropped each face found again upright as already there,
+/// so the face kept its loose box and its fingerprint from sideways, often
+/// unlike anyone, alone in a person of its own. Each of these photos is to be
+/// looked at for faces again (the face pass does it, in the background): a
+/// face found again then gets its box and fingerprint from the photo upright,
+/// and keeps its place when the user put it there or its fingerprint is
+/// unchanged ([`Before::keeps_place`]). Only counted unless `apply`. Done once
+/// at start. Private photos are queued too (looked at once unlocked), but
+/// never counted.
+pub fn look_again_turned(cat: &Catalog, apply: bool) -> Result<LookAgain> {
+    const TURNED: &str = "(p.turn <> 0 OR p.sideways = ?1)";
+    let rows: Vec<(i64, usize, bool)> = cat
+        .db()
+        .prepare(&format!(
+            "SELECT p.id, COUNT(*), EXISTS (SELECT 1 FROM face_scan s WHERE s.photo_id = p.id)
+               FROM photos p JOIN faces f ON f.photo_id = p.id WHERE {TURNED} GROUP BY p.id"
+        ))?
+        .query_map([crate::db::SIDEWAYS_DECIDED], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if apply {
+        let db = cat.db();
+        let tx = db.unchecked_transaction()?;
+        tx.execute(
+            &format!(
+                "DELETE FROM face_scan WHERE photo_id IN
+                   (SELECT p.id FROM photos p WHERE {TURNED} AND EXISTS (SELECT 1 FROM faces f WHERE f.photo_id = p.id))"
+            ),
+            [crate::db::SIDEWAYS_DECIDED],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('turned_faces_looked_again', ?1)",
+            [LOOK_AGAIN_TURNED],
+        )?;
+        tx.commit()?;
+    }
+    let hidden = cat.hidden_ids()?;
+    let shown = || rows.iter().filter(|(id, ..)| !hidden.contains(id));
+    Ok(LookAgain {
+        photos: shown().count(),
+        faces: shown().map(|(_, n, _)| n).sum(),
+        waiting: shown().filter(|(.., looked)| apply || !looked).count(),
+        done: apply,
+    })
 }
 
 /// Cuts these faces' pictures again from their photo's preview, framed as when
@@ -3226,6 +3312,47 @@ mod tests {
         assert!(same_face(&[0.1, 0.1, 0.3, 0.3], &[0.12, 0.1, 0.32, 0.3]));
         // Side by side: not.
         assert!(!same_face(&[0.1, 0.1, 0.3, 0.3], &[0.3, 0.1, 0.5, 0.3]));
+    }
+
+    #[test]
+    fn a_face_found_again_keeps_its_place_only_when_it_should() {
+        // Someone with two faces of theirs, and a third face with them: as
+        // found before (`was`), seen there by the user.
+        let theirs = near(0, 2, 0.1);
+        let face = |was: &[f32], by_hand: bool| {
+            let mut c = Averages::default();
+            for v in [theirs.as_slice(), &theirs, was] {
+                c.add(7, v, None, 1.0);
+            }
+            let b = Before {
+                id: 1,
+                person: Some(7),
+                by_hand,
+                seen: true,
+                bbox: [0.1, 0.1, 0.3, 0.3],
+                v: Some(was.to_vec()),
+            };
+            (b, c)
+        };
+        let kept = Some(Place { person: Some(7), by_hand: false, seen: true });
+        // One that never looked like the rest, found again with the
+        // fingerprint it had: the turn changed nothing about it, so its place
+        // stays as it was, even with that person elsewhere in the photo too
+        // (a reflection: the people check tells, the user may have left it).
+        let (odd, c) = face(&near(1, 3, 0.1), false);
+        assert_eq!(odd.keeps_place(&c, Some(&near(1, 3, 0.12)), &[]), kept);
+        assert_eq!(odd.keeps_place(&c, Some(&near(1, 3, 0.1)), &[7]), kept);
+        // A fingerprint taken sideways, unlike anyone, found again upright:
+        // kept when it looks like the rest of them, sorted again otherwise,
+        // and never into someone already elsewhere in the photo.
+        let (junk, c) = face(&near(5, 6, 0.3), false);
+        assert_eq!(junk.keeps_place(&c, Some(&near(0, 2, 0.15)), &[]), kept);
+        assert_eq!(junk.keeps_place(&c, Some(&near(4, 2, 0.1)), &[]), None);
+        assert_eq!(junk.keeps_place(&c, Some(&near(0, 2, 0.15)), &[7]), None);
+        // The user's word always stands.
+        let (by_hand, c) = face(&near(5, 6, 0.3), true);
+        let place = Some(Place { person: Some(7), by_hand: true, seen: true });
+        assert_eq!(by_hand.keeps_place(&c, Some(&near(4, 2, 0.1)), &[7]), place);
     }
 
     #[test]
