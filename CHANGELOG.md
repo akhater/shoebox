@@ -4,6 +4,26 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.43.2 - unreleased
 
+### Added
+
+- **A private space can have a name**, shown next to Private in the
+  sidebar, the Private view's title and Settings while its password has it
+  open. Name or rename it by right-clicking the Private row (or F2, or a
+  double-click), or by clicking the Private view's title. The name is sealed
+  with the space's photos like the rest: only its password reads it, every
+  private photo carries one of the same size, named or not, and nothing in
+  the catalog tells which spaces have a name. An empty space keeps its name
+  until its first photos are made private (or until it is locked).
+- **A warning each time a password opens private photos**: a password can't
+  be recovered, every password opens its own space (a mistyped one opens a
+  new, empty space, with no error), and only Shoebox's copies are sealed, not
+  the photo files on the disks. It always shows when the space opened is
+  empty, with a way to try another password; for a space with photos,
+  "Don't show this again" turns it off (Settings > Private photos > Warning
+  turns it back on).
+- `shoebox-cli private --name '<name>'` names the space of the password read
+  from stdin; it must have private photos.
+
 ## 26.43.1 - 2026-10-20
 
 ### Added

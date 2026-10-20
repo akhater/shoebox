@@ -367,6 +367,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         }
         conn.execute_batch(&format!("BEGIN; {columns} {SCHEMA_PRIVATE} COMMIT;"))?;
     }
+    // A private space's name, sealed to each of its photos (see private.rs).
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS private_names (photo_id INTEGER PRIMARY KEY, name BLOB NOT NULL);")?;
     Ok(())
 }
 

@@ -31,7 +31,9 @@ import {
 import {
   fmtAgo,
   fmtNum,
+  PRIVATE_NAME_CHARS,
   PRIVATE_SHORTCUT,
+  privateTitle,
   sameScope,
   type Browse,
   type FolderNode,
@@ -67,6 +69,10 @@ interface Props {
   onScope: (s: Scope) => void;
   /** A private space is open: the Private view and "Make private" exist only then. */
   privateUnlocked: boolean;
+  /** Its name, shown next to Private. */
+  privateName: string | null;
+  /** Names the space open now ("" = no name). */
+  onRenamePrivate: (name: string) => void;
   /** Hides private photos again. */
   onLockPrivate: () => void;
   /** Makes every photo of a folder private. */
@@ -241,6 +247,7 @@ export function Sidebar(p: Props) {
   const [open, toggle, openAll] = useOpenSet("shoebox.sidebar", ["sec:disks"]);
   const [menu, setMenu] = useState<{ t: FolderTarget; x: number; y: number } | null>(null);
   const [gearMenu, setGearMenu] = useState<GearMenuAt | null>(null);
+  const [privateMenu, setPrivateMenu] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   // Read synchronously: a blur right after Escape must not rename.
@@ -411,12 +418,13 @@ export function Sidebar(p: Props) {
     document.querySelector<HTMLElement>(".sidebar .fold-btn")?.focus();
   }, [p.folded]);
 
-  const anyMenu = menu != null || gearMenu != null;
+  const anyMenu = menu != null || gearMenu != null || privateMenu != null;
   useEffect(() => {
     if (!anyMenu) return;
     const close = () => {
       setMenu(null);
       setGearMenu(null);
+      setPrivateMenu(null);
     };
     window.addEventListener("click", close);
     window.addEventListener("blur", close);
@@ -499,7 +507,7 @@ export function Sidebar(p: Props) {
             )}
             {p.privateUnlocked && (
               <RailItem
-                label={`Private · ${fmtNum(overview?.private ?? 0)} · open (${PRIVATE_SHORTCUT} locks)`}
+                label={`${privateTitle(p.privateName)} · ${fmtNum(overview?.private ?? 0)} · open (${PRIVATE_SHORTCUT} locks)`}
                 className={cls({ kind: "private" })}
                 onClick={() => onScope({ kind: "private" })}
               >
@@ -588,6 +596,19 @@ export function Sidebar(p: Props) {
         />
       )}
 
+      {privateMenu && (
+        <PrivateMenu
+          {...privateMenu}
+          named={!!p.privateName}
+          onClose={() => {
+            setPrivateMenu(null);
+            opener.current?.focus();
+          }}
+          onRename={() => setRenaming(PRIVATE_ROW)}
+          onLock={p.onLockPrivate}
+        />
+      )}
+
       <div
         className="sidebar-scroll"
         ref={scroller}
@@ -596,6 +617,7 @@ export function Sidebar(p: Props) {
         onScroll={() => {
           setMenu(null);
           setGearMenu(null);
+          setPrivateMenu(null);
         }}
       >
         <div className="nav-group">
@@ -647,15 +669,60 @@ export function Sidebar(p: Props) {
               <span className="count">{fmtNum(overview?.sideways ?? 0)}</span>
             </button>
           )}
-          {p.privateUnlocked && (
+          {p.privateUnlocked && renaming === PRIVATE_ROW && (
+            <div className={cls({ kind: "private" })}>
+              <LockKeyholeOpen size={16} className="private-icon" />
+              <input
+                className="rename grow"
+                autoFocus
+                defaultValue={p.privateName ?? ""}
+                maxLength={PRIVATE_NAME_CHARS}
+                placeholder="Name this private space"
+                aria-label="Name of this private space"
+                onFocus={(e) => e.target.select()}
+                onBlur={(e) => {
+                  // Read synchronously: a blur right after Escape must not rename.
+                  if (renamingNow.current !== PRIVATE_ROW) return;
+                  renamingNow.current = null;
+                  setRenaming(null);
+                  p.onRenamePrivate(e.target.value);
+                }}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Enter") e.currentTarget.blur();
+                  if (e.key === "Escape") {
+                    renamingNow.current = null;
+                    setRenaming(null);
+                  }
+                }}
+              />
+            </div>
+          )}
+          {p.privateUnlocked && renaming !== PRIVATE_ROW && (
             <button
               {...nav(0)}
               className={cls({ kind: "private" })}
               onClick={() => onScope({ kind: "private" })}
-              title="The private photos of this password. Open: they show everywhere until you lock again"
+              onDoubleClick={() => setRenaming(PRIVATE_ROW)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                opener.current = e.currentTarget;
+                setPrivateMenu({ x: e.clientX, y: e.clientY });
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "F2") setRenaming(PRIVATE_ROW);
+                else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  opener.current = e.currentTarget;
+                  setPrivateMenu({ x: r.left + 24, y: r.bottom });
+                } else return;
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              title={`The private photos of this password. Open: they show everywhere until you lock again.\nRight-click or F2 to ${p.privateName ? "rename it" : "name it"}.`}
             >
               <LockKeyholeOpen size={16} className="private-icon" />
-              <span className="grow">Private</span>
+              <span className="grow ellipsis">{privateTitle(p.privateName)}</span>
               <span
                 className="nav-lock"
                 role="button"
@@ -1200,6 +1267,61 @@ function GearGroup({
           );
         })}
     </>
+  );
+}
+
+/** The Private row's name while it is being edited (shares `renaming` with folders and gear). */
+const PRIVATE_ROW = "private";
+
+/** The Private row's menu: name the space open now, or lock it. */
+function PrivateMenu({
+  x,
+  y,
+  named,
+  onClose,
+  onRename,
+  onLock,
+}: {
+  x: number;
+  y: number;
+  named: boolean;
+  onClose: () => void;
+  onRename: () => void;
+  onLock: () => void;
+}) {
+  const act = (fn: () => void) => () => {
+    onClose();
+    fn();
+  };
+  return (
+    <div
+      className="menu folder-menu"
+      style={{ left: Math.min(x, window.innerWidth - 260), top: Math.min(y, window.innerHeight - 120) }}
+      ref={(el) => {
+        if (el && !el.contains(document.activeElement)) el.querySelector<HTMLButtonElement>("button")?.focus();
+      }}
+      onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        const items = [...e.currentTarget.querySelectorAll<HTMLButtonElement>("button")];
+        const i = items.indexOf(e.target as HTMLButtonElement);
+        if (e.key === "Escape" || e.key === "Tab") {
+          e.preventDefault();
+          onClose();
+        } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+        }
+      }}
+    >
+      <button onClick={act(onRename)} title="Shown next to Private while this password has it open">
+        {named ? "Rename" : "Name this private space"} <span className="shortcut">F2</span>
+      </button>
+      <button onClick={act(onLock)} title="Hide private photos everywhere again">
+        Lock <span className="shortcut">{PRIVATE_SHORTCUT}</span>
+      </button>
+    </div>
   );
 }
 

@@ -346,6 +346,9 @@ export interface Settings {
   catalogMapMb: number;
   /** Private photos lock again after this many minutes without using Shoebox. */
   privateLockMinutes: number;
+  /** Warn each time a password opens private photos. Off only for a password holding photos:
+   *  one opening an empty space (new, or mistyped) is always warned about. */
+  privateWarning: boolean;
 }
 
 export interface FolderCheck {
@@ -607,6 +610,10 @@ export const fullUrl = (id: number, long: number, rev: number) => `http://shoebo
 export interface PrivateStatus {
   /** A private space is open (its photos shown). Nothing is said about any other. */
   unlocked: boolean;
+  /** Photos in the space open now: 0 for a new or mistyped password (and while locked). */
+  photos: number;
+  /** The name of the space open now, if it has one (shown next to Private). */
+  name: string | null;
 }
 
 /** Private photos: every password is its own space, like a wallet's passphrase - never
@@ -618,6 +625,8 @@ export const privateApi = {
   /** Opens the space of a password (in this window only, until locked). */
   unlock: (password: string) => invoke<PrivateStatus>("private_unlock", { password }),
   lock: () => invoke<PrivateStatus>("private_lock"),
+  /** Names the space open now ("" = no name); kept with its photos, sealed. */
+  rename: (name: string) => invoke<PrivateStatus>("private_rename", { name }),
   /** Into the space open now; its first photos need its password again (`confirm`). */
   hide: (ids: number[], confirm?: string) => invoke<number>("private_hide", { ids, confirm: confirm ?? null }),
   /** Every photo of a view (a folder). */
@@ -628,6 +637,10 @@ export const privateApi = {
 export const PRIVATE_SHORTCUT = "Ctrl+Shift+L";
 /** A password shorter than this is refused (as the backend does). */
 export const MIN_PASSWORD = 6;
+/** A private space's name has at most this many characters (as the backend checks). */
+export const PRIVATE_NAME_CHARS = 40;
+/** "Private", or "Private · <its name>" for a named space. */
+export const privateTitle = (name: string | null | undefined) => (name ? `Private · ${name}` : "Private");
 
 /** Photos turned. Only the catalog and Shoebox's copies change, never a file. */
 export interface TurnReport {

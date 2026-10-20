@@ -11,6 +11,7 @@ use shoebox_lib::faces::FaceIndex;
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::{retry_failed, scan_root};
 use shoebox_lib::{organize, private, tags};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -96,19 +97,21 @@ fn private_photos_are_hidden_and_sealed_until_unlocked() {
 
     // Locked, nothing can be made private: a space must be open first.
     assert!(private::hide(&cat, &[a], None).is_err());
-    assert_eq!(private::status(&cat), private::Status { unlocked: false });
+    assert_eq!(private::status(&cat), private::Status { unlocked: false, photos: 0, name: None });
     assert!(private::unlock(&cat, "short").is_err(), "too short");
 
     // Any password opens a space, never refused; a new one is empty and its
     // first photos need the password again (a typo would start a space).
-    assert!(private::unlock(&cat, "correct horse").unwrap().unlocked);
+    let opened = private::unlock(&cat, "correct horse").unwrap();
+    assert_eq!(opened, private::Status { unlocked: true, photos: 0, name: None }, "new: empty");
     assert_eq!(listed(&cat, &Scope::Private), Vec::<i64>::new());
     assert!(private::hide(&cat, &[a, b, e], None).unwrap_err().is::<private::NeedsConfirm>());
     assert!(private::hide(&cat, &[a, b, e], Some("correct hrose")).is_err(), "a typo");
     assert_eq!(private::hide(&cat, &[a, b, e], Some("correct horse")).unwrap(), 3);
     assert_eq!(private::hide(&cat, &[a], None).unwrap(), 0, "already private");
     assert_eq!(listed(&cat, &Scope::Private), sorted(vec![a, b, e]));
-    private::lock(&cat);
+    assert_eq!(private::status(&cat).photos, 3);
+    assert_eq!(private::lock(&cat), private::Status { unlocked: false, photos: 0, name: None });
 
     // Locked: in no view, count, folder, date, tag or person.
     assert_eq!(listed(&cat, &Scope::All), sorted(vec![c, d]));
@@ -168,7 +171,10 @@ fn private_photos_are_hidden_and_sealed_until_unlocked() {
 
     // Another password: no error, an empty space, with photos of its own the
     // first never sees.
-    assert!(private::unlock(&cat, "battery staple").unwrap().unlocked);
+    assert_eq!(
+        private::unlock(&cat, "battery staple").unwrap(),
+        private::Status { unlocked: true, photos: 0, name: None }
+    );
     assert_eq!(listed(&cat, &Scope::All), sorted(vec![c, d]));
     assert_eq!(listed(&cat, &Scope::Private), Vec::<i64>::new());
     assert_eq!(cat.overview().unwrap().private, 0);
@@ -181,7 +187,10 @@ fn private_photos_are_hidden_and_sealed_until_unlocked() {
     assert_eq!(listed(&cat, &Scope::All), vec![c]);
 
     // The first password again: its photos, not the other's.
-    assert!(private::unlock(&cat, "correct horse").unwrap().unlocked);
+    assert_eq!(
+        private::unlock(&cat, "correct horse").unwrap(),
+        private::Status { unlocked: true, photos: 3, name: None }
+    );
     assert_eq!(listed(&cat, &Scope::All), sorted(vec![a, b, c, e]));
     assert_eq!(listed(&cat, &Scope::Private), sorted(vec![a, b, e]));
     let list = cat.list_photos(&Scope::Private, Sort::default(), &Filters::default()).unwrap();
@@ -298,10 +307,94 @@ fn agents_hide_photos_but_never_see_them() {
     assert!(!cli(&["photo", &a_], "").0);
     let (_, stats) = cli(&["stats"], "");
     assert!(stats.contains("\"total\": 1") && stats.contains("photos listed: 1"), "{stats}");
-    // The window, with that password, sees it.
-    private::unlock(&cat, "correct horse").unwrap();
+    // Named headless: only a password that has photos (a typo would name nothing).
+    assert!(!cli(&["private", "--name", "Work"], "correct hrose\n").0);
+    let (ok, out) = cli(&["private", "--name", "Work"], "correct horse\n");
+    assert!(ok && out.contains("\"named\":true"), "{out}");
+    // The window, with that password, sees it, and its name.
+    let opened = private::unlock(&cat, "correct horse").unwrap();
+    assert_eq!(opened.name.as_deref(), Some("Work"));
     assert_eq!(listed(&cat, &Scope::All), sorted(vec![a, b]));
     assert_eq!(listed(&cat, &Scope::Private), vec![a]);
+
+    drop(cat);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A space's name: shown only while its password has it open, kept sealed
+/// with each of its photos, and the catalog doesn't tell which spaces have one.
+#[test]
+fn a_space_keeps_its_name_sealed_with_its_photos() {
+    let base = std::env::temp_dir().join("shoebox-private-names");
+    let _ = std::fs::remove_dir_all(&base);
+    let pics = base.join("Pictures");
+    for (i, n) in ["a.jpg", "b.jpg", "c.jpg", "d.jpg"].iter().enumerate() {
+        jpeg(&pics.join(n), 40 * i as u8);
+    }
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data.clone()).unwrap();
+    let root = cat.add_root(&pics).unwrap();
+    scan_root(&cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
+    let [a, b, c, d] = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"].map(|n| photo_of(&cat, n));
+    let names = |cat: &Catalog| -> Vec<(i64, Vec<u8>)> {
+        cat.db()
+            .prepare("SELECT photo_id, name FROM private_names ORDER BY photo_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+
+    // A new space, named before it has photos: its first photos keep the name.
+    assert_eq!(private::unlock(&cat, "correct horse").unwrap().name, None);
+    assert!(private::rename(&cat, &"x".repeat(private::NAME_CHARS + 1)).is_err(), "too long");
+    assert_eq!(private::rename(&cat, "  Family ").unwrap().name.as_deref(), Some("Family"));
+    assert_eq!(private::hide(&cat, &[a, b], Some("correct horse")).unwrap(), 2);
+    assert_eq!(private::lock(&cat).name, None, "locked: no name");
+    assert_eq!(private::unlock(&cat, "correct horse").unwrap().name.as_deref(), Some("Family"));
+    private::lock(&cat);
+    // Another password: not that name; this one stays unnamed.
+    assert_eq!(private::unlock(&cat, "battery staple").unwrap().name, None);
+    assert_eq!(private::hide(&cat, &[c], Some("battery staple")).unwrap(), 1);
+    private::lock(&cat);
+
+    // On disk: one sealed name per private photo, all the same size, named or
+    // not, and the name nowhere in the clear.
+    let rows = names(&cat);
+    assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), sorted(vec![a, b, c]));
+    assert_eq!(rows.iter().map(|r| r.1.len()).collect::<HashSet<_>>().len(), 1);
+    assert!(rows.iter().all(|r| !r.1.windows(6).any(|w| w == b"Family")));
+
+    // Photos made private before names (or by an older Shoebox) carry none:
+    // the next start gives them "not known yet", the same size as the others...
+    cat.db().execute("DELETE FROM private_names WHERE photo_id IN (?1, ?2)", [b, c]).unwrap();
+    cat.db().execute("INSERT INTO private_names (photo_id, name) VALUES (?1, x'00')", [d]).unwrap();
+    private::settle(&cat).unwrap();
+    let rows = names(&cat);
+    assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), sorted(vec![a, b, c]), "only private photos");
+    assert_eq!(rows.iter().map(|r| r.1.len()).collect::<HashSet<_>>().len(), 1);
+    // ...and their space's name comes from any photo that knows it.
+    assert_eq!(private::unlock(&cat, "correct horse").unwrap().name.as_deref(), Some("Family"));
+    private::lock(&cat);
+    // A space none of whose photos knows its name: unnamed, then given its name once opened.
+    let before = names(&cat).into_iter().find(|r| r.0 == c).unwrap().1;
+    assert_eq!(private::unlock(&cat, "battery staple").unwrap().name, None);
+    private::after_unlock(&cat).unwrap();
+    assert_ne!(names(&cat).into_iter().find(|r| r.0 == c).unwrap().1, before);
+    private::lock(&cat);
+
+    // Renamed, then no name; photos made ordinary again lose theirs.
+    private::unlock(&cat, "correct horse").unwrap();
+    assert_eq!(private::rename(&cat, "Family 2").unwrap().name.as_deref(), Some("Family 2"));
+    private::lock(&cat);
+    assert_eq!(private::unlock(&cat, "correct horse").unwrap().name.as_deref(), Some("Family 2"));
+    assert_eq!(private::rename(&cat, "").unwrap().name, None);
+    assert_eq!(private::show(&cat, &[a]).unwrap(), 1);
+    assert_eq!(names(&cat).iter().map(|r| r.0).collect::<Vec<_>>(), sorted(vec![b, c]));
+    private::lock(&cat);
+    assert_eq!(private::unlock(&cat, "correct horse").unwrap().name, None);
 
     drop(cat);
     let _ = std::fs::remove_dir_all(&base);

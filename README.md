@@ -69,6 +69,7 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   refused. Photos you make private there are hidden from every view, count,
   search and script until that password opens them again, and Shoebox's own
   copies of them are sealed on disk. The photo files are never touched.
+  Give a space a name and it shows next to Private while it is open.
 - **Scriptable.** Everything the window does is also available from
   `shoebox-cli`, with JSON output, for scripts and AI agents.
 
