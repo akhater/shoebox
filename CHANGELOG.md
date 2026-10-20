@@ -42,6 +42,29 @@ Newest first. Same format and versioning as Argentum.
   `dates-shift <photo-id>... --by <amount> | --to YYYY-MM-DD | --back`,
   `dates-undo` and `dates-leave` do the same headless (JSON out).
 
+### Fixed
+
+- **A turned photo no longer holds the same face twice.** After a turn,
+  Shoebox looks at the photo again for faces it missed while it stood the
+  wrong way. A face found then inside the loose box it had been given
+  sideways was taken for someone else, and joined next to it, often in the
+  same person: People's check said "twice in one photo". A face found again
+  now takes the old one's place, with its box and fingerprint from the photo
+  upright; it keeps its person when the user put it there, or when it still
+  looks like them, and is sorted again otherwise. Two people overlapping
+  stay two faces. Faces found twice before this are mended once, at the next
+  start (`shoebox-cli turned-twice [--apply]` lists or mends them). Findings
+  of the people check left as is about a turned face now stay left.
+- **Faces of photos turned before now get their upright fingerprint.** A
+  face found again after a turn used to be dropped as already there, so it
+  kept the loose box and the fingerprint found while the photo stood
+  sideways: often unlike anyone, alone in a person of its own. Photos turned
+  (or said to stand right) are looked at for faces once more, in the
+  background, after the next start (`shoebox-cli turned-again [--apply]`
+  counts or queues them). A face found again keeps its person when the user
+  put it there, or when its fingerprint is unchanged or still looks like
+  them; otherwise it is sorted again.
+
 ## 26.43.1 - 2026-10-20
 
 ### Added

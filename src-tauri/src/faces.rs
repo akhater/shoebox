@@ -38,6 +38,10 @@ const AROUND_FACES: u32 = 5;
 const AROUND_MONTHS: i64 = 12;
 /// Less alike than the same person, but enough to suggest who a face may be.
 const LOOKS_LIKE: f32 = 0.3;
+/// A face found again with a fingerprint this like the one it had is the same
+/// find: the same fingerprint when its photo was turned after its faces were
+/// found the right way up, nearly when found well even sideways.
+const SAME_FIND: f32 = 0.9;
 /// Faces smaller than this (short side, in the preview) give fingerprints too
 /// weak to group automatically. They are kept, ungrouped, for a later pass on
 /// the full-size photo.
@@ -67,6 +71,12 @@ const GROUPING_RULES: &str = "2";
 /// Bump to look once more, at start, for people found twice
 /// (`join_look_alikes`).
 const JOIN_RULES: &str = "1";
+/// Bump to look once more, at start, for turned photos holding the same
+/// face twice ([`FaceIndex::mend_turned`]).
+const MEND_TURNED: &str = "1";
+/// Bump to look once more, at start, at the faces of turned photos
+/// ([`look_again_turned`]).
+const LOOK_AGAIN_TURNED: &str = "1";
 const DIM: usize = 512;
 
 /// A person as the look for people found twice saw them: their faces
@@ -550,6 +560,22 @@ impl Averages {
         h.finish()
     }
 
+    /// How much `v` looks like a person's whole life of faces, but `without`
+    /// (one of theirs, about to make room for `v`). None when that was all
+    /// they had.
+    fn like_rest(&self, person: i64, v: &[f32], without: Option<&[f32]>) -> Option<f32> {
+        let (sum, n) = self.life.get(&person)?;
+        if *n <= without.is_some() as u32 {
+            return None;
+        }
+        let mut rest = sum.clone();
+        if let Some(w) = without {
+            rest.iter_mut().zip(w).for_each(|(s, x)| *s -= x);
+        }
+        let norm = rest.iter().map(|x| x * x).sum::<f32>().sqrt();
+        (norm > f32::EPSILON).then(|| dot(&rest, v) / norm)
+    }
+
     /// The first and last month of a person's photos with a date.
     fn months_of(&self, person: i64) -> Option<(i64, i64)> {
         let m = self.months.get(&person)?;
@@ -985,6 +1011,48 @@ pub struct PhotoFace {
     pub bbox: [f64; 4],
 }
 
+/// Turned photos holding the same face twice ([`FaceIndex::mend_turned`]).
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mended {
+    /// Turned photos with faces, looked at.
+    pub photos: usize,
+    /// Each face found twice, and what becomes of it.
+    pub twice: Vec<FoundTwice>,
+    /// Mended; false: only listed.
+    pub done: bool,
+}
+
+/// One face of a turned photo found twice.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundTwice {
+    pub photo_id: i64,
+    /// The newer face, found with the photo upright: it stays.
+    pub kept: i64,
+    /// The older face, found while the photo stood the wrong way: it goes.
+    pub gone: i64,
+    /// Who the face kept is then, and whether by the user's word.
+    pub person_id: Option<i64>,
+    pub by_hand: bool,
+    /// It takes the place of the face that goes (rather than its own).
+    pub took_place: bool,
+}
+
+/// Turned photos to be looked at again for faces ([`look_again_turned`]).
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LookAgain {
+    /// Photos the user turned, or said how they stand, holding faces.
+    pub photos: usize,
+    /// Their faces.
+    pub faces: usize,
+    /// Of those photos, the ones waiting to be looked at for faces.
+    pub waiting: usize,
+    /// Queued; false: only counted.
+    pub done: bool,
+}
+
 pub struct FaceIndex {
     /// faces.db: one fingerprint per face.
     db: Mutex<Connection>,
@@ -1058,6 +1126,40 @@ impl FaceIndex {
             self.centroids.read().unwrap().len(),
             started.elapsed().as_millis()
         );
+        // Turned photos given the same face twice, before a face found again
+        // took the old one's place, get mended once.
+        let mended: Option<String> = cat
+            .db()
+            .query_row("SELECT value FROM meta WHERE key = 'turned_faces_mended'", [], |r| r.get(0))
+            .optional()?;
+        if mended.as_deref() != Some(MEND_TURNED) {
+            match self.mend_turned_now(cat, true) {
+                Ok(m) => {
+                    if !m.twice.is_empty() {
+                        log::info!("faces: {} faces found twice in turned photos, the older ones gone", m.twice.len());
+                    }
+                    cat.db().execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('turned_faces_mended', ?1)",
+                        [MEND_TURNED],
+                    )?;
+                }
+                // Faces still work; the next start tries again.
+                Err(e) => log::warn!("faces: mending turned photos failed: {e:#}"),
+            }
+        }
+        // Turned photos whose faces kept what was found while they stood
+        // the wrong way are looked at again once.
+        let looked: Option<String> = cat
+            .db()
+            .query_row("SELECT value FROM meta WHERE key = 'turned_faces_looked_again'", [], |r| r.get(0))
+            .optional()?;
+        if looked.as_deref() != Some(LOOK_AGAIN_TURNED) {
+            match look_again_turned(cat, true) {
+                Ok(l) => log::info!("faces: {} turned photos to look at again", l.waiting),
+                // Faces still work; the next start tries again.
+                Err(e) => log::warn!("faces: queueing turned photos failed: {e:#}"),
+            }
+        }
         // Catalogs grouped under older rules get regrouped once, and so does
         // one whose regrouping was cut short.
         let done: Option<String> =
@@ -1349,11 +1451,7 @@ impl FaceIndex {
                     None
                 }
             };
-            if let Some((img, mut faces)) = found {
-                // Looked at again after a turn: the faces already found stay as
-                // they are (names, places); only those missed until now join.
-                let known = known_boxes(cat, *photo_id, img.width() as f32, img.height() as f32)?;
-                faces.retain(|(d, _)| known.iter().all(|k| iou(k, &d.bbox) < NMS_IOU));
+            if let Some((img, faces)) = found {
                 total_faces += faces.len();
                 self.store(cat, *photo_id, &img, faces)?;
             }
@@ -1377,6 +1475,14 @@ impl FaceIndex {
     /// The photo counts as looked at only once its faces, their fingerprints and
     /// their pictures are all saved: a Shoebox stopped halfway looks at it
     /// again, rather than leaving faces with no picture or fingerprint.
+    ///
+    /// A photo looked at again after a turn still holds the faces found while
+    /// it stood the wrong way ([`turn_faces`]). A face found again takes the
+    /// old one's place, with its box and fingerprint from the photo upright,
+    /// so no face is in it twice; the old face's person stays when it was the
+    /// user's word, or when the face upright is unchanged or still looks like
+    /// them (see [`Before::keeps_place`]). Faces found only then, or only
+    /// before, stay.
     pub fn store(
         &self,
         cat: &Catalog,
@@ -1397,28 +1503,56 @@ impl FaceIndex {
             .optional()?
             .flatten();
         let month = month_of(taken_ts);
+        let before = self.faces_before(cat, photo_id)?;
+        let boxes: Vec<[f32; 4]> = faces
+            .iter()
+            .map(|(d, _)| [d.bbox[0] / w as f32, d.bbox[1] / h as f32, d.bbox[2] / w as f32, d.bbox[3] / h as f32])
+            .collect();
+        let again = found_again(&before.iter().map(|b| b.bbox).collect::<Vec<_>>(), &boxes);
         // Faces too small to group stay with nobody.
         let groupable: Vec<bool> =
             faces.iter().map(|(d, _)| (d.bbox[2] - d.bbox[0]).min(d.bbox[3] - d.bbox[1]) >= GROUP_MIN_PX).collect();
-        let mut chosen = {
-            let sort: Vec<&[f32]> =
-                faces.iter().zip(&groupable).filter(|(_, g)| **g).map(|((_, v), _)| v.as_slice()).collect();
-            self.centroids.read().unwrap().choose(&sort, month, &[]).into_iter()
+        // Faces found again keeping the old one's place; the others are sorted
+        // as new, each person once in the photo.
+        let mut places: Vec<Option<Place>> = vec![None; faces.len()];
+        let chosen: HashMap<usize, Option<i64>> = {
+            let c = self.centroids.read().unwrap();
+            let mut taken: Vec<i64> = before
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| !again.contains(&Some(*j)))
+                .filter_map(|(_, b)| b.person)
+                .collect();
+            for (i, j) in again.iter().enumerate() {
+                if let Some(b) = j.map(|j| &before[j]) {
+                    places[i] = b.keeps_place(&c, Some(&faces[i].1), &taken);
+                    taken.extend(places[i].and_then(|p| p.person));
+                }
+            }
+            let open: Vec<usize> = (0..faces.len()).filter(|&i| places[i].is_none() && groupable[i]).collect();
+            let sort: Vec<&[f32]> = open.iter().map(|&i| faces[i].1.as_slice()).collect();
+            open.into_iter().zip(c.choose(&sort, month, &taken)).collect()
         };
         {
             let mut db = cat.db();
             let tx = db.transaction()?;
-            for ((d, v), groupable) in faces.iter().zip(groupable) {
-                let pid: Option<i64> = if !groupable {
-                    None
-                } else {
-                    Some(match chosen.next().flatten() {
-                        Some(pid) => pid,
-                        None => {
-                            tx.execute("INSERT INTO people (name, created_at) VALUES (NULL, ?1)", [crate::db::now()])?;
-                            tx.last_insert_rowid()
-                        }
-                    })
+            for (i, (d, v)) in faces.iter().enumerate() {
+                let place = match places[i] {
+                    Some(place) => place,
+                    None if !groupable[i] => Place::default(),
+                    None => Place {
+                        person: Some(match chosen.get(&i).copied().flatten() {
+                            Some(pid) => pid,
+                            None => {
+                                tx.execute(
+                                    "INSERT INTO people (name, created_at) VALUES (NULL, ?1)",
+                                    [crate::db::now()],
+                                )?;
+                                tx.last_insert_rowid()
+                            }
+                        }),
+                        ..Place::default()
+                    },
                 };
                 let kps: Vec<String> = d
                     .kps
@@ -1427,20 +1561,30 @@ impl FaceIndex {
                     .map(|(i, k)| format!("{:.4}", *k as f64 / if i % 2 == 0 { fw } else { fh }))
                     .collect();
                 tx.execute(
-                    "INSERT INTO faces (photo_id, person_id, x1, y1, x2, y2, kps, score) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    "INSERT INTO faces (photo_id, person_id, x1, y1, x2, y2, kps, score, by_hand, seen)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         photo_id,
-                        pid,
+                        place.person,
                         (d.bbox[0] as f64 / fw).clamp(0.0, 1.0),
                         (d.bbox[1] as f64 / fh).clamp(0.0, 1.0),
                         (d.bbox[2] as f64 / fw).clamp(0.0, 1.0),
                         (d.bbox[3] as f64 / fh).clamp(0.0, 1.0),
                         kps.join(","),
-                        d.score
+                        d.score,
+                        place.by_hand,
+                        place.seen
                     ],
                 )?;
-                written.push(tx.last_insert_rowid());
-                joined.extend(pid.map(|pid| (pid, v)));
+                let new = tx.last_insert_rowid();
+                written.push(new);
+                joined.extend(place.person.map(|pid| (pid, v)));
+                // The face it was found as before goes; what the user left as
+                // is about it follows.
+                if let Some(b) = again[i].map(|j| &before[j]) {
+                    follow_left(&tx, b.id, new)?;
+                    tx.execute("DELETE FROM faces WHERE id = ?1", [b.id])?;
+                }
             }
             {
                 let mut emb = self.db.lock().unwrap();
@@ -1468,10 +1612,193 @@ impl FaceIndex {
             )?;
             tx.commit()?;
         }
+        // The faces found again are gone only once that's saved: until then
+        // they keep their fingerprints and pictures.
+        let gone: Vec<&Before> = again.iter().flatten().map(|&j| &before[j]).collect();
+        self.forget_faces(cat, &gone.iter().map(|b| b.id).collect::<Vec<_>>())?;
         // Only now that they're saved do these faces count for their person.
         let mut c = self.centroids.write().unwrap();
+        for b in gone {
+            if let (Some(pid), Some(v)) = (b.person, &b.v) {
+                c.add(pid, v, month, -1.0);
+            }
+        }
         for (pid, v) in joined {
             c.add(pid, v, month, 1.0);
+        }
+        Ok(())
+    }
+
+    /// Turned photos holding the same face twice: found while the photo stood
+    /// the wrong way, and again once it was upright, before a face found
+    /// again took the old one's place ([`FaceIndex::store`]). Of the two, the
+    /// newer stays (its box and fingerprint are from the photo upright), with
+    /// the older one's place when that should stay ([`Before::keeps_place`]);
+    /// the older goes. Two people overlapping aren't one face found twice
+    /// ([`same_face`]): both stay. Only listed unless `apply`. Done once at
+    /// start. Private photos are mended too, but never listed.
+    pub fn mend_turned(&self, cat: &Catalog, apply: bool) -> Result<Mended> {
+        self.ready.wait()?;
+        self.mend_turned_now(cat, apply)
+    }
+
+    fn mend_turned_now(&self, cat: &Catalog, apply: bool) -> Result<Mended> {
+        // Every face of the turned photos, photo by photo, oldest first.
+        let rows: Vec<(i64, Option<i64>, Before)> = cat
+            .db()
+            .prepare(
+                "SELECT f.photo_id, p.taken_ts, f.id, f.person_id, f.by_hand, f.seen, f.x1, f.y1, f.x2, f.y2
+                   FROM photos p JOIN faces f ON f.photo_id = p.id
+                  WHERE p.turn <> 0 ORDER BY f.photo_id, f.id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, Before::from_row(r, 2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut photos: Vec<(i64, Option<i64>, Vec<Before>)> = Vec::new();
+        for (photo, taken, face) in rows {
+            match photos.last_mut() {
+                Some((p, _, faces)) if *p == photo => faces.push(face),
+                _ => photos.push((photo, taken, vec![face])),
+            }
+        }
+        let hidden = cat.hidden_ids()?;
+        let mut mended = Mended {
+            photos: photos.iter().filter(|(p, ..)| !hidden.contains(p)).count(),
+            done: apply,
+            ..Default::default()
+        };
+        let mut work: Vec<Mending> = Vec::new();
+        {
+            let c = self.centroids.read().unwrap();
+            for (photo, taken, faces) in photos.into_iter().filter(|(_, _, f)| f.len() > 1) {
+                let was = faces.iter().map(Before::place).collect();
+                let mut m = Mending { photo, month: month_of(taken), was, faces, pairs: Vec::new() };
+                // The most overlapping two left first; a newer face that pairs
+                // with a newer one still goes in turn.
+                loop {
+                    let mut best: Option<(f32, usize, usize)> = None;
+                    for a in (0..m.faces.len()).filter(|&a| !m.goes(a)) {
+                        for b in (a + 1..m.faces.len()).filter(|&b| !m.goes(b)) {
+                            let (fa, fb) = (&m.faces[a].bbox, &m.faces[b].bbox);
+                            let s = iou(fa, fb);
+                            if same_face(fa, fb) && best.is_none_or(|(t, ..)| s > t) {
+                                best = Some((s, a, b));
+                            }
+                        }
+                    }
+                    let Some((_, a, b)) = best else { break };
+                    for k in [a, b] {
+                        if m.faces[k].v.is_none() {
+                            m.faces[k].v = self.vector(m.faces[k].id)?;
+                        }
+                    }
+                    let others: Vec<i64> = (0..m.faces.len())
+                        .filter(|&k| k != a && k != b && !m.goes(k))
+                        .filter_map(|k| m.faces[k].person)
+                        .collect();
+                    let (old, new) = (&m.faces[a], &m.faces[b]);
+                    let took = if new.by_hand { None } else { old.keeps_place(&c, new.v.as_deref(), &others) };
+                    if let Some(p) = took {
+                        let seen = p.seen || (p.person == new.person && new.seen);
+                        let new = &mut m.faces[b];
+                        (new.person, new.by_hand, new.seen) = (p.person, p.by_hand, seen);
+                    }
+                    m.pairs.push((a, b));
+                    if !hidden.contains(&photo) {
+                        let (old, new) = (&m.faces[a], &m.faces[b]);
+                        mended.twice.push(FoundTwice {
+                            photo_id: photo,
+                            kept: new.id,
+                            gone: old.id,
+                            person_id: new.person,
+                            by_hand: new.by_hand,
+                            took_place: took.is_some(),
+                        });
+                    }
+                }
+                if !m.pairs.is_empty() {
+                    work.push(m);
+                }
+            }
+        }
+        if !apply || work.is_empty() {
+            return Ok(mended);
+        }
+        {
+            let mut db = cat.db();
+            let tx = db.transaction()?;
+            for m in &work {
+                for &(a, b) in &m.pairs {
+                    follow_left(&tx, m.faces[a].id, m.faces[b].id)?;
+                    tx.execute("DELETE FROM faces WHERE id = ?1", [m.faces[a].id])?;
+                }
+                for (k, (f, was)) in m.faces.iter().zip(&m.was).enumerate() {
+                    if f.place() != *was && !m.goes(k) {
+                        tx.execute(
+                            "UPDATE faces SET person_id = ?1, by_hand = ?2, seen = ?3 WHERE id = ?4",
+                            params![f.person, f.by_hand, f.seen, f.id],
+                        )?;
+                    }
+                }
+                tx.execute(
+                    "UPDATE face_scan SET faces = (SELECT COUNT(*) FROM faces WHERE photo_id = ?1) WHERE photo_id = ?1",
+                    [m.photo],
+                )?;
+            }
+            tx.commit()?;
+        }
+        let gone: Vec<i64> = work.iter().flat_map(|m| m.pairs.iter().map(|(a, _)| m.faces[*a].id)).collect();
+        self.forget_faces(cat, &gone)?;
+        // Each person's average: without the faces gone, with the faces kept where they are now.
+        let mut c = self.centroids.write().unwrap();
+        for m in &work {
+            for (k, (f, was)) in m.faces.iter().zip(&m.was).enumerate() {
+                let Some(v) = &f.v else { continue };
+                if (m.goes(k) || f.person != was.person)
+                    && let Some(p) = was.person
+                {
+                    c.add(p, v, m.month, -1.0);
+                }
+                if !m.goes(k)
+                    && f.person != was.person
+                    && let Some(p) = f.person
+                {
+                    c.add(p, v, m.month, 1.0);
+                }
+            }
+        }
+        Ok(mended)
+    }
+
+    /// The faces of a photo now, as found before it is looked at again.
+    fn faces_before(&self, cat: &Catalog, photo_id: i64) -> Result<Vec<Before>> {
+        let rows: Vec<Before> = cat
+            .db()
+            .prepare("SELECT id, person_id, by_hand, seen, x1, y1, x2, y2 FROM faces WHERE photo_id = ?1 ORDER BY id")?
+            .query_map([photo_id], |r| Before::from_row(r, 0))?
+            .collect::<rusqlite::Result<_>>()?;
+        rows.into_iter()
+            .map(|mut b| {
+                b.v = self.vector(b.id)?;
+                Ok(b)
+            })
+            .collect()
+    }
+
+    /// Fingerprints and pictures of faces taken out of the catalog.
+    fn forget_faces(&self, cat: &Catalog, face_ids: &[i64]) -> Result<()> {
+        if face_ids.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut emb = self.db.lock().unwrap();
+            let etx = emb.transaction()?;
+            for id in face_ids {
+                etx.execute("DELETE FROM emb WHERE face_id = ?1", [id])?;
+            }
+            etx.commit()?;
+        }
+        for &id in face_ids {
+            cat.remove_copy(&cat.data.face_path(id))?;
         }
         Ok(())
     }
@@ -2540,21 +2867,128 @@ fn people_in(tx: &rusqlite::Transaction, photo: i64, except_face: i64) -> Result
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// The boxes of the faces already found in a photo, in pixels of its preview
-/// (`w` x `h`).
-fn known_boxes(cat: &Catalog, photo_id: i64, w: f32, h: f32) -> Result<Vec<[f32; 4]>> {
-    Ok(cat
-        .db()
-        .prepare("SELECT x1, y1, x2, y2 FROM faces WHERE photo_id = ?1")?
-        .query_map([photo_id], |r| {
-            Ok([
-                r.get::<_, f64>(0)? as f32 * w,
-                r.get::<_, f64>(1)? as f32 * h,
-                r.get::<_, f64>(2)? as f32 * w,
-                r.get::<_, f64>(3)? as f32 * h,
-            ])
-        })?
-        .collect::<rusqlite::Result<_>>()?)
+/// Who a face is: its person, whether the user put it there, whether they
+/// have seen it there.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+struct Place {
+    person: Option<i64>,
+    by_hand: bool,
+    seen: bool,
+}
+
+/// A face already in a photo when it is found again: one a turn carried over
+/// from when the photo stood the wrong way ([`turn_faces`]).
+struct Before {
+    id: i64,
+    person: Option<i64>,
+    by_hand: bool,
+    seen: bool,
+    /// 0..1 of the preview.
+    bbox: [f32; 4],
+    /// Its fingerprint, as found then.
+    v: Option<Vec<f32>>,
+}
+
+impl Before {
+    /// From `id, person_id, by_hand, seen, x1, y1, x2, y2`, from column `at` on.
+    fn from_row(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Self> {
+        let bbox = |k: usize| r.get::<_, f64>(at + k).map(|x| x as f32);
+        Ok(Self {
+            id: r.get(at)?,
+            person: r.get(at + 1)?,
+            by_hand: r.get::<_, i64>(at + 2)? != 0,
+            seen: r.get::<_, i64>(at + 3)? != 0,
+            bbox: [bbox(4)?, bbox(5)?, bbox(6)?, bbox(7)?],
+            v: None,
+        })
+    }
+
+    fn place(&self) -> Place {
+        Place { person: self.person, by_hand: self.by_hand, seen: self.seen }
+    }
+
+    /// This face's place, for it found again with the fingerprint `v`, when
+    /// it should keep it: always when the user put it there, or when its
+    /// fingerprint is unchanged ([`SAME_FIND`]: nothing to sort again, even
+    /// when that person is in the photo twice, which the people check tells).
+    /// When Shoebox put it there from a fingerprint taken the wrong way up,
+    /// often poor, only while the face still looks like the rest of that
+    /// person, and that person isn't already someone else in the photo
+    /// (`taken`). None: it is sorted again from `v`, as a new face.
+    fn keeps_place(&self, c: &Averages, v: Option<&[f32]>, taken: &[i64]) -> Option<Place> {
+        let unchanged = |v: &[f32]| self.v.as_deref().is_some_and(|was| dot(was, v) >= SAME_FIND);
+        if self.by_hand || (self.person.is_some() && v.is_some_and(unchanged)) {
+            return Some(self.place());
+        }
+        let (person, v) = (self.person?, v?);
+        let alike = c.like_rest(person, v, self.v.as_deref()).is_some_and(|s| s >= LOOKS_LIKE);
+        (alike && !taken.contains(&person)).then(|| self.place())
+    }
+}
+
+/// A turned photo's faces, as [`FaceIndex::mend_turned`] mends them.
+struct Mending {
+    photo: i64,
+    month: Option<i64>,
+    /// Each face's place as it was; `faces` hold them as they will be.
+    was: Vec<Place>,
+    faces: Vec<Before>,
+    /// Each face found twice: (older, newer), the older to go.
+    pairs: Vec<(usize, usize)>,
+}
+
+impl Mending {
+    fn goes(&self, k: usize) -> bool {
+        self.pairs.iter().any(|(a, _)| *a == k)
+    }
+}
+
+/// Two boxes of one photo are the same face found twice: as much overlap as
+/// two finds of one face ([`NMS_IOU`]), or each one's centre inside the
+/// other, as a tight box inside the loose one a face gets when found while
+/// its photo stood sideways. Two people side by side, or one behind another,
+/// are neither, however much a loose box covers.
+fn same_face(a: &[f32; 4], b: &[f32; 4]) -> bool {
+    let centre_in = |r: &[f32; 4], s: &[f32; 4]| {
+        let (x, y) = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0);
+        x >= s[0] && x <= s[2] && y >= s[1] && y <= s[3]
+    };
+    iou(a, b) >= NMS_IOU || (centre_in(a, b) && centre_in(b, a))
+}
+
+/// Which of the faces found `before` each face found `now` is, if any
+/// ([`same_face`]): the most overlapping pairs first, each face once.
+fn found_again(before: &[[f32; 4]], now: &[[f32; 4]]) -> Vec<Option<usize>> {
+    let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
+    for (i, n) in now.iter().enumerate() {
+        for (j, b) in before.iter().enumerate() {
+            if same_face(b, n) {
+                pairs.push((iou(b, n), i, j));
+            }
+        }
+    }
+    pairs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let mut out = vec![None; now.len()];
+    let mut used = HashSet::new();
+    for (_, i, j) in pairs {
+        if out[i].is_none() && used.insert(j) {
+            out[i] = Some(j);
+        }
+    }
+    out
+}
+
+/// What the user left as is about face `old` (its age jump, its look-alike)
+/// is now about face `new`, the same face under a new id. One `new` already
+/// has stays.
+fn follow_left(tx: &Connection, old: i64, new: i64) -> Result<()> {
+    tx.execute(
+        "UPDATE OR IGNORE check_left SET id = ?1, seen = json_set(seen, '$.faceId', ?1)
+          WHERE kind IN ('ageJump', 'likeOther') AND id = ?2",
+        params![new, old],
+    )?;
+    tx.execute("DELETE FROM check_left WHERE kind IN ('ageJump', 'likeOther') AND id = ?1", [old])?;
+    Ok(())
 }
 
 /// A point (0..1 of the picture) once the picture is turned clockwise by
@@ -2612,10 +3046,7 @@ pub fn turn_faces(tx: &Connection, photo_id: i64, by: i64) -> Result<Vec<(i64, i
             params![photo_id, person, ax.min(bx), ay.min(by_), ax.max(bx), ay.max(by_), kps, score, by_hand, seen],
         )?;
         let new = tx.last_insert_rowid();
-        tx.execute(
-            "UPDATE check_left SET id = ?1 WHERE kind IN ('ageJump', 'likeOther') AND id = ?2",
-            params![new, old],
-        )?;
+        follow_left(tx, old, new)?;
         tx.execute("DELETE FROM faces WHERE id = ?1", [old])?;
         moved.push((old, new));
     }
@@ -2665,6 +3096,54 @@ pub fn after_turn(cat: &Catalog, moved: &[(i64, i64)]) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+/// Photos the user turned, or said how they stand, whose faces may still
+/// hold what was found while the photo stood the wrong way: until a face
+/// found again took the old one's place ([`FaceIndex::store`]), looking at a
+/// turned photo again dropped each face found again upright as already there,
+/// so the face kept its loose box and its fingerprint from sideways, often
+/// unlike anyone, alone in a person of its own. Each of these photos is to be
+/// looked at for faces again (the face pass does it, in the background): a
+/// face found again then gets its box and fingerprint from the photo upright,
+/// and keeps its place when the user put it there or its fingerprint is
+/// unchanged ([`Before::keeps_place`]). Only counted unless `apply`. Done once
+/// at start. Private photos are queued too (looked at once unlocked), but
+/// never counted.
+pub fn look_again_turned(cat: &Catalog, apply: bool) -> Result<LookAgain> {
+    const TURNED: &str = "(p.turn <> 0 OR p.sideways = ?1)";
+    let rows: Vec<(i64, usize, bool)> = cat
+        .db()
+        .prepare(&format!(
+            "SELECT p.id, COUNT(*), EXISTS (SELECT 1 FROM face_scan s WHERE s.photo_id = p.id)
+               FROM photos p JOIN faces f ON f.photo_id = p.id WHERE {TURNED} GROUP BY p.id"
+        ))?
+        .query_map([crate::db::SIDEWAYS_DECIDED], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if apply {
+        let db = cat.db();
+        let tx = db.unchecked_transaction()?;
+        tx.execute(
+            &format!(
+                "DELETE FROM face_scan WHERE photo_id IN
+                   (SELECT p.id FROM photos p WHERE {TURNED} AND EXISTS (SELECT 1 FROM faces f WHERE f.photo_id = p.id))"
+            ),
+            [crate::db::SIDEWAYS_DECIDED],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('turned_faces_looked_again', ?1)",
+            [LOOK_AGAIN_TURNED],
+        )?;
+        tx.commit()?;
+    }
+    let hidden = cat.hidden_ids()?;
+    let shown = || rows.iter().filter(|(id, ..)| !hidden.contains(id));
+    Ok(LookAgain {
+        photos: shown().count(),
+        faces: shown().map(|(_, n, _)| n).sum(),
+        waiting: shown().filter(|(.., looked)| apply || !looked).count(),
+        done: apply,
+    })
 }
 
 /// Cuts these faces' pictures again from their photo's preview, framed as when
@@ -2848,5 +3327,102 @@ mod tests {
         let c = dominant(&refs);
         assert!(vs[..7].iter().all(|v| dot(v, &c) >= SAME_PERSON));
         assert!(vs[7..].iter().all(|v| dot(v, &c) < SAME_PERSON));
+    }
+
+    /// Boxes of real turned photos (0..1 of the preview): one found while the
+    /// photo stood sideways, one once it was upright, and whether they are one
+    /// face, as seen on their pictures. In all of them the upright box is
+    /// mostly inside the sideways one (60% of it or more), and their overlap
+    /// is under NMS_IOU.
+    const TURNED_PAIRS: [([f32; 4], [f32; 4], bool); 12] = [
+        // A loose box around a tight one.
+        ([0.476, 0.267, 0.609, 0.392], [0.519, 0.290, 0.595, 0.349], true),
+        ([0.684, 0.259, 0.809, 0.374], [0.699, 0.273, 0.774, 0.340], true),
+        ([0.375, 0.085, 0.548, 0.224], [0.436, 0.122, 0.533, 0.206], true),
+        ([0.074, 0.091, 0.206, 0.202], [0.093, 0.109, 0.158, 0.164], true),
+        // A box around two people, and each of them.
+        ([0.147, 0.124, 0.382, 0.309], [0.129, 0.141, 0.272, 0.269], true),
+        ([0.147, 0.124, 0.382, 0.309], [0.243, 0.187, 0.369, 0.296], true),
+        ([0.516, 0.093, 0.635, 0.211], [0.564, 0.130, 0.659, 0.210], true),
+        // Someone else, behind or beside the face found sideways.
+        ([0.516, 0.093, 0.635, 0.211], [0.496, 0.102, 0.560, 0.175], false),
+        ([0.309, 0.261, 0.431, 0.372], [0.391, 0.333, 0.441, 0.379], false),
+        ([0.228, 0.249, 0.335, 0.346], [0.205, 0.275, 0.263, 0.328], false),
+        ([0.684, 0.259, 0.809, 0.374], [0.755, 0.288, 0.808, 0.344], false),
+        ([0.232, 0.149, 0.378, 0.290], [0.332, 0.151, 0.408, 0.219], false),
+    ];
+
+    #[test]
+    fn a_face_found_again_is_told_from_someone_beside_it() {
+        let area = |r: &[f32; 4]| (r[2] - r[0]) * (r[3] - r[1]);
+        for (i, (sideways, upright, same)) in TURNED_PAIRS.iter().enumerate() {
+            let inter = [
+                sideways[0].max(upright[0]),
+                sideways[1].max(upright[1]),
+                sideways[2].min(upright[2]),
+                sideways[3].min(upright[3]),
+            ];
+            assert!(area(&inter) / area(upright) >= 0.59, "pair {i}: mostly inside");
+            assert!(iou(sideways, upright) < NMS_IOU, "pair {i}: overlap too small to tell");
+            assert_eq!(same_face(sideways, upright), *same, "pair {i}");
+            assert_eq!(same_face(upright, sideways), *same, "pair {i}, either way round");
+        }
+        // Two finds of one face overlapping as much as the detector's own: the same.
+        assert!(same_face(&[0.1, 0.1, 0.3, 0.3], &[0.12, 0.1, 0.32, 0.3]));
+        // Side by side: not.
+        assert!(!same_face(&[0.1, 0.1, 0.3, 0.3], &[0.3, 0.1, 0.5, 0.3]));
+    }
+
+    #[test]
+    fn a_face_found_again_keeps_its_place_only_when_it_should() {
+        // Someone with two faces of theirs, and a third face with them: as
+        // found before (`was`), seen there by the user.
+        let theirs = near(0, 2, 0.1);
+        let face = |was: &[f32], by_hand: bool| {
+            let mut c = Averages::default();
+            for v in [theirs.as_slice(), &theirs, was] {
+                c.add(7, v, None, 1.0);
+            }
+            let b = Before {
+                id: 1,
+                person: Some(7),
+                by_hand,
+                seen: true,
+                bbox: [0.1, 0.1, 0.3, 0.3],
+                v: Some(was.to_vec()),
+            };
+            (b, c)
+        };
+        let kept = Some(Place { person: Some(7), by_hand: false, seen: true });
+        // One that never looked like the rest, found again with the
+        // fingerprint it had: the turn changed nothing about it, so its place
+        // stays as it was, even with that person elsewhere in the photo too
+        // (a reflection: the people check tells, the user may have left it).
+        let (odd, c) = face(&near(1, 3, 0.1), false);
+        assert_eq!(odd.keeps_place(&c, Some(&near(1, 3, 0.12)), &[]), kept);
+        assert_eq!(odd.keeps_place(&c, Some(&near(1, 3, 0.1)), &[7]), kept);
+        // A fingerprint taken sideways, unlike anyone, found again upright:
+        // kept when it looks like the rest of them, sorted again otherwise,
+        // and never into someone already elsewhere in the photo.
+        let (junk, c) = face(&near(5, 6, 0.3), false);
+        assert_eq!(junk.keeps_place(&c, Some(&near(0, 2, 0.15)), &[]), kept);
+        assert_eq!(junk.keeps_place(&c, Some(&near(4, 2, 0.1)), &[]), None);
+        assert_eq!(junk.keeps_place(&c, Some(&near(0, 2, 0.15)), &[7]), None);
+        // The user's word always stands.
+        let (by_hand, c) = face(&near(5, 6, 0.3), true);
+        let place = Some(Place { person: Some(7), by_hand: true, seen: true });
+        assert_eq!(by_hand.keeps_place(&c, Some(&near(4, 2, 0.1)), &[7]), place);
+    }
+
+    #[test]
+    fn each_face_is_found_again_once() {
+        let (around_two, left, right) = (TURNED_PAIRS[4].0, TURNED_PAIRS[4].1, TURNED_PAIRS[5].1);
+        let (face, beside) = (TURNED_PAIRS[6].1, TURNED_PAIRS[7].1);
+        let before = [around_two, TURNED_PAIRS[6].0];
+        // The box around two people is the one it overlaps most; the other
+        // is new. Someone beside a face found again is new too.
+        assert_eq!(found_again(&before, &[right, left, beside, face]), [None, Some(0), None, Some(1)]);
+        assert!(found_again(&before, &[]).is_empty());
+        assert_eq!(found_again(&[], &[face]), [None]);
     }
 }

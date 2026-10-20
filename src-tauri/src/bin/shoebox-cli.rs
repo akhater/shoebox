@@ -88,6 +88,15 @@
 //!       {"kind":"samePerson","personId":..,"otherId":..}   (or a JSON list of them)
 //!   shoebox-cli people-ignore <person-id>... [--show]   strangers: hidden from People, their
 //!       future faces still joining them (--show: shown again)
+//!   shoebox-cli turned-twice [--apply]   turned photos holding the same face twice: found while
+//!       the photo stood the wrong way, and again once upright. Lists them; --apply keeps the
+//!       newer face (box and fingerprint from the photo upright) with the older one's person
+//!       when the user put it there or the face still looks like them, and drops the older.
+//!       Two people overlapping are left alone. Every start does it once by itself
+//!   shoebox-cli turned-again [--apply]   photos the user turned (or said how they stand) holding
+//!       faces, and how many wait to be looked at for faces. --apply queues them all: faces found
+//!       while a photo stood the wrong way get their box and fingerprint from it upright, when
+//!       `faces` (or the window) next looks. Every start queues them once by itself
 //!
 //! People found since the user last looked at them show "(new)" / "(+N new photos)" in
 //! `shoebox-cli faces`; the window marks a person read when the user leaves their page:
@@ -529,6 +538,15 @@ fn main() -> anyhow::Result<()> {
             let check = faces.check_people(&cat, args[1..].iter().any(|a| a == "--all"))?;
             eprintln!("checked {} faces of {} people in {} ms", check.faces, check.people, t.elapsed().as_millis());
             println!("{}", serde_json::to_string_pretty(&check)?);
+        }
+        Some("turned-twice") => {
+            let faces = shoebox_lib::faces::FaceIndex::open(&cat)?;
+            let apply = args[1..].iter().any(|a| a == "--apply");
+            println!("{}", serde_json::to_string_pretty(&faces.mend_turned(&cat, apply)?)?);
+        }
+        Some("turned-again") => {
+            let apply = args[1..].iter().any(|a| a == "--apply");
+            println!("{}", serde_json::to_string_pretty(&shoebox_lib::faces::look_again_turned(&cat, apply)?)?);
         }
         Some("people-leave") => {
             // shoebox-cli people-leave '<finding JSON>'... [--back]
