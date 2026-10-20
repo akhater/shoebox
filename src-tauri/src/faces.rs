@@ -2764,8 +2764,8 @@ mod tests {
             person(1, Some("Omar Doe"), 30, false),
             person(2, Some("Jane Marlow"), 105, false),
             person(3, Some("Mara"), 2, false),
-            person(4, Some("Marie Roe"), 50, false),
-            person(5, Some("Marco"), 900, true),
+            person(4, Some("Marisol Roe"), 50, false),
+            person(5, Some("Marek"), 900, true),
         ];
         // Names starting "mar" (most photos first), then a word starting
         // "mar", then "mar" inside a word, then the ignored one.
