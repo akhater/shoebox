@@ -689,6 +689,10 @@ fn main() -> anyhow::Result<()> {
                 println!("out {} {:?}", o.name, o.output_type);
             }
         }
+        Some("gpu-check") => {
+            // Each model's answer to a test input on the GPU against the CPU's.
+            println!("{}", serde_json::to_string_pretty(&shoebox_lib::ai::gpu_check()?)?);
+        }
         Some("list") => {
             // Photos in the grid's order: shoebox-cli list [oldest|newest|name|added] [limit] [filters JSON] [scope JSON]
             let sort: Sort = match args.get(1) {
@@ -1044,7 +1048,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         _ => eprintln!(
-            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope] | missing | forget-missing <id>... | --in-bin | --all | turn right|left|half|back <id>... | sideways | upright-check [--again] | sideways-accept <id>... | --all | sideways-leave <id>... | --all | upright-eval <folder> [limit]"
+            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope] | missing | forget-missing <id>... | --in-bin | --all | turn right|left|half|back <id>... | sideways | upright-check [--again] | sideways-accept <id>... | --all | sideways-leave <id>... | --all | upright-eval <folder> [limit] | gpu-check"
         ),
     }
     Ok(())

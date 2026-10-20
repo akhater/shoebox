@@ -154,6 +154,13 @@ impl Upright {
             return Ok(());
         }
         let mut guard = self.model.lock().unwrap();
+        // Gone wrong on the GPU since it was loaded: loaded again, checked again.
+        if guard
+            .as_mut()
+            .is_some_and(|m| m.on_gpu && !crate::ai::still_right(&crate::models::upright_model(), &mut m.session))
+        {
+            *guard = None;
+        }
         if guard.is_none() {
             *guard = Some(Model::load()?);
         }

@@ -504,3 +504,39 @@ fn sideways_photos_wait_for_the_user() {
         cat.db().query_row("SELECT COUNT(*) FROM photos WHERE sideways IS NULL", [], |r| r.get(0)).unwrap();
     assert_eq!(unchecked, 1, "b only: a and c were decided by the user");
 }
+
+#[test]
+fn unsure_verdicts_are_looked_at_again_once() {
+    let (cat, _, _) = catalog("shoebox-unsure", 4);
+    let [a, b, c, d] = ["IMG_0.JPG", "IMG_1.JPG", "IMG_2.JPG", "IMG_3.JPG"].map(|n| photo_of(&cat, n));
+    // a: "upright" with no conviction, as from a GPU that got the model wrong;
+    // b: surely upright; c: a turn suggested; d: decided by the user.
+    let set = |cat: &Catalog| {
+        for (id, turn, sure) in [(a, 0, 0.45), (b, 0, 0.92), (c, 1, 0.93), (d, -1, 0.5)] {
+            cat.db()
+                .execute(
+                    "UPDATE photos SET sideways = ?1, sideways_p = ?2 WHERE id = ?3",
+                    rusqlite::params![turn, sure, id],
+                )
+                .unwrap();
+        }
+    };
+    let verdicts = |cat: &Catalog| {
+        [a, b, c, d].map(|id| {
+            cat.db()
+                .query_row("SELECT sideways FROM photos WHERE id = ?1", [id], |r| r.get::<_, Option<i64>>(0))
+                .unwrap()
+        })
+    };
+    set(&cat);
+    cat.db().execute_batch("PRAGMA user_version = 18;").unwrap();
+    let data = cat.data.clone();
+    drop(cat);
+    let cat = Catalog::open(data.clone()).unwrap();
+    assert_eq!(verdicts(&cat), [None, Some(0), Some(1), Some(-1)], "only the unsure one is looked at again");
+    // Once: an unsure verdict given after the upgrade stays.
+    set(&cat);
+    drop(cat);
+    let cat = Catalog::open(data).unwrap();
+    assert_eq!(verdicts(&cat), [Some(0), Some(0), Some(1), Some(-1)]);
+}

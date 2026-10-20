@@ -95,6 +95,14 @@ fn model_dir() -> PathBuf {
     crate::paths::models_dir().join("faces").join("buffalo_l")
 }
 
+fn detector() -> PathBuf {
+    model_dir().join("detection").join("model.onnx")
+}
+
+fn recogniser() -> PathBuf {
+    model_dir().join("recognition").join("model.onnx")
+}
+
 pub struct Detected {
     /// Pixels of the image it was found in.
     pub bbox: [f32; 4],
@@ -107,17 +115,29 @@ struct Models {
     det_in: String,
     rec: Session,
     rec_in: String,
-    on_gpu: bool,
+    det_gpu: bool,
+    rec_gpu: bool,
 }
 
 impl Models {
     fn load() -> Result<Self> {
         crate::models::require(crate::models::FACES)?;
-        let (det, g1) = crate::ai::session(&model_dir().join("detection").join("model.onnx"))?;
-        let (rec, g2) = crate::ai::session(&model_dir().join("recognition").join("model.onnx"))?;
+        let (det, det_gpu) = crate::ai::session(&detector())?;
+        let (rec, rec_gpu) = crate::ai::session(&recogniser())?;
         let det_in = det.inputs.first().map(|i| i.name.clone()).ok_or_else(|| anyhow!("detector has no input"))?;
         let rec_in = rec.inputs.first().map(|i| i.name.clone()).ok_or_else(|| anyhow!("recogniser has no input"))?;
-        Ok(Self { det, det_in, rec, rec_in, on_gpu: g1 && g2 })
+        Ok(Self { det, det_in, rec, rec_in, det_gpu, rec_gpu })
+    }
+
+    /// Both run on the GPU.
+    fn on_gpu(&self) -> bool {
+        self.det_gpu && self.rec_gpu
+    }
+
+    /// False when a model on the GPU has gone wrong since it was loaded.
+    fn still_right(&mut self) -> bool {
+        (!self.det_gpu || crate::ai::still_right(&detector(), &mut self.det))
+            && (!self.rec_gpu || crate::ai::still_right(&recogniser(), &mut self.rec))
     }
 
     /// Faces in `img`, best first. As InsightFace: the picture is fitted into
@@ -1406,6 +1426,10 @@ impl FaceIndex {
             return Ok(());
         }
         let mut guard = self.models.lock().unwrap();
+        // Gone wrong on the GPU since they were loaded: loaded again, checked again.
+        if guard.as_mut().is_some_and(|m| !m.still_right()) {
+            *guard = None;
+        }
         if guard.is_none() {
             *guard = Some(Models::load()?);
         }
@@ -1413,7 +1437,7 @@ impl FaceIndex {
         let mut p = crate::search::AiProgress {
             task: "faces".into(),
             total: todo.len() as u64,
-            gpu: models.on_gpu,
+            gpu: models.on_gpu(),
             ..Default::default()
         };
         progress(&p);

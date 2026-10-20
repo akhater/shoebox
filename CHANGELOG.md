@@ -41,9 +41,20 @@ Newest first. Same format and versioning as Argentum.
 - `shoebox-cli dates-check [--days N] [--all] [scope JSON]`,
   `dates-shift <photo-id>... --by <amount> | --to YYYY-MM-DD | --back`,
   `dates-undo` and `dates-leave` do the same headless (JSON out).
+- `shoebox-cli gpu-check`: each AI model's answer to a test input on the GPU
+  against the CPU's.
 
 ### Fixed
 
+- **Sideways photos found again on a GPU that gets the model wrong.** A GPU
+  can run an AI model and still get its answers wrong: on an Intel Arc, the
+  sideways check's answers all came out unsure, so it suggested no turn at
+  all (thousands of photos looked at, none found sideways). Each model on the
+  GPU now first answers a test input on both the GPU and the CPU; when the
+  answers differ, that model runs on the CPU, and the log says so. Checked
+  again before each batch of work, so a GPU that goes wrong while Shoebox is
+  open is caught too. The sideways check's unsure verdicts are looked at
+  again once, after the update.
 - **A turned photo no longer holds the same face twice.** After a turn,
   Shoebox looks at the photo again for faces it missed while it stood the
   wrong way. A face found then inside the loose box it had been given

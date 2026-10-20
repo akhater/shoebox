@@ -378,6 +378,19 @@ fn migrate(conn: &Connection) -> Result<()> {
         };
         conn.execute_batch(&format!("BEGIN; {column} {SCHEMA_DATES} COMMIT;"))?;
     }
+    if version < 19 {
+        // The sideways check's unsure verdicts are looked at again, once: a
+        // GPU that got the orientation model's answers wrong (now caught, see
+        // `ai::session`) left every photo it looked at "upright, unsure".
+        // The user's decisions (-1) and the turns suggested stay.
+        conn.execute_batch(&format!(
+            "BEGIN;
+             UPDATE photos SET sideways = NULL, sideways_p = NULL WHERE sideways = 0 AND sideways_p < {};
+             PRAGMA user_version = 19;
+             COMMIT;",
+            crate::upright::SURE
+        ))?;
+    }
     Ok(())
 }
 
