@@ -161,6 +161,10 @@ impl SearchIndex {
 
         let mut p = AiProgress { task: "search".into(), total: todo.len() as u64, ..Default::default() };
         let mut visual = self.visual.lock().unwrap();
+        // Gone wrong on the GPU since it was loaded: loaded again, checked again.
+        if visual.as_ref().is_some_and(|m| !m.still_right()) {
+            *visual = None;
+        }
         if visual.is_none() {
             *visual = Some(ClipVisual::load()?);
         }
