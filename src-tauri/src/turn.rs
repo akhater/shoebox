@@ -9,7 +9,9 @@
 //! a turn cut short by a stop is finished at the next start from the files as
 //! they are ([`settle`]), never turned twice. Faces keep their names and
 //! places, their boxes turned with the photo; the photo is then looked at
-//! again for faces missed while it stood the wrong way.
+//! again for faces missed while it stood the wrong way, and a face found
+//! again there takes the old one's place, with its box and fingerprint from
+//! the photo upright ([`faces::FaceIndex::store`]).
 
 use crate::catalog::Catalog;
 use crate::db::{PREVIEW_OK, PREVIEW_PENDING, SIDEWAYS_DECIDED};

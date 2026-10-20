@@ -9,12 +9,14 @@
 #![cfg(windows)]
 
 use image::{DynamicImage, GenericImageView, RgbImage};
+use rusqlite::{OptionalExtension, params};
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
-use shoebox_lib::faces::{Detected, FaceIndex};
+use shoebox_lib::faces::{Detected, FaceIndex, FaceTarget};
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::scan_root;
 use shoebox_lib::{imaging, turn, upright};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
 /// 320x240, red in its top-left corner: where the red is says how it stands.
@@ -70,6 +72,66 @@ fn face_box(cat: &Catalog, face: i64) -> [f64; 4] {
 
 fn near(a: [f64; 4], b: [f64; 4]) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3)
+}
+
+/// A fingerprint: one person per axis.
+fn axis(i: usize) -> Vec<f32> {
+    let mut v = vec![0.0; 512];
+    v[i] = 1.0;
+    v
+}
+
+/// A face found at `bbox` (pixels of the preview), its landmarks inside it.
+fn found(bbox: [f32; 4], v: Vec<f32>) -> (Detected, Vec<f32>) {
+    let [x1, y1, x2, y2] = bbox;
+    let at = |fx: f32, fy: f32| [x1 + fx * (x2 - x1), y1 + fy * (y2 - y1)];
+    let kps = [at(0.3, 0.4), at(0.7, 0.4), at(0.5, 0.6), at(0.35, 0.8), at(0.65, 0.8)].concat();
+    (Detected { bbox, kps: kps.try_into().unwrap(), score: 0.9 }, v)
+}
+
+/// A photo's faces: (id, person, placed by hand), oldest first.
+fn faces_of(cat: &Catalog, photo: i64) -> Vec<(i64, Option<i64>, bool)> {
+    cat.db()
+        .prepare("SELECT id, person_id, by_hand FROM faces WHERE photo_id = ?1 ORDER BY id")
+        .unwrap()
+        .query_map([photo], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// A face's fingerprint in faces.db.
+fn fingerprint(cat: &Catalog, face: i64) -> Option<Vec<f32>> {
+    let emb = rusqlite::Connection::open(cat.data.root.join("faces.db")).unwrap();
+    let blob: Option<Vec<u8>> =
+        emb.query_row("SELECT vec FROM emb WHERE face_id = ?1", [face], |r| r.get(0)).optional().unwrap();
+    blob.map(|b| b.chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect())
+}
+
+/// Two faces found while the photo stood sideways (loose boxes, poor
+/// fingerprints), then a quarter turn: the first was put in Ann by the
+/// user, the second went to someone new. Returns the faces turned with the
+/// photo, and Ann.
+fn found_sideways_then_turned(cat: &Catalog, faces: &FaceIndex, photo: i64) -> (Vec<i64>, i64) {
+    let preview = image::open(cat.data.preview_path(photo)).unwrap();
+    let sideways = vec![found([100.0, 60.0, 200.0, 180.0], axis(5)), found([220.0, 20.0, 300.0, 100.0], axis(7))];
+    faces.store(cat, photo, &preview, sideways).unwrap();
+    let first = faces_of(cat, photo)[0].0;
+    faces.reassign(cat, &[first], &FaceTarget::New { name: Some("Ann".into()) }).unwrap();
+    let ann = int(cat, "SELECT person_id FROM faces WHERE id = ?1", first);
+    turn::turn(cat, &[(photo, 1)]).unwrap();
+    (faces_of(cat, photo).iter().map(|f| f.0).collect(), ann)
+}
+
+/// Where the photo above stands upright (240x320), each a fraction of it: a
+/// tight box inside each turned one, and someone beside the first, inside
+/// its loose box but away from its middle.
+const ANN_UPRIGHT: [f32; 4] = [95.0, 125.0, 145.0, 175.0];
+const SECOND_UPRIGHT: [f32; 4] = [165.0, 245.0, 205.0, 285.0];
+const BESIDE: [f32; 4] = [140.0, 160.0, 180.0, 200.0];
+
+fn fraction(b: [f32; 4]) -> [f64; 4] {
+    [b[0] as f64 / 240.0, b[1] as f64 / 320.0, b[2] as f64 / 240.0, b[3] as f64 / 320.0]
 }
 
 #[test]
@@ -131,6 +193,11 @@ fn a_turn_changes_shoebox_copies_and_never_the_file() {
         |f: i64| -> i64 { emb.query_row("SELECT COUNT(*) FROM emb WHERE face_id = ?1", [f], |r| r.get(0)).unwrap() };
     assert_eq!((fingerprint(new_face), fingerprint(face)), (1, 0));
     assert_eq!(int(&cat, "SELECT COUNT(*) FROM check_left WHERE id = ?1", new_face), 1, "left as is follows the face");
+    assert_eq!(
+        int(&cat, "SELECT json_extract(seen, '$.faceId') FROM check_left WHERE id = ?1", new_face),
+        new_face,
+        "as the check reads it"
+    );
     assert_eq!(int(&cat, "SELECT COUNT(*) FROM face_scan WHERE photo_id = ?1", id), 0, "looked at again for faces");
     let ann = faces.people(&cat).unwrap().into_iter().find(|p| p.id == person).unwrap();
     assert_eq!((ann.name.as_deref(), ann.faces), (Some("Ann"), 1));
@@ -157,6 +224,116 @@ fn a_turn_changes_shoebox_copies_and_never_the_file() {
     assert_eq!(int(&cat, "SELECT turn FROM photos WHERE id = ?1", id), 0);
     assert!(red(&image::open(&preview).unwrap(), 10, 10));
     assert_eq!(std::fs::read(&file).unwrap(), original);
+}
+
+#[test]
+fn a_face_found_again_after_a_turn_takes_the_old_ones_place() {
+    let (cat, _, _) = catalog("shoebox-turn-found-again", 2);
+    let (a, b) = (photo_of(&cat, "IMG_0.JPG"), photo_of(&cat, "IMG_1.JPG"));
+    let faces = FaceIndex::open(&cat).unwrap();
+    // Bob, in the other photo.
+    let preview = |id: i64| image::open(cat.data.preview_path(id)).unwrap();
+    faces.store(&cat, b, &preview(b), vec![found([100.0, 60.0, 200.0, 180.0], axis(0))]).unwrap();
+    let bob = int(&cat, "SELECT person_id FROM faces WHERE photo_id = ?1", b);
+    faces.rename(&cat, bob, "Bob").unwrap();
+    let (turned, ann) = found_sideways_then_turned(&cat, &faces, a);
+    let stranger = faces_of(&cat, a)[1].1.unwrap();
+
+    // Looked at again upright: Ann, the second face (Bob, seen properly at
+    // last) and someone beside Ann.
+    let upright = vec![found(ANN_UPRIGHT, axis(1)), found(SECOND_UPRIGHT, axis(0)), found(BESIDE, axis(9))];
+    faces.store(&cat, a, &preview(a), upright).unwrap();
+
+    let now = faces_of(&cat, a);
+    assert_eq!(now.len(), 3, "each face once: {now:?}");
+    assert!(turned.iter().all(|f| now.iter().all(|n| n.0 != *f)), "the faces found sideways made room");
+    let (ann_face, second, beside) = (now[0], now[1], now[2]);
+    assert_eq!((ann_face.1, ann_face.2), (Some(ann), true), "the user's word stands");
+    assert!(near(face_box(&cat, ann_face.0), fraction(ANN_UPRIGHT)), "the box found upright");
+    assert_eq!(fingerprint(&cat, ann_face.0), Some(axis(1)), "the fingerprint found upright");
+    assert_eq!((second.1, second.2), (Some(bob), false), "a guess made sideways is made again");
+    assert!(beside.1.is_some_and(|p| ![ann, bob, stranger].contains(&p)), "someone else, kept apart");
+    for f in &turned {
+        assert!(fingerprint(&cat, *f).is_none() && !cat.data.face_path(*f).is_file(), "face {f} gone");
+    }
+    assert!(now.iter().all(|f| cat.data.face_path(f.0).is_file()));
+    assert_eq!(int(&cat, "SELECT faces FROM face_scan WHERE photo_id = ?1", a), 3);
+
+    // Nobody twice in the photo; everyone's faces counted once.
+    assert!(faces.check_people(&cat, false).unwrap().twice.is_empty());
+    let people = faces.people(&cat).unwrap();
+    let count = |id: i64| people.iter().find(|p| p.id == id).map(|p| p.faces);
+    assert_eq!((count(ann), count(bob), count(stranger)), (Some(1), Some(2), None));
+}
+
+#[test]
+fn faces_found_twice_before_are_mended_once() {
+    let (cat, _, _) = catalog("shoebox-turn-mend", 1);
+    let a = photo_of(&cat, "IMG_0.JPG");
+    let faces = FaceIndex::open(&cat).unwrap();
+    let (turned, ann) = found_sideways_then_turned(&cat, &faces, a);
+    drop(faces);
+    // As Shoebox did before: each face found again upright joined next to
+    // the old one, each in someone new, and so did someone beside Ann.
+    let emb = rusqlite::Connection::open(cat.data.root.join("faces.db")).unwrap();
+    let add = |bbox: [f32; 4], v: Vec<f32>| -> (i64, i64) {
+        let db = cat.db();
+        db.execute("INSERT INTO people (name, created_at) VALUES (NULL, 0)", []).unwrap();
+        let person = db.last_insert_rowid();
+        let [x1, y1, x2, y2] = fraction(bbox);
+        db.execute(
+            "INSERT INTO faces (photo_id, person_id, x1, y1, x2, y2, kps, score) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', 0.9)",
+            params![a, person, x1, y1, x2, y2],
+        )
+        .unwrap();
+        let face = db.last_insert_rowid();
+        let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        emb.execute("INSERT INTO emb (face_id, vec) VALUES (?1, ?2)", params![face, blob]).unwrap();
+        (face, person)
+    };
+    let (ann_upright, _) = add(ANN_UPRIGHT, axis(1));
+    let (second, second_person) = add(SECOND_UPRIGHT, axis(3));
+    let (beside, beside_person) = add(BESIDE, axis(9));
+    cat.db().execute("INSERT INTO face_scan (photo_id, model, faces) VALUES (?1, 'buffalo_l', 5)", [a]).unwrap();
+
+    // Listed, headless: the two faces found twice, nothing changed yet.
+    let cli = |args: &[&str]| -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_shoebox-cli"))
+            .args(args)
+            .env("SHOEBOX_DATA", &cat.data.root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let listed = cli(&["turned-twice"]);
+    assert_eq!((listed["photos"].as_i64(), listed["done"].as_bool()), (Some(1), Some(false)));
+    let mut pairs: Vec<(i64, i64, bool)> = listed["twice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["gone"].as_i64().unwrap(), t["kept"].as_i64().unwrap(), t["tookPlace"].as_bool().unwrap()))
+        .collect();
+    pairs.sort();
+    assert_eq!(pairs, [(turned[0], ann_upright, true), (turned[1], second, false)]);
+    assert_eq!(faces_of(&cat, a).len(), 5);
+
+    // Mended at the next start, once.
+    cat.db().execute("DELETE FROM meta WHERE key = 'turned_faces_mended'", []).unwrap();
+    let faces = FaceIndex::open(&cat).unwrap();
+    let now = faces_of(&cat, a);
+    assert_eq!(now.iter().map(|f| f.0).collect::<Vec<_>>(), [ann_upright, second, beside], "the newer faces stay");
+    assert_eq!((now[0].1, now[0].2), (Some(ann), true), "the user's word follows the face");
+    assert_eq!((now[1].1, now[2].1), (Some(second_person), Some(beside_person)), "their own places otherwise");
+    for f in &turned {
+        assert!(fingerprint(&cat, *f).is_none() && !cat.data.face_path(*f).is_file(), "face {f} gone");
+    }
+    assert_eq!(fingerprint(&cat, ann_upright), Some(axis(1)));
+    assert_eq!(int(&cat, "SELECT faces FROM face_scan WHERE photo_id = ?1", a), 3);
+    assert!(faces.check_people(&cat, false).unwrap().twice.is_empty());
+    let ann_now = faces.people(&cat).unwrap().into_iter().find(|p| p.id == ann).unwrap();
+    assert_eq!(ann_now.faces, 1);
+    assert!(cli(&["turned-twice"])["twice"].as_array().unwrap().is_empty(), "nothing left to mend");
 }
 
 #[test]

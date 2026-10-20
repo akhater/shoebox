@@ -4,6 +4,20 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.43.2 - unreleased
 
+### Fixed
+
+- **A turned photo no longer holds the same face twice.** After a turn,
+  Shoebox looks at the photo again for faces it missed while it stood the
+  wrong way. A face found then inside the loose box it had been given
+  sideways was taken for someone else, and joined next to it, often in the
+  same person: People's check said "twice in one photo". A face found again
+  now takes the old one's place, with its box and fingerprint from the photo
+  upright; it keeps its person when the user put it there, or when it still
+  looks like them, and is sorted again otherwise. Two people overlapping
+  stay two faces. Faces found twice before this are mended once, at the next
+  start (`shoebox-cli turned-twice [--apply]` lists or mends them). Findings
+  of the people check left as is about a turned face now stay left.
+
 ## 26.43.1 - 2026-10-20
 
 ### Added
