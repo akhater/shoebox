@@ -13,6 +13,7 @@ mod cli_faces_reset;
 mod cull_assistant;
 mod damaged_files;
 mod date_pages;
+mod dates;
 mod days;
 mod faces_by_date;
 mod faces_saved;

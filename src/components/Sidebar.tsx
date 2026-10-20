@@ -79,6 +79,8 @@ interface Props {
   onMakePrivate: (s: Scope) => void;
   onAddFolder: () => void;
   onRescan: (rootId: number) => void;
+  /** "Check dates" in a folder and those in it: photos whose camera says another date than its name. */
+  onCheckDates: (t: FolderTarget) => void;
   onRegenerate: (rootId: number) => void;
   onRemove: (root: RootInfo) => void;
   onRename: (volumeId: number, label: string) => void;
@@ -964,6 +966,12 @@ function FolderMenu({
       <hr />
       <button disabled={!t.v.online || busy || waiting} onClick={act(() => p.onRescan(t.rootId))}>
         Scan again
+      </button>
+      <button
+        onClick={act(() => p.onCheckDates(t))}
+        title="Photos whose camera says another date than the folder's name (2006-11-04 Birthday): a camera clock set wrong"
+      >
+        Check dates…
       </button>
       {p.privateUnlocked && (
         <button

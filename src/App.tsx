@@ -4,6 +4,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   ArchiveX,
   ArrowLeft,
+  CalendarClock,
   CalendarDays,
   Eye,
   ListChecks,
@@ -32,6 +33,9 @@ import {
   BIN,
   api,
   cull,
+  datesApi,
+  type DateChange,
+  type DateFinding,
   headOf,
   people,
   fmtBytes,
@@ -63,6 +67,7 @@ import {
   type Progress,
   type Report,
   type RootInfo,
+  type Shifted,
   sameScope,
   type Scope,
   SORTS,
@@ -76,6 +81,8 @@ import {
 } from "./api";
 import { CalendarView } from "./components/CalendarView";
 import { CullView } from "./components/CullView";
+import { DatesCheckDialog, movedText } from "./components/DatesCheckDialog";
+import { FixDatesDialog } from "./components/FixDatesDialog";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
 import { StraysDialog } from "./components/StraysDialog";
@@ -353,6 +360,12 @@ export default function App() {
   const [namingTitle, setNamingTitle] = useState(false);
   const personHere = scope.kind === "person" ? peopleList.find((p) => p.id === scope.id) : undefined;
   useEffect(() => setNamingTitle(false), [scope]);
+  // "Check dates" (in a folder and those in it, or everywhere), and "Fix dates" for some photos.
+  const [datesCheck, setDatesCheck] = useState<{ where: { volumeId: number; relPath: string; name: string } | null } | null>(
+    null,
+  );
+  const [fixingDates, setFixingDates] = useState<number[] | null>(null);
+  const datesOpen = datesCheck != null || fixingDates != null;
   // Photos being tagged from the grid (T, or the Tag button).
   const [tagging, setTagging] = useState<number[] | null>(null);
   // Escape closes it - unless there's text in the tag box, which Escape clears first.
@@ -990,7 +1003,7 @@ export default function App() {
 
   // Escape closes the calendar first.
   useEffect(() => {
-    if (!calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning) return;
+    if (!calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning || datesOpen) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (e.key !== "Escape" || (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"))) return;
@@ -999,11 +1012,22 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning]);
+  }, [calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning, datesOpen]);
 
   // (Cull has its own Escape: Done.)
   useEffect(() => {
-    if (!trail.length || view === "cull" || calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning)
+    if (
+      !trail.length ||
+      view === "cull" ||
+      calendar ||
+      viewerId != null ||
+      deleteOpen ||
+      settingsOpen ||
+      straysFor ||
+      tagging ||
+      reassigning ||
+      datesOpen
+    )
       return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -1262,12 +1286,12 @@ export default function App() {
     gridTop.current = i;
   });
 
-  // A new place starts with nothing selected, or with the photo it was reached from.
-  const selectOnArrival = useRef<number | null>(null);
+  // A new place starts with nothing selected, or with the photos it was reached from.
+  const selectOnArrival = useRef<number[] | null>(null);
   useEffect(() => {
-    const id = selectOnArrival.current;
+    const ids = selectOnArrival.current;
     selectOnArrival.current = null;
-    setSelected(new Set(id == null ? [] : [id]));
+    setSelected(new Set(ids ?? []));
   }, [scope, query, filters]);
 
   /** Closes the viewer; the photos selected in its filmstrip stay selected in the grid. */
@@ -1292,9 +1316,48 @@ export default function App() {
     setTyped("");
     setQuery("");
     setFocusId(id);
-    selectOnArrival.current = id;
+    selectOnArrival.current = id == null ? null : [id];
     setGridFocus((n) => n + 1);
     facesChanged.current = false; // the new place is loaded afresh
+  };
+
+  /** From "Check dates": the photos' folder, those photos selected (Fix dates is then one click). */
+  const showDates = (f: DateFinding) => {
+    const to = folderScope(overview, f.volumeId, f.relPath);
+    setFocusId(f.photos[0]);
+    setGridFocus((n) => n + 1);
+    if (sameScope(to, scope) && !query && filters === NO_FILTERS) {
+      setSelected(new Set(f.photos));
+      return;
+    }
+    drill(to);
+    setTyped("");
+    setQuery("");
+    setFilters(NO_FILTERS);
+    selectOnArrival.current = f.photos;
+  };
+  /** "Fix dates" done: said in the status bar, with Undo. */
+  const datesMoved = (done: Shifted, how: DateChange) => {
+    setFixingDates(null);
+    setGridFocus((n) => n + 1);
+    const n = done.photos.length;
+    const photosText = n === 1 ? "1 photo" : `${fmtNum(n)} photos`;
+    setMessage({
+      text: how.kind === "back" && n ? `${photosText} back on their files' dates.` : movedText(done),
+      action: n
+        ? {
+            label: "Undo",
+            run: () =>
+              run(
+                datesApi.undo(done).then(() => {
+                  setMessage({ text: n === 1 ? "The photo's date is as before." : "The photos' dates are as before." });
+                  refresh();
+                }),
+              ),
+          }
+        : undefined,
+    });
+    refresh();
   };
 
   // The selected photo's basics, for the status bar.
@@ -1437,6 +1500,7 @@ export default function App() {
         onMakePrivate={makeFolderPrivate}
         onAddFolder={addFolder}
         onRescan={(id) => run(api.rescan(id))}
+        onCheckDates={(t) => setDatesCheck({ where: { volumeId: t.v.id, relPath: t.relPath, name: t.name } })}
         onRename={(id, label) => run(api.renameVolume(id, label).then(refresh))}
         onRenameFolder={async (vid, rel, name) => {
           try {
@@ -1893,7 +1957,8 @@ export default function App() {
                 !privateNotice &&
                 !straysFor &&
                 !tagging &&
-                !reassigning
+                !reassigning &&
+                !datesOpen
               }
               focusRequest={gridFocus}
               focusIndex={focusIndex}
@@ -1925,6 +1990,13 @@ export default function App() {
                   title="Tag the selected photos (T)"
                 >
                   <TagIcon size={15} /> Tag…
+                </button>
+                <button
+                  className="btn ghost"
+                  onClick={() => setFixingDates(shown.ids.filter((id) => selected.has(id)))}
+                  title="Move their dates in Shoebox (a camera clock set wrong): the files keep their own"
+                >
+                  <CalendarClock size={15} /> Fix dates…
                 </button>
                 {sidewaysView ? (
                   <>
@@ -2126,11 +2198,36 @@ export default function App() {
           version={version}
           update={update}
           onRegenerateAll={() => regenerate(null)}
+          onCheckDates={() => {
+            setSettingsTab(null);
+            setDatesCheck({ where: null });
+          }}
           privateStatus={privateStatus}
           onPrivateStatus={privateChanged}
           onUnlockPrivate={() => setPrivateAsk({ mode: "unlock" })}
           privateQuieted={privateQuieted}
           onClose={() => setSettingsTab(null)}
+        />
+      )}
+      {datesCheck && (
+        <DatesCheckDialog
+          where={datesCheck.where}
+          onChanged={refreshSoon}
+          onShow={showDates}
+          onClose={() => {
+            setDatesCheck(null);
+            setGridFocus((n) => n + 1);
+          }}
+        />
+      )}
+      {fixingDates && (
+        <FixDatesDialog
+          ids={fixingDates}
+          onDone={datesMoved}
+          onClose={() => {
+            setFixingDates(null);
+            setGridFocus((n) => n + 1);
+          }}
         />
       )}
       {privateAsk && (

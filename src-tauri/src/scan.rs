@@ -749,9 +749,13 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
         let focus = focus::stored(&tx, meta.focus.as_ref())?;
         let result = if let Some(pid) = same_fp.or(edited).or(recaptured) {
             // New content is looked at again by the upright model, unless the
-            // user has decided how the photo stands.
+            // user has decided how the photo stands. A date the user corrected
+            // stays while the file gives the date it was corrected from.
             tx.execute(
-                "UPDATE photos SET fingerprint = ?1, capture_key = ?2, taken_ts = ?3, taken_exif = ?4, make = ?5,
+                "UPDATE photos SET fingerprint = ?1, capture_key = ?2,
+                        taken_ts = CASE WHEN taken_original = ?3 THEN taken_ts ELSE ?3 END,
+                        taken_original = CASE WHEN taken_original = ?3 THEN taken_original END,
+                        taken_exif = ?4, make = ?5,
                         model = ?6, lens = COALESCE(?7, lens), width = ?8, height = ?9, iso = ?10, fnumber = ?11, exposure = ?12,
                         focal = ?13, preview_state = ?14, error = ?15, lens_read = ?17,
                         sideways = CASE WHEN ?18 AND COALESCE(sideways, 0) <> ?19 THEN NULL ELSE sideways END,

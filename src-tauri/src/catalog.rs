@@ -1047,7 +1047,7 @@ impl Catalog {
                 &format!(
                     "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
                             exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown, p.turn,
-                            MAX(COALESCE(p.sideways, 0), 0), p.focus, p.private
+                            MAX(COALESCE(p.sideways, 0), 0), p.focus, p.private, p.taken_original
                        FROM photos p WHERE id = ?1 AND {}",
                     self.shown_sql("p")
                 ),
@@ -1061,6 +1061,7 @@ impl Catalog {
                             kind: r.get(1)?,
                             taken_ts: r.get(2)?,
                             taken_from_camera: r.get::<_, i64>(3)? != 0,
+                            taken_original: r.get(22)?,
                             make: r.get(4)?,
                             model: r.get(5)?,
                             lens_in_file: r.get(6)?,
@@ -2104,6 +2105,8 @@ pub struct PhotoDetail {
     pub kind: String,
     pub taken_ts: Option<i64>,
     pub taken_from_camera: bool,
+    /// The date its file gives, when the user corrected `taken_ts` (see dates.rs).
+    pub taken_original: Option<i64>,
     pub make: Option<String>,
     pub model: Option<String>,
     /// Camera and lens as shown everywhere (their Gear names); None when the file doesn't say.

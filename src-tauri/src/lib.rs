@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod catalog;
 pub mod cull;
+pub mod dates;
 pub mod db;
 pub mod embedded;
 pub mod faces;
@@ -914,6 +915,11 @@ pub fn run() {
             commands::unmerge_people,
             commands::check_people,
             commands::leave_as_is,
+            commands::check_dates,
+            commands::leave_dates,
+            commands::dates_of,
+            commands::change_dates,
+            commands::undo_dates,
             commands::ignore_people,
             commands::regroup_faces,
             commands::reassign_faces,

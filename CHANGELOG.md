@@ -23,6 +23,24 @@ Newest first. Same format and versioning as Argentum.
   turns it back on).
 - `shoebox-cli private --name '<name>'` names the space of the password read
   from stdin; it must have private photos.
+- **Fix dates.** A camera whose clock was wrong (never set, reset by a flat
+  battery, a month off) dates its photos wrong, and the timeline, the
+  calendar and People's ages follow it. Check dates (a folder's menu, or
+  Settings for the whole catalog) lists the folders named with a date
+  ("2006-11-04 Birthday", a range such as "2005-02-26 03-04 Trip", or
+  "2006-08-20 24 25 29") whose photos from one camera are more than 3 days
+  away from that date and from the other photos there; a folder inside a
+  dated one takes its date. Each finding moves those photos to the folder's
+  day keeping the time of day, or to another date, with Undo; Leave as is
+  keeps a finding out of the check. Fix dates in the selection bar moves any
+  photos to a day (time of day and spacing kept) or by days, hours and
+  minutes, or back to their files' dates. Only the catalog changes: the
+  files keep their own date, shown in the info panel ("Camera said"), and a
+  rescan keeps the correction while the file still gives the same date.
+  Faces count for the corrected month at once.
+- `shoebox-cli dates-check [--days N] [--all] [scope JSON]`,
+  `dates-shift <photo-id>... --by <amount> | --to YYYY-MM-DD | --back`,
+  `dates-undo` and `dates-leave` do the same headless (JSON out).
 
 ### Fixed
 
