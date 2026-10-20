@@ -21,6 +21,10 @@
 //! without the password (a scan making its preview again, a stop to finish),
 //! and one photo's key says nothing about another's. Opening a space finds
 //! its photos by working out their keys; only those it finds can be opened.
+//!
+//! A space can have a name, kept the same way: sealed to each of its photos
+//! (`private_names`). Every private photo carries one, all the same size,
+//! named or not, so the catalog doesn't tell which spaces have a name.
 
 use crate::catalog::Catalog;
 use crate::db::PREVIEW_OK;
@@ -51,6 +55,16 @@ const HEAD: usize = 4 + 32;
 
 /// The catalog's salt for passwords (`meta` table): one for every space.
 const SALT_KEY: &str = "private_salt";
+
+/// A space's name has at most this many characters.
+pub const NAME_CHARS: usize = 40;
+/// What every sealed name holds, whatever its length: a length byte, the
+/// name (UTF-8, at most 4 bytes a character), then zeros.
+const NAME_BYTES: usize = 1 + NAME_CHARS * 4;
+/// The length byte of a photo whose space's name isn't known: made private
+/// by a Shoebox before names, it is given one at the next start (no password
+/// needed), and the real one when its space is next opened.
+const NAME_UNKNOWN: u8 = 0xFF;
 
 /// A password's seed: everything its space needs.
 type Seed = Zeroizing<[u8; 32]>;
@@ -102,6 +116,44 @@ pub fn open(secret: &SecretKey, sealed: &[u8]) -> Result<Vec<u8>> {
     secret.unseal(&sealed[HEAD..]).map_err(|_| anyhow!("A private photo's copy is damaged"))
 }
 
+/// A space's name as given: trimmed, at most [`NAME_CHARS`] characters. "" = none.
+pub fn check_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.chars().count() > NAME_CHARS {
+        bail!("A name has at most {NAME_CHARS} characters.");
+    }
+    if name.chars().any(char::is_control) {
+        bail!("A name can't hold control characters.");
+    }
+    Ok(name.to_string())
+}
+
+/// A space's name sealed to one of its photos (`None`: not known yet).
+fn seal_name(public: &PublicKey, name: Option<&str>) -> Result<Vec<u8>> {
+    let mut plain = Zeroizing::new(vec![0u8; NAME_BYTES]);
+    match name {
+        Some(name) => {
+            if name.len() >= NAME_BYTES {
+                bail!("A name has at most {NAME_CHARS} characters.");
+            }
+            plain[0] = name.len() as u8;
+            plain[1..=name.len()].copy_from_slice(name.as_bytes());
+        }
+        None => plain[0] = NAME_UNKNOWN,
+    }
+    public.seal(&mut OsRng, &plain).map_err(|_| anyhow!("Couldn't seal a private space's name"))
+}
+
+/// The name a photo carries; `None` when it doesn't know it (or can't be read).
+fn open_name(secret: &SecretKey, sealed: &[u8]) -> Option<String> {
+    let plain = Zeroizing::new(secret.unseal(sealed).ok()?);
+    let n = *plain.first()? as usize;
+    if n == NAME_UNKNOWN as usize {
+        return None;
+    }
+    String::from_utf8(plain.get(1..=n)?.to_vec()).ok()
+}
+
 /// The space open now, in this process: its seed and its photos (by their
 /// public key). Each process starts locked; only the window opens one.
 #[derive(Default)]
@@ -112,6 +164,10 @@ pub struct Vault {
 struct Open {
     seed: Seed,
     photos: HashMap<[u8; 32], i64>,
+    /// Its name ("" = none). An empty space keeps it here until its first photos.
+    name: String,
+    /// None of its photos carries its name yet (all made private before names).
+    name_unkept: bool,
 }
 
 impl Vault {
@@ -126,6 +182,32 @@ impl Vault {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map_or_else(HashSet::new, |o| o.photos.values().copied().collect())
+    }
+
+    /// How many photos the space open now holds (0 while locked).
+    pub fn count(&self) -> usize {
+        self.open.read().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |o| o.photos.len())
+    }
+
+    /// The name of the space open now ("" = none; `None` while locked).
+    pub fn name(&self) -> Option<String> {
+        self.open.read().unwrap_or_else(|e| e.into_inner()).as_ref().map(|o| o.name.clone())
+    }
+
+    fn set_name(&self, name: String) {
+        if let Some(o) = self.open.write().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            o.name = name;
+            o.name_unkept = false;
+        }
+    }
+
+    /// Whether its photos still need its name (once: it is then given them).
+    fn take_name_unkept(&self) -> bool {
+        self.open
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .is_some_and(|o| std::mem::take(&mut o.name_unkept))
     }
 
     pub fn lock(&self) {
@@ -171,15 +253,23 @@ impl std::fmt::Display for Locked {
 
 impl std::error::Error for Locked {}
 
-/// What the window may know: whether a space is open. Nothing about others.
+/// What the window may know: whether a space is open, how many photos it
+/// holds (0 for a new or mistyped password) and its name. Nothing about others.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     pub unlocked: bool,
+    pub photos: usize,
+    /// Its name, if it has one.
+    pub name: Option<String>,
 }
 
 pub fn status(cat: &Catalog) -> Status {
-    Status { unlocked: cat.vault.is_unlocked() }
+    Status {
+        unlocked: cat.vault.is_unlocked(),
+        photos: cat.vault.count(),
+        name: cat.vault.name().filter(|n| !n.is_empty()),
+    }
 }
 
 /// The catalog's salt, made the first time a password is used.
@@ -227,13 +317,54 @@ fn photos_of(cat: &Catalog, seed: &Seed) -> Result<HashMap<[u8; 32], i64>> {
         .collect())
 }
 
+/// The name the photos of a space carry ("" = none), and whether any does.
+/// They all carry the same, but for those made private before names: the
+/// first that knows it.
+fn name_in(cat: &Catalog, seed: &Seed, photos: &HashMap<[u8; 32], i64>) -> Result<(String, bool)> {
+    if photos.is_empty() {
+        return Ok((String::new(), true));
+    }
+    let ids: HashSet<i64> = photos.values().copied().collect();
+    let db = cat.read()?;
+    let mut stmt = db.prepare("SELECT photo_id, name FROM private_names")?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let id: i64 = r.get(0)?;
+        if ids.contains(&id)
+            && let Some(name) = open_name(&photo_key(seed, id), &r.get::<_, Vec<u8>>(1)?)
+        {
+            return Ok((name, true));
+        }
+    }
+    Ok((String::new(), false))
+}
+
+/// Gives photos of the space of `seed` its name, sealed to each.
+fn keep_name(cat: &Catalog, seed: &Seed, ids: &[i64], name: &str) -> Result<()> {
+    let sealed: Vec<(i64, Vec<u8>)> = ids
+        .iter()
+        .map(|&id| Ok((id, seal_name(&photo_key(seed, id).public_key(), Some(name))?)))
+        .collect::<Result<_>>()?;
+    let mut db = cat.db();
+    let tx = db.transaction()?;
+    for (id, s) in &sealed {
+        tx.execute(
+            "INSERT OR REPLACE INTO private_names (photo_id, name) SELECT id, ?2 FROM photos WHERE id = ?1 AND private = 1",
+            params![id, s],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Opens the space of `password` in this process, until [`lock`]: its
 /// photos show, in their places and in the Private view. Never refused (but
 /// for a password too short): a password nobody used yet opens an empty space.
 pub fn unlock(cat: &Catalog, password: &str) -> Result<Status> {
     let seed = seed_for(cat, password)?;
     let photos = photos_of(cat, &seed)?;
-    *cat.vault.open.write().unwrap_or_else(|e| e.into_inner()) = Some(Open { seed, photos });
+    let (name, kept) = name_in(cat, &seed, &photos)?;
+    *cat.vault.open.write().unwrap_or_else(|e| e.into_inner()) = Some(Open { seed, photos, name, name_unkept: !kept });
     cat.note_shown_changed();
     log::info!("private photos: unlocked");
     Ok(status(cat))
@@ -261,32 +392,65 @@ pub fn hide(cat: &Catalog, photo_ids: &[i64], confirm: Option<&str>) -> Result<u
             Some(_) => {}
         }
     }
-    hide_with(cat, &seed, photo_ids)
+    hide_with(cat, &seed, &cat.vault.name().unwrap_or_default(), photo_ids)
 }
 
 /// [`hide`] headless: the space of `password`, opened only to put photos in.
 /// A password with no photos yet needs `new` (a typo would start a space).
 pub fn hide_with_password(cat: &Catalog, password: &str, photo_ids: &[i64], new: bool) -> Result<usize> {
     let seed = seed_for(cat, password)?;
-    if !new && photos_of(cat, &seed)?.is_empty() {
+    let photos = photos_of(cat, &seed)?;
+    if !new && photos.is_empty() {
         bail!("No private photos have this password yet. If it is the one you mean, add --new.");
     }
-    hide_with(cat, &seed, photo_ids)
+    hide_with(cat, &seed, &name_in(cat, &seed, &photos)?.0, photo_ids)
 }
 
-fn hide_with(cat: &Catalog, seed: &Seed, photo_ids: &[i64]) -> Result<usize> {
+/// Names the space of `password` headless ("" = no name): it must have
+/// photos (the name is kept with them; a typo would name nothing).
+pub fn rename_with_password(cat: &Catalog, password: &str, name: &str) -> Result<()> {
+    let name = check_name(name)?;
+    let seed = seed_for(cat, password)?;
+    let ids: Vec<i64> = photos_of(cat, &seed)?.into_values().collect();
+    if ids.is_empty() {
+        bail!("No private photos have this password yet: a name is kept with its photos.");
+    }
+    keep_name(cat, &seed, &ids, &name)
+}
+
+/// Names the space open now ("" = no name). Kept with each of its photos; an
+/// empty space keeps it until it is locked, or given to its first photos.
+pub fn rename(cat: &Catalog, name: &str) -> Result<Status> {
+    let name = check_name(name)?;
+    let seed = cat.vault.seed().ok_or(Locked)?;
+    let ids: Vec<i64> = cat.vault.ids().into_iter().collect();
+    keep_name(cat, &seed, &ids, &name)?;
+    cat.vault.set_name(name);
+    log::info!("private photos: the space open was renamed");
+    Ok(status(cat))
+}
+
+fn hide_with(cat: &Catalog, seed: &Seed, name: &str, photo_ids: &[i64]) -> Result<usize> {
     let ids = cat.shown_ids(photo_ids)?;
-    let keys: Vec<(i64, PublicKey)> = ids.iter().map(|&id| (id, photo_key(seed, id).public_key())).collect();
+    let keys: Vec<(i64, PublicKey, Vec<u8>)> = ids
+        .iter()
+        .map(|&id| {
+            let public = photo_key(seed, id).public_key();
+            let name = seal_name(&public, Some(name))?;
+            Ok((id, public, name))
+        })
+        .collect::<Result<_>>()?;
     let mut made = Vec::new();
     {
         let mut db = cat.db();
         let tx = db.transaction()?;
-        for (id, public) in &keys {
+        for (id, public, name) in &keys {
             if tx.execute(
                 "UPDATE photos SET private = 1, seal_to = ?1 WHERE id = ?2 AND private = 0",
                 params![public.as_bytes().as_slice(), id],
             )? > 0
             {
+                tx.execute("INSERT OR REPLACE INTO private_names (photo_id, name) VALUES (?1, ?2)", params![id, name])?;
                 made.push((*id, public.clone()));
             }
         }
@@ -324,6 +488,7 @@ pub fn show(cat: &Catalog, photo_ids: &[i64]) -> Result<usize> {
         let tx = db.transaction()?;
         for id in &ids {
             tx.execute("UPDATE photos SET private = 0, seal_to = NULL WHERE id = ?1", [id])?;
+            tx.execute("DELETE FROM private_names WHERE photo_id = ?1", [id])?;
         }
         tx.commit()?;
     }
@@ -346,7 +511,39 @@ pub fn settle(cat: &Catalog) -> Result<usize> {
     if n > 0 {
         log::info!("private photos: copies of {n} photos sealed after a stop");
     }
+    settle_names(cat)?;
     Ok(n)
+}
+
+/// Every private photo carries a sealed name, and only they do: one made
+/// private before names (or by an older Shoebox) gets "not known yet" until
+/// its space is opened.
+fn settle_names(cat: &Catalog) -> Result<()> {
+    let rows: Vec<(i64, Vec<u8>)> = cat
+        .read()?
+        .prepare(
+            "SELECT id, seal_to FROM photos WHERE private = 1 AND seal_to IS NOT NULL
+               AND id NOT IN (SELECT photo_id FROM private_names)",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let sealed: Vec<(i64, Vec<u8>)> = rows
+        .into_iter()
+        .filter_map(|(id, to)| Some((id, PublicKey::from(<[u8; 32]>::try_from(to).ok()?))))
+        .map(|(id, public)| Ok((id, seal_name(&public, None)?)))
+        .collect::<Result<_>>()?;
+    let mut db = cat.db();
+    let tx = db.transaction()?;
+    for (id, s) in &sealed {
+        tx.execute("INSERT OR REPLACE INTO private_names (photo_id, name) VALUES (?1, ?2)", params![id, s])?;
+    }
+    let gone =
+        tx.execute("DELETE FROM private_names WHERE photo_id NOT IN (SELECT id FROM photos WHERE private = 1)", [])?;
+    tx.commit()?;
+    if !sealed.is_empty() || gone > 0 {
+        log::info!("private photos: names settled ({} added, {gone} removed)", sealed.len());
+    }
+    Ok(())
 }
 
 /// Once unlocked: face pictures of its photos lost while locked are cut
@@ -355,6 +552,12 @@ pub fn after_unlock(cat: &Catalog) -> Result<usize> {
     let ids = cat.vault.ids();
     if ids.is_empty() {
         return Ok(0);
+    }
+    // Made private before names: its photos are given the space's name ("").
+    if cat.vault.take_name_unkept()
+        && let (Some(seed), Some(name)) = (cat.vault.seed(), cat.vault.name())
+    {
+        keep_name(cat, &seed, &ids.iter().copied().collect::<Vec<_>>(), &name)?;
     }
     let faces: Vec<(i64, i64)> = cat
         .read()?
@@ -675,12 +878,37 @@ mod tests {
 
         let vault = Vault::default();
         assert!(vault.open(&sealed).unwrap_err().is::<Locked>());
-        *vault.open.write().unwrap() = Some(Open { seed: b, photos: HashMap::new() });
+        *vault.open.write().unwrap() =
+            Some(Open { seed: b, photos: HashMap::new(), name: String::new(), name_unkept: false });
         assert!(vault.open(&sealed).unwrap_err().is::<Locked>(), "not in the space open");
-        *vault.open.write().unwrap() = Some(Open { seed: a, photos: HashMap::from([(*public.as_bytes(), 7)]) });
+        let photos = HashMap::from([(*public.as_bytes(), 7)]);
+        *vault.open.write().unwrap() = Some(Open { seed: a, photos, name: String::new(), name_unkept: false });
         assert_eq!(vault.open(&sealed).unwrap(), photo);
         assert_eq!(vault.ids(), HashSet::from([7]));
         vault.lock();
         assert!(!vault.is_unlocked() && vault.ids().is_empty());
+    }
+
+    #[test]
+    fn a_name_opens_only_in_its_space_and_never_shows_its_length() {
+        let (a, b) = (quick_seed("correct horse"), quick_seed("battery staple"));
+        let public = photo_key(&a, 7).public_key();
+        let named = seal_name(&public, Some("Family")).unwrap();
+        assert_eq!(open_name(&photo_key(&a, 7), &named).as_deref(), Some("Family"));
+        assert_eq!(open_name(&photo_key(&b, 7), &named), None, "another password");
+        assert_eq!(open_name(&photo_key(&a, 8), &named), None, "another photo");
+        // Named or not, long or short, not known yet: all the same size.
+        let longest = "é".repeat(NAME_CHARS);
+        let sizes: HashSet<usize> = [Some(""), Some("Family"), Some(longest.as_str()), None]
+            .iter()
+            .map(|n| seal_name(&public, *n).unwrap().len())
+            .collect();
+        assert_eq!(sizes.len(), 1);
+        assert_eq!(open_name(&photo_key(&a, 7), &seal_name(&public, Some("")).unwrap()).as_deref(), Some(""));
+        assert_eq!(open_name(&photo_key(&a, 7), &seal_name(&public, None).unwrap()), None, "not known yet");
+        assert_eq!(check_name("  Family  ").unwrap(), "Family");
+        assert_eq!(check_name(&longest).unwrap(), longest);
+        assert!(check_name(&"x".repeat(NAME_CHARS + 1)).is_err());
+        assert!(check_name("a\nb").is_err());
     }
 }

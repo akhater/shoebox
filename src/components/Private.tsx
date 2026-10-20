@@ -1,6 +1,6 @@
-import { LockKeyhole, LockKeyholeOpen, X } from "lucide-react";
+import { HardDrive, KeyRound, Layers, LockKeyhole, LockKeyholeOpen, ShieldAlert, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { MIN_PASSWORD, PRIVATE_SHORTCUT, privateApi, type PrivateStatus } from "../api";
+import { MIN_PASSWORD, PRIVATE_NAME_CHARS, PRIVATE_SHORTCUT, privateApi, type PrivateStatus } from "../api";
 
 /**
  * The password box for private photos. "unlock" (Ctrl+Shift+L): any password opens its own
@@ -106,6 +106,142 @@ export function PrivateDialog({
   );
 }
 
+/**
+ * What a password can't undo, once it has opened a space. Always shown when the space holds no
+ * photos: a new password and a mistyped one look the same, and nothing else says so. For a
+ * space with photos, until "Don't show this again" (Settings > Private photos turns it back on).
+ */
+export function PrivateNotice({
+  photos,
+  onDone,
+  onRetry,
+}: {
+  /** Photos in the space just opened. */
+  photos: number;
+  /** Closes it; `quiet`: not again for passwords that have photos. */
+  onDone: (quiet: boolean) => void;
+  /** Locks again and asks for another password. */
+  onRetry: () => void;
+}) {
+  const [quiet, setQuiet] = useState(false);
+  const empty = photos === 0;
+  const ok = useRef<HTMLButtonElement>(null);
+  const done = useRef(() => onDone(quiet));
+  done.current = () => onDone(quiet);
+
+  useEffect(() => {
+    ok.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        done.current();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
+  return (
+    <div className="modal-back">
+      <div className="modal private-notice" role="alertdialog" aria-labelledby="private-notice-title">
+        <div className="modal-head">
+          <h2 id="private-notice-title">
+            <ShieldAlert size={16} /> {empty ? "This password has no private photos" : "About private passwords"}
+          </h2>
+        </div>
+        <div className="form">
+          {empty && (
+            <p className="empty-space">
+              It opened a new, empty space. That is expected for a new password. If you meant one you used before, it
+              may be mistyped: Shoebox never says a password is wrong.
+            </p>
+          )}
+          <ul className="notice-points">
+            <li>
+              <KeyRound size={16} />
+              <div>
+                <strong>A password can't be recovered.</strong> Not reset, not changed, not by Shoebox or anyone else.
+                Forget it and its photos stay hidden in Shoebox for good. Keep it somewhere safe.
+              </div>
+            </li>
+            <li>
+              <Layers size={16} />
+              <div>
+                <strong>Every password opens its own space.</strong> No password is ever wrong: a new or mistyped one
+                opens a new, empty space. Photos made private now go into this one, and only this password shows them.
+              </div>
+            </li>
+            <li>
+              <HardDrive size={16} />
+              <div>
+                <strong>Your photo files aren't locked.</strong> Shoebox seals only its own copies (previews,
+                thumbnails, faces). The files on your disks stay as they are: anyone with the disk can open them.
+              </div>
+            </li>
+          </ul>
+          <div className="field">
+            <label className="check">
+              <input type="checkbox" checked={quiet} onChange={(e) => setQuiet(e.target.checked)} />
+              Don't show this again for passwords that have photos
+            </label>
+            <small>A password with no photos always shows it.</small>
+          </div>
+        </div>
+        <div className="modal-foot">
+          {empty && (
+            <button type="button" className="btn ghost" onClick={onRetry}>
+              Try another password
+            </button>
+          )}
+          <button ref={ok} type="button" className="btn primary" onClick={() => onDone(quiet)}>
+            I understand
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The Private view's title being edited: the name of the space open now. */
+export function SpaceNameEditor({
+  name,
+  onRename,
+  onCancel,
+}: {
+  name: string | null;
+  onRename: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [text, setText] = useState(name ?? "");
+  const done = useRef(false);
+  const finish = (f: () => void) => {
+    if (done.current) return;
+    done.current = true;
+    f();
+  };
+  return (
+    <div className="name-editor wide">
+      <input
+        className="title-name-input"
+        autoFocus
+        value={text}
+        maxLength={PRIVATE_NAME_CHARS}
+        placeholder="Name this private space"
+        aria-label="Name of this private space"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => finish(() => onRename(text))}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") finish(() => onRename(text));
+          else if (e.key === "Escape") {
+            e.stopPropagation();
+            finish(onCancel);
+          }
+        }}
+      />
+    </div>
+  );
+}
+
 const LOCK_AFTER = [1, 5, 15, 30, 60];
 
 /** Settings > Private photos: how they work, lock and unlock, when they lock by themselves. */
@@ -115,6 +251,8 @@ export function PrivateTab({
   onUnlock,
   lockMinutes,
   onLockMinutes,
+  warning,
+  onWarning,
 }: {
   status: PrivateStatus | null;
   onStatus: (s: PrivateStatus) => void;
@@ -123,6 +261,9 @@ export function PrivateTab({
   /** When they lock again by themselves (minutes without using Shoebox), saved at once. */
   lockMinutes: number | undefined;
   onLockMinutes: (minutes: number) => void;
+  /** The warning each time a password opens photos (see PrivateNotice), saved at once. */
+  warning: boolean | undefined;
+  onWarning: (on: boolean) => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   if (!status) return <p className="muted small pad">…</p>;
@@ -140,7 +281,8 @@ export function PrivateTab({
           <span className="grow">
             {status.unlocked ? (
               <>
-                <LockKeyholeOpen size={14} className="inline-icon open" /> Open: its private photos are shown
+                <LockKeyholeOpen size={14} className="inline-icon open" /> Open
+                {status.name ? <> (“{status.name}”)</> : null}: its private photos are shown
               </>
             ) : (
               <>
@@ -182,6 +324,19 @@ export function PrivateTab({
           files on your disks are untouched). To keep photos under another password, make them not private, then
           private again with the new one.
         </small>
+      </div>
+      <div className="field">
+        <span className="field-label">Warning</span>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={warning ?? true}
+            onChange={(e) => onWarning(e.target.checked)}
+            disabled={warning == null}
+          />
+          Warn me each time a password opens private photos
+        </label>
+        <small>A password with no photos is always warned about: a new one and a mistyped one look the same.</small>
       </div>
       {error && (
         <p className="note warn" role="alert">
