@@ -88,7 +88,8 @@ impl Test {
 /// A birthday on 4 November 2006: the host's camera right, a guest's camera
 /// (its photos in a folder of their own) eight months behind. A trip named
 /// with its first and last day; a picnic with one photo two years off;
-/// a folder named with no date.
+/// a folder named with no date. (Folders are written as the catalog keeps
+/// them: names joined by backslashes, on every system.)
 fn birthday_and_more(t: &Test) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
     let host = t.photos("Photos\\2006-11-04 Birthday", Some("EOS 30D"), at(2006, 11, 4, 15, 0), 20);
     let guest = t.photos("Photos\\2006-11-04 Birthday\\Guest", Some("EOS 350D"), at(2006, 2, 13, 17, 29), 10);
@@ -244,7 +245,6 @@ fn dates_move_keep_the_files_date_and_come_back() {
 
 /// A rescan reads a photo's date again: a correction stays while its file
 /// gives the date it was made from, and goes once the file says otherwise.
-#[cfg(windows)]
 #[test]
 fn a_rescan_keeps_a_correction_while_the_file_says_the_same() {
     use shoebox_lib::scan::scan_root;

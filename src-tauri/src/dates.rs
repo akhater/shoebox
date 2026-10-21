@@ -19,6 +19,7 @@
 
 use crate::catalog::Catalog;
 use crate::db::{self, FILE_PRESENT};
+use crate::volumes::SEP;
 use anyhow::{Result, anyhow, bail};
 use chrono::{Datelike, NaiveDate};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -47,7 +48,7 @@ pub fn dated_folder(rel: &str) -> Option<(&str, NaiveDate, NaiveDate)> {
     let mut end = rel.len();
     loop {
         let path = &rel[..end];
-        let name_at = path.rfind('\\').map_or(0, |i| i + 1);
+        let name_at = path.rfind(SEP).map_or(0, |i| i + 1);
         if let Some((from, to)) = name_dates(&path[name_at..]) {
             return Some((path, from, to));
         }
@@ -637,7 +638,7 @@ pub fn of(cat: &Catalog, ids: &[i64]) -> Result<Dates> {
         first,
         last,
         corrected: corrected as usize,
-        folder: most.as_ref().map(|((_, path), _)| path.rsplit('\\').next().unwrap_or(path).to_string()),
+        folder: most.as_ref().map(|((_, path), _)| path.rsplit(SEP).next().unwrap_or(path).to_string()),
         folder_date: most.map(|(_, (date, _))| date.to_string()),
     })
 }

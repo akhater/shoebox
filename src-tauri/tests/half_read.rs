@@ -4,11 +4,11 @@
 //! folder is linked to its photo in one step, never half.
 //!
 //! Lives here, not in src/, because it writes sample photos (promise 1).
-#![cfg(windows)]
 
 use shoebox_lib::catalog::Catalog;
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::{Report, failed_count, retry_failed, scan_root};
+use shoebox_lib::volumes::SEP;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -85,7 +85,7 @@ fn a_file_found_elsewhere_is_linked_in_one_step() {
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?)))
             .unwrap()
             .map(|r| r.unwrap())
-            .map(|(rel, pid, state)| (rel.rsplit('\\').next().unwrap().to_string(), pid, state))
+            .map(|(rel, pid, state)| (rel.rsplit(SEP).next().unwrap().to_string(), pid, state))
             .collect()
     };
 

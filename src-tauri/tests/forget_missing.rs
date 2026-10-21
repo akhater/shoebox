@@ -5,7 +5,6 @@
 //!
 //! Lives here, not in src/, because it writes and deletes sample photos: no
 //! file under src/ outside paths.rs may hold file-writing code (promise 1).
-#![cfg(windows)]
 
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::paths::DataDir;
@@ -81,7 +80,12 @@ fn only_photos_gone_from_every_disk_leave_and_no_file_is_touched() {
     let report = cat.missing(&[a, b, c, d]).unwrap();
     assert_eq!(report.photos.iter().map(|p| p.id).collect::<Vec<_>>(), vec![a, d]);
     assert!(report.photos.iter().all(|p| !p.in_bin), "deleted for good, not sent to the bin");
-    assert!(report.photos[0].paths[0].ends_with("shoot\\a.jpg"), "{:?}", report.photos[0].paths);
+    // Where the file was, as the system writes a path.
+    assert!(
+        Path::new(&report.photos[0].paths[0]).ends_with(Path::new("shoot").join("a.jpg")),
+        "{:?}",
+        report.photos[0].paths
+    );
 
     // Marked and already gone: the delete only takes it out of the catalog.
     let plan = organize::plan(&cat).unwrap();

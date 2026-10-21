@@ -43,6 +43,7 @@ import {
   type PhotoFace,
   type PhotoList,
 } from "../api";
+import { FILE_MANAGER } from "../paths";
 import { useRemembered } from "../remembered";
 import { FocusIcon, FocusPoints, FocusSummary, hasFocusPoints } from "./FocusPoints";
 import { TagEditor } from "./Tags";
@@ -786,9 +787,9 @@ export function Viewer({
                         <button
                           className="btn small"
                           onClick={() => act(api.revealFile(f.id))}
-                          title="Show in Explorer"
+                          title={`Show in ${FILE_MANAGER.name}`}
                         >
-                          <FolderOpen size={14} /> Explorer
+                          <FolderOpen size={14} /> {FILE_MANAGER.button}
                         </button>
                         <button
                           className="btn small"

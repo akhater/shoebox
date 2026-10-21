@@ -3,12 +3,12 @@
 //!
 //! Lives here, not in src/, because it writes sample photos: no file under
 //! src/ outside paths.rs may hold file-writing code (promise 1).
-#![cfg(windows)]
 
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::scan_root;
-use std::path::Path;
+use shoebox_lib::volumes::SEP;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 fn jpeg(path: &Path, shade: u8) {
@@ -47,17 +47,20 @@ fn each_copy_leads_to_its_folder() {
     let mut folders: Vec<&str> = d.files.iter().map(|f| f.folder.as_str()).collect();
     folders.sort();
     assert_eq!(folders.len(), 2, "{folders:?}");
-    assert!(folders[0].ends_with("photos\\2007\\wedding"), "{folders:?}");
-    assert!(folders[1].ends_with("photos\\backup"), "{folders:?}");
+    // A folder is kept as its names joined by backslashes, on every system.
+    assert!(folders[0].ends_with(&format!("photos{SEP}2007{SEP}wedding")), "{folders:?}");
+    assert!(folders[1].ends_with(&format!("photos{SEP}backup")), "{folders:?}");
 
     for f in &d.files {
-        // The folder is where the file is: its path is that folder plus the name.
-        assert!(f.path.ends_with(&format!("{}\\{}", f.folder, f.name)), "{} / {}", f.path, f.folder);
+        // The folder is where the file is: its path is that folder plus the name,
+        // as the system writes a path.
+        let on_disk: PathBuf = f.folder.split(SEP).chain(std::iter::once(f.name.as_str())).collect();
+        assert!(Path::new(&f.path).ends_with(&on_disk), "{} / {}", f.path, f.folder);
         // ...and showing it shows the photo (and only what is in it).
         assert_eq!(folder_list(&cat, f.volume_id, &f.folder), vec![a], "{}", f.folder);
     }
     // The folder above holds both photos.
-    let parent = folders[0].trim_end_matches("\\wedding");
+    let parent = folders[0].rsplit_once(SEP).unwrap().0;
     let (mut above, mut both) = (folder_list(&cat, d.files[0].volume_id, parent), vec![a, b]);
     above.sort();
     both.sort();

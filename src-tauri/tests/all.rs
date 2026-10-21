@@ -20,6 +20,7 @@ mod faces_saved;
 mod failed_photos;
 mod filter_match;
 mod focus_points;
+mod folder_paths;
 mod forget_missing;
 mod grouping_replay;
 mod half_read;

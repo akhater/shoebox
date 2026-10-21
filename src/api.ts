@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { pictureBase } from "./paths";
 
 export type Scope =
   | { kind: "all" }
@@ -329,6 +330,8 @@ export interface Report {
   /** Known photos read again (regenerated, edited, failed before). */
   reread: number;
   errors: number;
+  /** Photos and folders left out because their names can't be kept in the catalog on this system. */
+  skipped: number;
   /** Only the files that couldn't be read before, on a disk just plugged in. */
   retry: boolean;
   cancelled: boolean;
@@ -603,11 +606,14 @@ export const cull = {
   progress: () => invoke<CloserProgress | null>("cull_progress"),
 };
 
-export const thumbUrl = (id: number, rev: number) => `http://shoebox.localhost/thumb/${id}?r=${rev}`;
-export const previewUrl = (id: number, rev: number) => `http://shoebox.localhost/preview/${id}?r=${rev}`;
+/** Where Shoebox's pictures are asked at (see `pictureBase`). */
+const BASE = pictureBase(navigator.userAgent);
+
+export const thumbUrl = (id: number, rev: number) => `${BASE}/thumb/${id}?r=${rev}`;
+export const previewUrl = (id: number, rev: number) => `${BASE}/preview/${id}?r=${rev}`;
 /** The photo read from its original (disk plugged in) at this long edge; 0 = full size. `rev`
  *  is its preview's: a turned photo is asked for again, turned. */
-export const fullUrl = (id: number, long: number, rev: number) => `http://shoebox.localhost/full/${id}?long=${long}&r=${rev}`;
+export const fullUrl = (id: number, long: number, rev: number) => `${BASE}/full/${id}?long=${long}&r=${rev}`;
 
 export interface PrivateStatus {
   /** A private space is open (its photos shown). Nothing is said about any other. */
@@ -897,7 +903,7 @@ export interface PhotoFace {
   bbox: [number, number, number, number];
 }
 
-export const faceUrl = (faceId: number) => `http://shoebox.localhost/face/${faceId}`;
+export const faceUrl = (faceId: number) => `${BASE}/face/${faceId}`;
 
 /** A name's words, lower case and without accents: "Mary-Ann" = "mary ann". */
 const nameWords = (s: string) =>

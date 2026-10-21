@@ -6,6 +6,14 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **macOS and Linux get the checks Windows had.** Every pull request now also
+  builds the window and runs clippy and the tests on Linux and on macOS, so a
+  change that only breaks there is caught before a release is built.
+- On a system Microsoft publishes no ONNX Runtime for, word search, faces and
+  sideways photos say they are not available there yet, and no model is
+  downloaded for nothing.
+- Linux and macOS notice when the PC has restarted, so the check of Shoebox's
+  own files after a crash runs after a restart, not at every start.
 - **A private space can have a name**, shown next to Private in the
   sidebar, the Private view's title and Settings while its password has it
   open. Name or rename it by right-clicking the Private row (or F2, or a
@@ -44,8 +52,27 @@ Newest first. Same format and versioning as Argentum.
 - `shoebox-cli gpu-check`: each AI model's answer to a test input on the GPU
   against the CPU's.
 
+### Changed
+
+- A folder named `lost+found` (the one a Linux file system keeps at its root)
+  is no longer walked, and on macOS and Linux a Mac's `._` notes beside photos
+  on a FAT or exFAT disk are no longer taken for photos.
+- Moving or removing a catalog folder compares paths ignoring case only where
+  the file system does (Windows and macOS), not on Linux.
+
 ### Fixed
 
+- **Folders can be added on macOS and Linux.** Adding a folder failed there
+  with "Shoebox can't recognise disks on this system yet", because disks were
+  only recognised on Windows. A disk is now told apart by its file system
+  UUID (a FAT or exFAT disk keeps the serial Windows shows for it), so it is
+  the same disk wherever it is mounted: `/Volumes/...` on a Mac, `/media/...`
+  or `/mnt/...` on Linux. Folder paths are stored the same way on every
+  system, and paths shown in the window, "Show in folder" and pictures use
+  each system's own form. A photo or folder whose name can't be kept (a
+  backslash in a name, or a name that isn't valid Unicode) is left out, counted
+  in the scan's summary, and never taken for missing. A folder moved to
+  another disk keeps its photos' dates on macOS and Linux too.
 - **Sideways photos found again on a GPU that gets the model wrong.** A GPU
   can run an AI model and still get its answers wrong: on an Intel Arc, the
   sideways check's answers all came out unsure, so it suggested no turn at

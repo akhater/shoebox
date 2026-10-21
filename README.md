@@ -6,7 +6,7 @@ Shoebox is a desktop catalog for photo archives spread across external drives.
 Browse, search and organize your whole collection while the drives sit
 unplugged in a drawer; plug one in and Shoebox picks up where it left off.
 
-> **Status: early development.** Windows is the supported platform. macOS and
+> **Status: early development.** Windows is the best-tested platform. macOS and
 > Linux builds are previews (see [Platforms](#platforms)).
 
 ## Features
@@ -19,11 +19,12 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   and each photo opens from whichever of its drives is connected.
 - **Reads what your cameras write.** RAW files from most cameras (CR2, CR3,
   NEF, ARW, RAF, ORF, DNG and more), plus JPEG, HEIC, TIFF, PNG, WebP, AVIF
-  and Photoshop documents (PSD, PSB). A Photoshop file is recognised by its
+  and Photoshop documents (PSD, PSB); HEIC and AVIF on Windows only for now
+  (see [Platforms](#platforms)). A Photoshop file is recognised by its
   content, even saved under another name.
 - **Search by description.** Type "kids on a beach" and find the matching
-  photos. It runs on your own GPU, from the previews, so it works on unplugged
-  drives too.
+  photos. It runs on your own GPU (Windows) or processor, from the previews, so
+  it works on unplugged drives too.
 - **People.** Faces are detected and grouped automatically. Name a person once
   and find every photo they appear in. **Check** finds likely mix-ups among
   the people you named (someone twice in a photo, a sibling filed under the
@@ -126,10 +127,22 @@ folder instead.
 ### Platforms
 
 - **Windows 10 and 11.** Fully supported. HEIC photos are read through
-  Windows' own HEIF support (Microsoft's HEIF Image Extensions).
-- **macOS and Linux.** Preview builds: drive identification is not implemented
-  on these systems yet, so folders cannot be added, and HEIC is not supported
-  there yet.
+  Windows' own HEIF support (Microsoft's HEIF Image Extensions), and the AI
+  models run on any DirectX 12 graphics card.
+- **macOS (Intel, Apple silicon) and Linux (x64, ARM64).** Preview builds,
+  checked by the automated tests but not yet on a wide range of real
+  machines: disks are recognised by their filesystem UUID, and the catalog,
+  scanning, browsing and moving and organizing folders are meant to work as on
+  Windows. People and word search need the AI models downloaded from Settings.
+  A deleted photo is told from a moved one by looking into the Trash (macOS
+  asks for Full Disk Access to do so).
+  What is Windows-only for now:
+  - **HEIC, HEIF and AVIF photos** are not decoded; they are listed as files
+    Shoebox could not read. RAW files and the other formats are read.
+  - **The AI models run on the processor**, not the graphics card, so word
+    search and faces are slower.
+  - RAW formats that Shoebox's own RAW reader cannot open are not rescued by
+    Windows' RAW codec, so those few files are listed as unreadable.
 
 ## Getting started
 
@@ -155,7 +168,7 @@ original publishers and verifies each file against a pinned SHA-256 hash.
 | Word search | CLIP ViT-B-32 (as packaged by Immich) | 581 MB |
 | Faces | InsightFace buffalo_l (as packaged by Immich) | 182 MB |
 | Sideways photos | Image orientation detector v2, EfficientNetV2 (Duarte Barbosa) | 81 MB |
-| AI runtime | Microsoft ONNX Runtime 1.22, on the GPU (DirectML) or the CPU | |
+| AI runtime | Microsoft ONNX Runtime 1.22, on the GPU (DirectML, Windows only) or the CPU | |
 
 Download, verify or delete them in **Settings > AI models**, or with
 `shoebox-cli models`.
@@ -184,7 +197,7 @@ day; anything there is removed after 14 days.
 output for most commands:
 
 ```bash
-shoebox-cli add "D:\Photos"      # add a folder and scan it
+shoebox-cli add "D:\Photos"      # add a folder and scan it (macOS: /Volumes/Photos, Linux: /media/...)
 shoebox-cli scan                 # rescan every connected folder
 shoebox-cli stats                # catalog overview
 shoebox-cli search kids on a beach
@@ -207,7 +220,10 @@ folder to use a different catalog. An MCP server is planned.
 
 Requirements: [Rust](https://rustup.rs) (stable), [Node.js](https://nodejs.org)
 22, and the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)
-for your system.
+for your system. On Linux, the packages CI installs (see the `linux` job in
+[`ci.yml`](.github/workflows/ci.yml)): `libwebkit2gtk-4.1-dev`, `libxdo-dev`,
+`libssl-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`,
+`build-essential`, `pkg-config`, `file` and `patchelf`.
 
 ```bash
 git clone https://github.com/akhater/shoebox.git
@@ -234,5 +250,5 @@ in `src/test`), `cargo test` in `src-tauri` for the rest.
 Issues and pull requests are welcome. Every change goes through a pull request
 and is merged only when CI passes: formatting, lint, tests (including the
 guards that keep photo files read-only and the window responsive), type check
-and build. Release builds are produced only when a release is published. See
+and build, on Windows, Linux and macOS. Release builds are produced only when a release is published. See
 [CHANGELOG.md](CHANGELOG.md) for what changed in each version.

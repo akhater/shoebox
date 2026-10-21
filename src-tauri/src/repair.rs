@@ -268,14 +268,51 @@ fn booted_at() -> Option<i64> {
     Some(now_secs() - (up_ms / 1000) as i64)
 }
 
-#[cfg(not(windows))]
+/// Linux: `/proc/stat` says when the system started.
+#[cfg(target_os = "linux")]
+fn booted_at() -> Option<i64> {
+    boot_time_in_proc_stat(&std::fs::read_to_string("/proc/stat").ok()?)
+}
+
+/// macOS: the kernel's `kern.boottime`, asked of the system's own `sysctl`.
+#[cfg(target_os = "macos")]
+fn booted_at() -> Option<i64> {
+    let out = std::process::Command::new("/usr/sbin/sysctl").args(["-n", "kern.boottime"]).output().ok()?;
+    boot_time_in_sysctl(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Not told on other systems: the check is made at every start.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn booted_at() -> Option<i64> {
     None
+}
+
+/// The `btime` line of Linux's `/proc/stat`: seconds since 1970.
+#[cfg(any(target_os = "linux", test))]
+fn boot_time_in_proc_stat(stat: &str) -> Option<i64> {
+    stat.lines().find_map(|line| line.strip_prefix("btime "))?.trim().parse().ok()
+}
+
+/// macOS's `kern.boottime`: `{ sec = 1792247329, usec = 0 } Sat Oct 17 ...`.
+#[cfg(any(target_os = "macos", test))]
+fn boot_time_in_sysctl(out: &str) -> Option<i64> {
+    let digits: String = out.split_once("sec = ")?.1.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_start_of_the_system_is_read_from_what_each_system_says() {
+        let stat = "cpu  1 2 3\nintr 4\nbtime 1792247329\nprocesses 5\n";
+        assert_eq!(boot_time_in_proc_stat(stat), Some(1_792_247_329));
+        assert_eq!(boot_time_in_proc_stat("cpu 1\n"), None);
+        let sysctl = "{ sec = 1792247329, usec = 417032 } Sat Oct 17 09:08:49 2026\n";
+        assert_eq!(boot_time_in_sysctl(sysctl), Some(1_792_247_329));
+        assert_eq!(boot_time_in_sysctl("nothing"), None);
+    }
 
     #[test]
     fn a_check_is_due_after_a_restart() {

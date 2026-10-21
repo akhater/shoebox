@@ -10,8 +10,10 @@
 //! for two disks (`Catalog::plug_in_test_disk`), so a disk can be "unplugged"
 //! by not plugging it in again.
 //!
+//! Folders are written as the catalog keeps them (names joined by backslashes,
+//! on every system); `native` turns one into a path on disk.
+//!
 //! Lives here, not in src/, because it writes sample photos (promise 1).
-#![cfg(windows)]
 
 use rusqlite::params;
 use shoebox_lib::catalog::Catalog;
@@ -26,6 +28,11 @@ use std::sync::atomic::AtomicBool;
 const TRIP: &str = r"Photos\Trip";
 /// Six photos and one Argentum sidecar.
 const TRIP_FILES: usize = 7;
+
+/// The path on disk of a folder as the catalog keeps it, below `base`.
+fn native(base: &Path, stored: &str) -> PathBuf {
+    stored.split('\\').fold(base.to_path_buf(), |path, name| path.join(name))
+}
 
 fn jpeg(path: &Path, shade: u8) {
     image::RgbImage::from_fn(160, 120, |x, y| image::Rgb([shade.wrapping_mul(40), (x % 256) as u8, (y % 256) as u8]))
@@ -61,9 +68,9 @@ impl World {
         let base = std::env::temp_dir().join(format!("shoebox-kill-{name}"));
         let _ = std::fs::remove_dir_all(&base);
         for d in [r"disk-a\Photos\Trip\Day 2", r"disk-a\Photos\2026", r"disk-b\Archive"] {
-            std::fs::create_dir_all(base.join(d)).unwrap();
+            std::fs::create_dir_all(native(&base, d)).unwrap();
         }
-        let trip = base.join("disk-a").join(TRIP);
+        let trip = native(&base.join("disk-a"), TRIP);
         for i in 0..4u8 {
             jpeg(&trip.join(format!("IMG_{i:04}.JPG")), i);
         }
@@ -129,7 +136,15 @@ impl World {
         for e in walkdir::WalkDir::new(&self.base).min_depth(1).into_iter().filter_entry(|e| e.file_name() != "catalog")
         {
             let e = e.unwrap();
-            let rel = e.path().strip_prefix(&self.base).unwrap().to_string_lossy().into_owned();
+            // Named as the catalog names folders, whatever the system.
+            let names: Vec<_> = e
+                .path()
+                .strip_prefix(&self.base)
+                .unwrap()
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect();
+            let rel = names.join("\\");
             let hash = if e.file_type().is_dir() {
                 String::new()
             } else {
@@ -252,7 +267,7 @@ fn a_half_written_copy_is_never_cataloged_and_is_taken_back() {
     let (cat, a, b) = w.open(&["a", "b"]);
     let before = w.state(&cat);
     killed("copy:copied", 2, || move_folder(&cat, &trip_to_b(a, b)).map(drop));
-    let (src, dst) = (w.disk("a").join(TRIP), w.disk("b").join(r"Archive\Trip"));
+    let (src, dst) = (native(&w.disk("a"), TRIP), native(&w.disk("b"), r"Archive\Trip"));
     let next = walkdir::WalkDir::new(&src)
         .into_iter()
         .flatten()
@@ -344,7 +359,7 @@ fn a_move_cut_short_waits_for_its_disk() {
     drop(cat);
 
     // A copy that isn't the same as its original keeps that original.
-    let changed = w.disk("b").join(r"Archive\Trip\IMG_0003.JPG");
+    let changed = native(&w.disk("b"), r"Archive\Trip\IMG_0003.JPG");
     let mut bytes = std::fs::read(&changed).unwrap();
     let last = bytes.len() - 1;
     bytes[last] ^= 1;
@@ -460,6 +475,9 @@ fn a_rename_stopped_at_any_step_is_finished_or_undone() {
     }
 }
 
+/// Windows only: a test disk has no Recycle Bin there, so the files go for good.
+/// Elsewhere every disk has the system's trash, which a test must not fill.
+#[cfg(windows)]
 #[test]
 fn a_delete_stopped_at_any_step_is_finished_or_undone() {
     let marked = |cat: &Catalog| -> Vec<i64> {

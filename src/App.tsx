@@ -96,6 +96,7 @@ import { Sidebar, type FolderTarget } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { TurnControl, TurnPhotoIcon } from "./components/TurnControl";
 import { turnWords, Viewer } from "./components/Viewer";
+import { diskPath } from "./paths";
 import { useRemembered } from "./remembered";
 import { WhoIsIt } from "./components/WhoIsIt";
 
@@ -237,6 +238,7 @@ function summarize(name: string, r: Report) {
     read.length && `${fmtNum(total)} ${total === 1 ? "file" : "files"}: ${read.join(", ")}`,
     r.restored && `${fmtNum(r.restored)} back where they were`,
     r.missing && `${fmtNum(r.missing)} not found`,
+    r.skipped && `${fmtNum(r.skipped)} left out (names this system can't keep)`,
   ].filter(Boolean);
   return `${name}: ${parts.length ? parts.join(" · ") : "nothing changed"} · ${Math.max(1, Math.round(r.seconds))} s`;
 }
@@ -1400,7 +1402,7 @@ export default function App() {
       const mount = v?.mount ?? v?.lastMount ?? "";
       return {
         title: scope.relPath.split(/[\\/]/).pop() || v?.label || "",
-        sub: `${mount.replace(/[\\/]$/, "")}\\${scope.relPath}`,
+        sub: diskPath(mount, scope.relPath),
         offline: v ? !v.online : false,
       };
     }

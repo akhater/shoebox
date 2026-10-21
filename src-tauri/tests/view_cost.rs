@@ -42,6 +42,7 @@ fn a_view_costs_what_it_shows() {
         let tx = db.transaction().unwrap();
         let mut folders = Vec::new();
         for i in 0..=200 {
+            // Folders are kept as their names joined by backslashes, on every system.
             let rel = if i == 200 { "Pictures\\Small".to_string() } else { format!("Pictures\\F{i}") };
             tx.execute("INSERT INTO folders (volume_id, rel_path) VALUES (?1, ?2)", params![disk, rel]).unwrap();
             folders.push(tx.last_insert_rowid());

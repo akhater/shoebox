@@ -15,6 +15,7 @@ import {
   updatesApi,
   BIN,
 } from "../api";
+import { FILE_MANAGER } from "../paths";
 import { ModelsTab } from "./ModelsTab";
 import { PrivateTab } from "./Private";
 
@@ -317,7 +318,7 @@ export function SettingsDialog({
                     <>
                       <p>
                         Move the catalog ({fmtBytes(check.bytes)}) to <b>{check.target}</b> and use it from now on? On
-                        the same disk it takes seconds (folders are moved, as in Explorer); to another disk it's copied.
+                        the same disk it takes seconds (folders are moved, as in {FILE_MANAGER.name}); to another disk it's copied.
                         Any scan stops and Shoebox restarts when it's done. Once Shoebox has started on the new folder, the
                         old one goes to the {BIN}.
                       </p>

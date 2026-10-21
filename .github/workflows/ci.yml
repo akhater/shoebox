@@ -4,6 +4,12 @@ name: CI
 # whether a change can merge. main is protected and requires the `check` job;
 # nothing is pushed to main directly. Full builds only happen when a release
 # is published (release.yml), as in Argentum.
+#
+# `check` runs on Windows. `linux` and `macos` build the window and run clippy
+# and the tests on those systems, as separate jobs so one failing doesn't
+# hide the others: recognising a disk, reading an image and building a path
+# differ on each system, and a release build is too late to find out. Only
+# `check` is a required status check; the other two report on their own.
 on:
   pull_request:
   push:
@@ -65,6 +71,85 @@ jobs:
       # catalog or a disk runs on the main thread, the window's queries answer
       # while the catalog is being written (window_never_waits), and a small
       # view costs a fraction of the whole catalog (view_cost).
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --lib --test '*'
+
+  # The same checks as `check`, on Linux. The window is WebKitGTK there, and
+  # the build needs its libraries (the list release.yml installs).
+  linux:
+    name: linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Linux libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev build-essential pkg-config file patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install the window's dependencies
+        run: npm ci
+
+      # Also gives Tauri its frontend folder, which the Rust build needs.
+      - name: Typecheck and build the window
+        run: npm run build
+
+      - name: Test the window
+        run: npm test
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+          rustflags: ''
+          cache-workspaces: src-tauri
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --lib --test '*'
+
+  # The same checks as `check`, on macOS (Apple silicon). The system's own web
+  # view and TLS, so nothing to install.
+  macos:
+    name: macos
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install the window's dependencies
+        run: npm ci
+
+      # Also gives Tauri its frontend folder, which the Rust build needs.
+      - name: Typecheck and build the window
+        run: npm run build
+
+      - name: Test the window
+        run: npm test
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+          rustflags: ''
+          cache-workspaces: src-tauri
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: cargo test
         working-directory: src-tauri
         run: cargo test --lib --test '*'

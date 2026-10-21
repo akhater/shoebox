@@ -164,7 +164,9 @@
 //!       A finding is {"folderId":..,"key":"..","first":..} (the whole finding will do), or a
 //!       JSON list of them. --back: in the check again
 //!
-//! Folders (on the disk and in the catalog in one step; JSON out):
+//! Folders (on the disk and in the catalog in one step; JSON out). A folder is its path below
+//! the disk's root, the way `photo` and `list` give it (names joined by backslashes on every
+//! system; slashes are taken too):
 //!   shoebox-cli rename-folder <volume-id> <folder> <new name>
 //!   shoebox-cli new-folder <volume-id> <parent folder> [name]
 //!   shoebox-cli move-folder <volume-id> <folder> <to-volume-id> <into folder>
@@ -239,6 +241,7 @@
 //!                                         (frames not marked yet)
 
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
+use shoebox_lib::db::stored_rel;
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::{self, Progress};
 use shoebox_lib::{cull, dates, focus, gear, organize, tags, upright};
@@ -895,17 +898,17 @@ fn main() -> anyhow::Result<()> {
             // shoebox-cli rename-folder <volume-id> <folder path on the disk> <new name>
             let usage = || anyhow::anyhow!("rename-folder <volume-id> <folder> <new name>");
             let vid: i64 = args.get(1).ok_or_else(usage)?.parse()?;
-            let (rel, name) = (args.get(2).ok_or_else(usage)?, args.get(3).ok_or_else(usage)?);
-            println!("{}", serde_json::json!({ "renamed": organize::rename_folder(&cat, vid, rel, name)? }));
+            let (rel, name) = (stored_rel(args.get(2).ok_or_else(usage)?), args.get(3).ok_or_else(usage)?);
+            println!("{}", serde_json::json!({ "renamed": organize::rename_folder(&cat, vid, &rel, name)? }));
         }
         Some("move-folder") => {
             // shoebox-cli move-folder <volume-id> <folder> <to-volume-id> <into folder>
             let usage = || anyhow::anyhow!("move-folder <volume-id> <folder> <to-volume-id> <into folder>");
             let m = organize::FolderMove {
                 from: args.get(1).ok_or_else(usage)?.parse()?,
-                rel: args.get(2).ok_or_else(usage)?.clone(),
+                rel: stored_rel(args.get(2).ok_or_else(usage)?),
                 to: args.get(3).ok_or_else(usage)?.parse()?,
-                to_parent: args.get(4).ok_or_else(usage)?.clone(),
+                to_parent: stored_rel(args.get(4).ok_or_else(usage)?),
             };
             let r = organize::move_folder(&cat, &m, &cancel, &|p| {
                 eprint!("\r  {} {}/{} files, {} MB   ", p.phase, p.files, p.total_files, p.bytes >> 20)
@@ -917,9 +920,9 @@ fn main() -> anyhow::Result<()> {
             // shoebox-cli new-folder <volume-id> <parent folder path on the disk> [name]
             let usage = || anyhow::anyhow!("new-folder <volume-id> <parent folder> [name]");
             let vid: i64 = args.get(1).ok_or_else(usage)?.parse()?;
-            let parent = args.get(2).ok_or_else(usage)?;
+            let parent = stored_rel(args.get(2).ok_or_else(usage)?);
             let name = args.get(3).map(String::as_str).unwrap_or("New folder");
-            println!("{}", serde_json::json!({ "created": organize::create_folder(&cat, vid, parent, name)? }));
+            println!("{}", serde_json::json!({ "created": organize::create_folder(&cat, vid, &parent, name)? }));
         }
         Some("marked") => println!("{}", serde_json::to_string_pretty(&organize::plan(&cat)?)?),
         Some("quality") => {

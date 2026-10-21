@@ -9,12 +9,11 @@ name: Release
 # .tar.gz). Both carry the app and shoebox-cli. Installed, Shoebox keeps its
 # catalog and shoebox.json in ~/.shoebox and its models in the install folder
 # (~/.shoebox on macOS and Linux); portable, all of it next to the app (the
-# folder ships a shoebox.json to say so). macOS and Linux builds open and
-# browse, but can't add disks yet: disk recognition there is roadmap 6.
+# folder ships a shoebox.json to say so). Pull requests build and test on
+# Linux and macOS too (ci.yml), so a release build isn't the first time.
 #
-# The AI models are not in the download. Until the models screen (download
-# from the original publishers, SHA-256 checked) lands, they go in `models/`
-# by hand.
+# The AI models are not in the download: Settings > AI models fetches them
+# from their original publishers, each checked against its pinned SHA-256.
 on:
   release:
     types: [published]

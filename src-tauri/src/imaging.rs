@@ -1,8 +1,10 @@
 //! Reading a photo: its metadata, and a picture of it for the catalog.
 //!
-//! RAW: rawler's embedded full-size JPEG first (fast, reads a few MB), then the
-//! Windows codecs, then a full RAW develop as the last resort.
-//! Everything else: Windows codecs first, the `image` crate as fallback.
+//! RAW: rawler's embedded full-size JPEG first (fast, reads a few MB), then (on
+//! Windows) the Windows codecs, then a full RAW develop as the last resort.
+//! Everything else: on Windows the Windows codecs first, then (and on macOS and
+//! Linux, from the start) the `image` crate. A format neither reads (HEIC and
+//! AVIF off Windows) is recorded as a file Shoebox couldn't read.
 //! A Photoshop file, whatever its name, is read by [`crate::psd`].
 //! Shoebox only ever opens photos for reading.
 

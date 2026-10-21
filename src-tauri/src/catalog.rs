@@ -244,6 +244,7 @@ impl Catalog {
         if !path.is_dir() {
             bail!("{} is not a folder", path.display());
         }
+        ensure_keepable(path)?;
         let (mv, rel) = volumes::locate(path)?;
         let db = self.db();
         let vid = upsert_volume(&db, &mv)?;
@@ -352,8 +353,14 @@ impl Catalog {
                     .map(|(_, name, size, rel, vid, last_mount)| {
                         // Only a plugged-in disk's bin can be looked into.
                         let mount = online.get(&vid).cloned();
-                        let shown = mount.clone().or(last_mount).unwrap_or_else(|| "?:\\".into());
-                        let path = PathBuf::from(volumes::join(&shown, &rel)).join(name);
+                        let path = match &mount {
+                            Some(m) => PathBuf::from(volumes::file_path(m, &rel, &name)),
+                            None => PathBuf::from(shown_file(
+                                &last_mount.unwrap_or_else(|| UNKNOWN_MOUNT.into()),
+                                &rel,
+                                &name,
+                            )),
+                        };
                         (path, size as u64, mount)
                     })
                     .collect();
@@ -528,10 +535,11 @@ impl Catalog {
             return "0".into();
         }
         let mut cond = format!("fo.volume_id IN ({})", ids.iter().map(i64::to_string).collect::<Vec<_>>().join(","));
+        let sep = volumes::SEP;
         for (vid, rel) in self.unreachable.read().unwrap().iter() {
             let r = rel.replace('\'', "''");
             cond.push_str(&format!(
-                " AND NOT (fo.volume_id = {vid} AND ('{r}' = '' OR fo.rel_path = '{r}' OR substr(fo.rel_path, 1, length('{r}') + 1) = '{r}' || '\\'))"
+                " AND NOT (fo.volume_id = {vid} AND ('{r}' = '' OR fo.rel_path = '{r}' OR substr(fo.rel_path, 1, length('{r}') + 1) = '{r}' || '{sep}'))"
             ));
         }
         cond
@@ -591,15 +599,15 @@ impl Catalog {
             under_sql("fo", 2).replace("?2", "r.rel_path")
         ))?;
         for v in &mut volumes {
-            let shown_mount = v.mount.clone().or_else(|| v.last_mount.clone()).unwrap_or_else(|| "?:\\".into());
+            let shown_mount = v.mount.clone().or_else(|| v.last_mount.clone()).unwrap_or_else(|| UNKNOWN_MOUNT.into());
             v.roots = root_stmt
                 .query_map([v.id], |r| {
                     let rel: String = r.get(1)?;
                     Ok(RootInfo {
                         id: r.get(0)?,
                         found: !self.is_unreachable(v.id, &rel),
-                        name: rel.rsplit('\\').next().filter(|s| !s.is_empty()).unwrap_or("Whole disk").to_string(),
-                        path: volumes::join(&shown_mount, &rel),
+                        name: rel.rsplit(SEP).next().filter(|s| !s.is_empty()).unwrap_or("Whole disk").to_string(),
+                        path: shown_path(&shown_mount, &rel),
                         rel_path: rel,
                         last_scan: r.get(2)?,
                         photos: r.get(3)?,
@@ -1105,8 +1113,8 @@ impl Catalog {
                 let vid: i64 = r.get(6)?;
                 let last_mount: Option<String> = r.get(8)?;
                 let mount = online.get(&vid).cloned();
-                let shown_mount = mount.clone().or(last_mount).unwrap_or_else(|| "?:\\".into());
-                let path = format!("{}\\{}", volumes::join(&shown_mount, &rel).trim_end_matches('\\'), name);
+                let shown_mount = mount.clone().or(last_mount).unwrap_or_else(|| UNKNOWN_MOUNT.into());
+                let path = shown_file(&shown_mount, &rel, &name);
                 let state: i64 = r.get(3)?;
                 Ok(FileLoc {
                     id: r.get(0)?,
@@ -1375,7 +1383,7 @@ impl Catalog {
         if self.is_unreachable(vid, &rel) {
             bail!("That folder isn't where it was on the disk");
         }
-        Ok(format!("{}\\{}", volumes::join(&mount, &rel).trim_end_matches('\\'), name))
+        Ok(volumes::file_path(&mount, &rel, &name))
     }
 }
 
@@ -1488,14 +1496,65 @@ fn upsert_volume(db: &Connection, mv: &MountedVolume) -> Result<i64> {
         )?;
         return Ok(id);
     }
-    // "OS (C:)" for a drive letter; a disk mounted in a folder goes by its name.
-    let at = mv.mount.trim_end_matches('\\');
-    let label = if at.len() <= 2 { format!("{} ({at})", mv.default_label()) } else { mv.default_label() };
+    let label = new_volume_label(mv);
     db.execute(
         "INSERT INTO volumes (serial, fs, size_bytes, label, last_mount, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![mv.serial as i64, mv.fs, mv.size as i64, label, mv.mount, db::now()],
     )?;
     Ok(db.last_insert_rowid())
+}
+
+/// What a disk is called the first time it is cataloged.
+fn new_volume_label(mv: &MountedVolume) -> String {
+    // "OS (C:)" for a drive letter; a disk mounted in a folder, or anywhere on
+    // macOS and Linux, goes by its name.
+    let at = mv.mount.trim_end_matches('\\');
+    if at.len() == 2 && at.ends_with(':') { format!("{} ({at})", mv.default_label()) } else { mv.default_label() }
+}
+
+/// Where a disk is shown when no place of it is known at all.
+const UNKNOWN_MOUNT: &str = "?:\\";
+
+/// The separator a disk's paths are written with: `/` after `/Volumes/Photos/`,
+/// `\` after `D:\`. The mount tells, not the system running Shoebox: a catalog
+/// made on one system is opened on others, and shows an unplugged disk where
+/// it was last seen.
+fn separator_of(mount: &str) -> char {
+    if mount.starts_with('/') { '/' } else { '\\' }
+}
+
+/// A catalog folder's place on its disk, for showing (see [`separator_of`]).
+/// What Shoebox opens is built with [`volumes::join`] instead.
+fn shown_path(mount: &str, rel: &str) -> String {
+    if rel.is_empty() {
+        return mount.to_string();
+    }
+    let sep = separator_of(mount);
+    let rel = if sep == volumes::SEP { rel.to_string() } else { rel.replace(volumes::SEP, &sep.to_string()) };
+    format!("{}{sep}{rel}", mount.trim_end_matches(sep))
+}
+
+/// A file's place on its disk, for showing.
+fn shown_file(mount: &str, rel: &str, name: &str) -> String {
+    let sep = separator_of(mount);
+    format!("{}{sep}{name}", shown_path(mount, rel).trim_end_matches(sep))
+}
+
+/// Refuses a folder with a name in its path that can't be kept in the catalog
+/// on this system ([`volumes::name_is_storable`], or not Unicode): its photos
+/// could not be told from those of other folders, or opened again.
+fn ensure_keepable(path: &Path) -> Result<()> {
+    for part in path.components() {
+        if let std::path::Component::Normal(name) = part
+            && !name.to_str().is_some_and(volumes::name_is_storable)
+        {
+            bail!(
+                "{} can't be added: its name {name:?} has characters Shoebox can't keep in the catalog on this system.",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Kopia: keep the consistent copies in backup\, skip the live databases.
@@ -1862,7 +1921,8 @@ pub enum Sort {
     Added,
 }
 
-const SEP: char = std::path::MAIN_SEPARATOR;
+/// Separates the names of a folder's path in the catalog, on every system.
+const SEP: char = volumes::SEP;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -2004,13 +2064,68 @@ fn digits(it: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::natural_cmp;
+    use super::{FolderNode, MountedVolume, ensure_keepable, natural_cmp, new_volume_label, shown_file, shown_path};
+    use std::path::Path;
 
     #[test]
     fn folders_sort_like_explorer() {
         let mut v = vec!["IMG10", "2026-10-12", "img2", "_Inbox", "2026-09-26", "Stack", "2026-10-03", "IMG1"];
         v.sort_by(|a, b| natural_cmp(a, b));
         assert_eq!(v, ["_Inbox", "2026-09-26", "2026-10-03", "2026-10-12", "IMG1", "img2", "IMG10", "Stack"]);
+    }
+
+    fn volume(mount: &str, label: &str) -> MountedVolume {
+        MountedVolume { mount: mount.into(), serial: 0xABCD, fs: "test".into(), size: 1, label: label.into() }
+    }
+
+    #[test]
+    fn a_new_disk_is_called_by_its_name_and_a_drive_letter() {
+        assert_eq!(new_volume_label(&volume("C:\\", "OS")), "OS (C:)");
+        assert_eq!(new_volume_label(&volume("D:\\", "")), "Disk 0000ABCD (D:)");
+        // Mounted in a folder, or anywhere on macOS and Linux: the name alone.
+        assert_eq!(new_volume_label(&volume("C:\\Mounts\\Disk1\\", "Photos")), "Photos");
+        assert_eq!(new_volume_label(&volume("/Volumes/Photos/", "Photos")), "Photos");
+        assert_eq!(new_volume_label(&volume("/", "Macintosh HD")), "Macintosh HD");
+    }
+
+    #[test]
+    fn a_folder_is_shown_where_its_disk_writes_paths() {
+        // Backslashes after a drive letter or a folder of Windows...
+        assert_eq!(shown_path("D:\\", "Photos\\Trip"), "D:\\Photos\\Trip");
+        assert_eq!(shown_path("C:\\Mounts\\Disk1\\", "Photos"), "C:\\Mounts\\Disk1\\Photos");
+        assert_eq!(shown_path("D:\\", ""), "D:\\");
+        assert_eq!(shown_file("D:\\", "Photos\\Trip", "IMG_1.CR3"), "D:\\Photos\\Trip\\IMG_1.CR3");
+        assert_eq!(shown_file("D:\\", "", "IMG_1.CR3"), "D:\\IMG_1.CR3");
+        // ...slashes after a mount point of macOS or Linux, whatever system shows it.
+        assert_eq!(shown_path("/Volumes/Photos/", "Photos\\Trip"), "/Volumes/Photos/Photos/Trip");
+        assert_eq!(shown_path("/", "Users\\me\\Pictures"), "/Users/me/Pictures");
+        assert_eq!(shown_path("/", ""), "/");
+        assert_eq!(shown_file("/", "", "IMG_1.CR3"), "/IMG_1.CR3");
+        assert_eq!(shown_file("/Volumes/Photos", "Trip", "IMG_1.CR3"), "/Volumes/Photos/Trip/IMG_1.CR3");
+        // A disk last seen on Windows, shown by a Mac: as it was.
+        assert_eq!(shown_file("?:\\", "Trip", "IMG_1.CR3"), "?:\\Trip\\IMG_1.CR3");
+    }
+
+    #[test]
+    fn the_folder_tree_is_built_from_stored_paths_on_every_system() {
+        let mut top = FolderNode::new(String::new(), "Photos".into(), 1);
+        top.insert("", "Photos", 1, 2, 0);
+        top.insert("Trip", "Photos\\Trip", 1, 3, 0);
+        top.insert("Trip\\Day 2", "Photos\\Trip\\Day 2", 1, 4, 0);
+        assert_eq!(top.count, 9);
+        assert_eq!(top.children.len(), 1);
+        let trip = &top.children[0];
+        assert_eq!((trip.name.as_str(), trip.rel_path.as_str(), trip.count), ("Trip", "Photos\\Trip", 7));
+        let day = &trip.children[0];
+        assert_eq!((day.name.as_str(), day.rel_path.as_str(), day.count), ("Day 2", "Photos\\Trip\\Day 2", 4));
+    }
+
+    #[test]
+    fn a_folder_with_a_name_the_catalog_cannot_keep_is_refused() {
+        assert!(ensure_keepable(Path::new("Photos").join("Trip 2026").as_path()).is_ok());
+        // A backslash is a name on macOS and Linux, and would read as two folders in the catalog.
+        let weird = Path::new("Photos").join("Trip\\2026");
+        assert_eq!(ensure_keepable(&weird).is_ok(), cfg!(windows));
     }
 }
 

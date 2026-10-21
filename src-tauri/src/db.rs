@@ -9,6 +9,7 @@
 //!   "missing" when its disk is plugged in, scanned, and the file is not there.
 
 use crate::gear;
+use crate::volumes;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -542,9 +543,11 @@ pub fn now() -> i64 {
 
 /// SQL condition: folder `alias.rel_path` is `rel` or inside it. `rel` is passed
 /// as parameter `?N`. Uses substr, not LIKE, so `_` and `%` in names are literal.
+/// Folder paths are kept with [`volumes::SEP`] between names on every system.
 pub fn under_sql(alias: &str, param: usize) -> String {
+    let sep = volumes::SEP;
     format!(
-        "(?{param} = '' OR {alias}.rel_path = ?{param} OR substr({alias}.rel_path, 1, length(?{param}) + 1) = ?{param} || '\\')"
+        "(?{param} = '' OR {alias}.rel_path = ?{param} OR substr({alias}.rel_path, 1, length(?{param}) + 1) = ?{param} || '{sep}')"
     )
 }
 
@@ -552,12 +555,27 @@ pub fn under_sql(alias: &str, param: usize) -> String {
 pub fn is_under(path: &str, root: &str) -> bool {
     root.is_empty()
         || path == root
-        || (path.len() > root.len() && path.starts_with(root) && path.as_bytes()[root.len()] == b'\\')
+        || (path.len() > root.len() && path.starts_with(root) && path[root.len()..].starts_with(volumes::SEP))
+}
+
+/// A folder path as a person types it (`Photos/Trip` or `Photos\Trip`, maybe
+/// with a separator at either end) in the form the catalog keeps it: names
+/// joined by [`volumes::SEP`]. No name holds a `/`, so nothing is mistaken.
+pub fn stored_rel(typed: &str) -> String {
+    typed.replace('/', &volumes::SEP.to_string()).trim_matches(volumes::SEP).to_string()
+}
+
+/// What two spellings of one place on disk are compared by: not case where the
+/// file system ignores it (Windows, and macOS by default).
+pub fn place_key(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(target_os = "linux") { s.into_owned() } else { s.to_lowercase() }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Memory;
+    use super::{Memory, is_under, place_key, stored_rel, under_sql};
+    use std::path::Path;
 
     #[test]
     fn automatic_memory_follows_the_catalog_size() {
@@ -570,5 +588,30 @@ mod tests {
         assert_eq!(Memory::for_catalog(0, 0, mb(20_000)).map_mb, 8192);
         // Values set by hand are kept.
         assert_eq!(Memory::for_catalog(64, 512, mb(700)), Memory { cache_mb: 64, map_mb: 512 });
+    }
+
+    #[test]
+    fn a_folder_is_under_another_by_whole_names() {
+        assert!(is_under("Photos\\Trip", "Photos"));
+        assert!(is_under("Photos", "Photos"));
+        assert!(is_under("Photos", ""));
+        assert!(!is_under("Photos 2", "Photos"));
+        assert!(!is_under("Photos", "Photos\\Trip"));
+        // The same rule in SQL, with the separator folder paths are kept with.
+        assert!(under_sql("fo", 2).contains("|| '\\')"));
+    }
+
+    #[test]
+    fn a_typed_folder_path_is_kept_the_way_the_catalog_keeps_it() {
+        assert_eq!(stored_rel("Photos/Trip"), "Photos\\Trip");
+        assert_eq!(stored_rel("Photos\\Trip"), "Photos\\Trip");
+        assert_eq!(stored_rel("/Photos/Trip/"), "Photos\\Trip");
+        assert_eq!(stored_rel(""), "");
+    }
+
+    #[test]
+    fn places_differ_by_case_only_where_the_file_system_tells_them_apart() {
+        let same = place_key(Path::new("Photos")) == place_key(Path::new("photos"));
+        assert_eq!(same, !cfg!(target_os = "linux"));
     }
 }

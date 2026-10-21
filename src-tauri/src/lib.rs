@@ -525,11 +525,11 @@ pub fn remove_stray_temp_files(data: &DataDir) {
     }
 }
 
-/// The folder a catalog move left behind goes to the Recycle Bin, now that
-/// the new catalog has opened.
+/// The folder a catalog move left behind goes to the Recycle Bin (the Trash
+/// on macOS and Linux), now that the new catalog has opened.
 pub fn tidy_old_catalog(data: &DataDir) {
     match paths::remove_old_catalog(data) {
-        Ok(Some(old)) => log::info!("old catalog folder {} sent to the Recycle Bin", old.display()),
+        Ok(Some(old)) => log::info!("old catalog folder {} sent to the {}", old.display(), trash_bin::NAME),
         Ok(None) => {}
         Err(e) => log::warn!("couldn't remove the old catalog folder: {e:#}"),
     }
@@ -696,10 +696,14 @@ fn update_checker(app: AppHandle, cat: Arc<Catalog>, found: Arc<Mutex<Option<upd
     }
 }
 
-/// Serves `http://shoebox.localhost/thumb/<id>` and `/preview/<id>` from the data folder.
-/// Serves `http://shoebox.localhost/full/<id>?long=<px>`: the photo read from
-/// its original (disk plugged in) at that long edge, 0 = full size. Nothing
-/// is stored; 404 when no copy is reachable.
+// The window's own address for Shoebox's pictures: `http://shoebox.localhost/`
+// on Windows (and Android), `shoebox://localhost/` on macOS and Linux, where
+// the web view takes custom schemes as they are. Only the path and query
+// matter to the two functions below.
+
+/// Serves `/full/<id>?long=<px>`: the photo read from its original (disk
+/// plugged in) at that long edge, 0 = full size. Nothing is stored; 404 when
+/// no copy is reachable.
 fn serve_full(cat: &Catalog, path: &str, query: &str) -> tauri::http::Response<Vec<u8>> {
     let id = path.trim_start_matches("/full/").parse::<i64>().ok();
     let long =
@@ -728,6 +732,7 @@ fn serve_full(cat: &Catalog, path: &str, query: &str) -> tauri::http::Response<V
     }
 }
 
+/// Serves `/thumb/<id>`, `/preview/<id>` and `/face/<id>` from the data folder.
 fn serve_image(cat: &Catalog, path: &str) -> tauri::http::Response<Vec<u8>> {
     let mut parts = path.trim_start_matches('/').split('/');
     let kind = parts.next();
