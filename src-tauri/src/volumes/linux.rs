@@ -11,6 +11,7 @@
 
 use super::{DiskInfo, MountEntry, with_trailing_slash};
 use std::path::Path;
+use std::process::Command;
 
 const MOUNT_TABLE: &str = "/proc/self/mountinfo";
 const MOUNTS: &str = "/proc/self/mounts";
@@ -62,17 +63,56 @@ pub(super) fn is_local_disk(entry: &MountEntry) -> bool {
 }
 
 /// UUID, label and size of the disk behind a mount. `None` if the mount point isn't a folder (a bind-mounted
-/// file), or the disk has no UUID or no known size.
+/// file), or nothing tells this disk from others.
+///
+/// The block device is found by the number the mount table gives it (`/sys/dev/block/8:1` leads to `sda1`): a root
+/// file system is often listed as `/dev/root`, which is no file at all. The UUID and label are the links to that
+/// device under `/dev/disk`; where there are none (no udev, a container) the kernel's own id of the file system
+/// stands in for the UUID, and the size comes from `df`.
 pub(super) fn disk_info(entry: &MountEntry) -> Option<DiskInfo> {
     if !Path::new(&entry.mount).is_dir() {
         return None;
     }
-    let device = std::fs::canonicalize(&entry.source).ok()?;
-    let uuid = link_name_for(Path::new("/dev/disk/by-uuid"), &device)?;
-    let label = link_name_for(Path::new("/dev/disk/by-label"), &device).map(|name| decode_hex_escapes(&name));
-    let sectors = Path::new("/sys/class/block").join(device.file_name()?).join("size");
-    let size = bytes_from_sectors(&std::fs::read_to_string(sectors).ok()?)?;
+    let block = block_name(&entry.device)
+        .or_else(|| std::fs::canonicalize(&entry.source).ok()?.file_name().map(|n| n.to_string_lossy().into_owned()));
+    let by_link = |dir: &str| block.as_deref().and_then(|b| link_name_for(Path::new(dir), b));
+    let uuid = by_link("/dev/disk/by-uuid").or_else(|| file_system_id(&entry.mount))?;
+    let label = by_link("/dev/disk/by-label").map(|name| decode_hex_escapes(&name));
+    let size = block.as_deref().and_then(size_of_block).or_else(|| total_bytes(&entry.mount))?;
     Some(DiskInfo { uuid, label: label.unwrap_or_default(), size })
+}
+
+/// The name of the block device with this `major:minor` number (`sda1`, `dm-0`, `nvme0n1p2`), from the link
+/// `/sys/dev/block/<major:minor>`.
+fn block_name(device: &str) -> Option<String> {
+    let target = std::fs::read_link(Path::new("/sys/dev/block").join(device)).ok()?;
+    name_of_link_target(&target)
+}
+
+/// The last part of where a link leads: `sda1` for `../../devices/pci0000:00/ata1/block/sda/sda1`.
+fn name_of_link_target(target: &Path) -> Option<String> {
+    target.file_name().map(|name| name.to_string_lossy().into_owned())
+}
+
+/// The bytes of the block device `block`, from `/sys/class/block`.
+fn size_of_block(block: &str) -> Option<u64> {
+    bytes_from_sectors(&std::fs::read_to_string(Path::new("/sys/class/block").join(block).join("size")).ok()?)
+}
+
+/// The kernel's id of the file system at `mount` (`stat -f`), derived from its UUID or volume serial, so it is the
+/// same every time the disk is mounted. Written `fsid-<hex>` so it can't be taken for a UUID.
+fn file_system_id(mount: &str) -> Option<String> {
+    parse_file_system_id(&super::output_of(Command::new("stat").args(["-f", "-c", "%i", "--"]).arg(mount))?)
+}
+
+fn parse_file_system_id(text: &str) -> Option<String> {
+    let id = u64::from_str_radix(text.trim(), 16).ok().filter(|&id| id != 0)?;
+    Some(format!("fsid-{id:x}"))
+}
+
+/// The size of the file system at `mount`, from `df`.
+fn total_bytes(mount: &str) -> Option<u64> {
+    super::parse_df_total(&super::output_of(Command::new("df").args(["-Pk", "--"]).arg(mount))?)
 }
 
 /// Paths need no change here (macOS has to undo a firmlink).
@@ -85,12 +125,14 @@ pub(super) fn drive_mask() -> u32 {
     std::fs::read(MOUNTS).map_or(0, |bytes| super::hash_u32(&bytes))
 }
 
-/// The name of the link in `dir` (`/dev/disk/by-uuid`, ...) that leads to `device`, if there is one.
-fn link_name_for(dir: &Path, device: &Path) -> Option<String> {
+/// The name of the link in `dir` (`/dev/disk/by-uuid`, ...) that leads to the block device `block`, if there is one.
+fn link_name_for(dir: &Path, block: &str) -> Option<String> {
     std::fs::read_dir(dir)
         .ok()?
         .flatten()
-        .find(|link| std::fs::canonicalize(link.path()).is_ok_and(|target| target.as_path() == device))
+        .find(|link| {
+            std::fs::canonicalize(link.path()).is_ok_and(|target| target.file_name().is_some_and(|n| n == block))
+        })
         .map(|link| link.file_name().to_string_lossy().into_owned())
 }
 
@@ -114,6 +156,7 @@ fn parse_mountinfo_line(line: &str) -> Option<MountEntry> {
     Some(MountEntry {
         mount: with_trailing_slash(&decode_octal_escapes(fields.get(4)?)),
         source: decode_octal_escapes(fields.get(dash + 2)?),
+        device: fields.get(2)?.to_string(),
         fstype: fields.get(dash + 1)?.to_lowercase(),
         root: decode_octal_escapes(fields.get(3)?),
         options: fields.get(5)?.to_string(),
@@ -199,6 +242,7 @@ mod tests {
         MountEntry {
             mount: mount.to_string(),
             source: source.to_string(),
+            device: String::new(),
             fstype: fstype.to_string(),
             root: root.to_string(),
             options: String::new(),
@@ -210,6 +254,28 @@ mod tests {
     }
 
     #[test]
+    fn a_mount_keeps_the_number_of_its_device() {
+        let line = "36 1 8:1 / / rw,relatime shared:1 - ext4 /dev/root rw,errors=remount-ro";
+        let mount = parse_mountinfo_line(line).unwrap();
+        assert_eq!((mount.device.as_str(), mount.source.as_str()), ("8:1", "/dev/root"));
+    }
+
+    #[test]
+    fn a_block_device_is_named_by_the_end_of_its_sys_link() {
+        let target = Path::new("../../devices/pci0000:00/0000:00:1f.2/ata1/host0/target0:0:0/0:0:0:0/block/sda/sda1");
+        assert_eq!(name_of_link_target(target).as_deref(), Some("sda1"));
+        assert_eq!(name_of_link_target(Path::new("../../devices/virtual/block/dm-0")).as_deref(), Some("dm-0"));
+        assert_eq!(name_of_link_target(Path::new("")), None);
+    }
+
+    #[test]
+    fn the_kernels_file_system_id_is_read_as_hex() {
+        assert_eq!(parse_file_system_id("a1b2c3d4e5f60718\n").as_deref(), Some("fsid-a1b2c3d4e5f60718"));
+        assert_eq!(parse_file_system_id("0\n"), None);
+        assert_eq!(parse_file_system_id("stat: cannot read file system information\n"), None);
+    }
+
+    #[test]
     fn every_line_of_the_mount_table_is_read() {
         assert_eq!(parse_mountinfo(MOUNTINFO).len(), 10);
     }
@@ -218,6 +284,7 @@ mod tests {
     fn a_mount_line_is_cut_into_its_parts() {
         let mut root = entry("/", "/dev/nvme0n1p2", "ext4", "/");
         root.options = "rw,relatime".to_string();
+        root.device = "259:2".to_string();
         assert_eq!(parsed("/"), root);
         let boot = parsed("/boot/efi/");
         assert_eq!((boot.source.as_str(), boot.fstype.as_str(), boot.root.as_str()), ("/dev/nvme0n1p1", "vfat", "/"));

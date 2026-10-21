@@ -324,6 +324,9 @@ struct MountEntry {
     mount: String,
     /// The device (`/dev/sdb1`, `/dev/disk4s1`) or other source the system reports.
     source: String,
+    /// The device's `major:minor` number where the system gives one (Linux); empty otherwise.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    device: String,
     /// File system type, lowercase (`ext4`, `exfat`, `apfs`, ...).
     fstype: String,
     /// The directory of the file system that is mounted: `/` for a whole file system, something else for a
@@ -475,13 +478,26 @@ fn output_within(command: &mut Command, limit: std::time::Duration) -> Option<St
 /// spaces, so the columns are counted back from the capacity (`NN%`) rather than from the start of the line.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn parse_df_available(text: &str) -> Option<u64> {
+    df_kib(text)?[2].checked_mul(1024)
+}
+
+/// The size of the file system in bytes, from the same `df -Pk` output (`None` for a file system of no size).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_df_total(text: &str) -> Option<u64> {
+    df_kib(text)?[0].checked_mul(1024).filter(|&bytes| bytes > 0)
+}
+
+/// The total, used and available KiB on the line `df -Pk` prints for a file system.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn df_kib(text: &str) -> Option<[u64; 3]> {
     let cols: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
     let is_capacity = |c: &str| {
         c == "-" || c.strip_suffix('%').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
     };
     let at =
         (3..cols.len()).find(|&i| is_capacity(cols[i]) && cols[i - 3..i].iter().all(|n| n.parse::<u64>().is_ok()))?;
-    cols[at - 1].parse::<u64>().ok()?.checked_mul(1024)
+    let kib = |i: usize| cols[i].parse::<u64>().ok();
+    Some([kib(at - 3)?, kib(at - 2)?, kib(at - 1)?])
 }
 
 #[cfg(test)]
@@ -492,6 +508,7 @@ mod tests {
         MountEntry {
             mount: mount.to_string(),
             source: source.to_string(),
+            device: String::new(),
             fstype: fstype.to_string(),
             root: root.to_string(),
             options: String::new(),
@@ -770,6 +787,14 @@ mod tests {
         let text = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
                     //nas/My Photos 1000 400 600 40% /mnt/nas\n";
         assert_eq!(parse_df_available(text), Some(600 * 1024));
+    }
+
+    #[test]
+    fn df_output_gives_the_size_of_the_file_system() {
+        let text = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 2000 800 1200 40% /\n";
+        assert_eq!(parse_df_total(text), Some(2000 * 1024));
+        assert_eq!(parse_df_available(text), Some(1200 * 1024));
+        assert_eq!(parse_df_total("header\nnone 0 0 0 - /mnt/empty\n"), None);
     }
 
     #[test]

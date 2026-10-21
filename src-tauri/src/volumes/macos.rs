@@ -76,6 +76,7 @@ fn parse_mount_line(line: &str) -> Option<MountEntry> {
     Some(MountEntry {
         mount: with_trailing_slash(mount),
         source: source.to_string(),
+        device: String::new(),
         fstype,
         root: "/".to_string(),
         options,
@@ -214,6 +215,7 @@ map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)
         MountEntry {
             mount: mount.to_string(),
             source: source.to_string(),
+            device: String::new(),
             fstype: fstype.to_string(),
             root: "/".to_string(),
             options: options.to_string(),
