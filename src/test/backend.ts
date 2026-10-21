@@ -19,6 +19,7 @@ import type {
   PhotoList,
   Placement,
   Problem,
+  Repoint,
   Scope,
   Shifted,
   Shoot,
@@ -208,6 +209,8 @@ export function fakeBackend() {
   /** People merged into someone, as they were, for Undo. */
   const unmerged = new Map<number, { person: Person; photos: number[] }>();
   const calls: Call[] = [];
+  /** Sources not found where they were, and where they were found (a test sets them). */
+  const elsewhere = new Map<number, Repoint>();
   /** Extra time for some answers: by command, and by view (`viewName`) for the commands named. */
   const cmdDelays = new Map<string, number>();
   const viewDelays = new Map<string, { ms: number; cmds: string[] }>();
@@ -218,6 +221,18 @@ export function fakeBackend() {
 
   const overview = (): Overview => {
     const photos = shownPhotos();
+    const roots = (here: boolean, mount: string) =>
+      ROOTS.filter((r) => elsewhere.has(r.id) !== here).map((r) => ({
+        id: r.id,
+        found: true,
+        name: r.name,
+        path: `${mount}${r.name}`,
+        relPath: r.name,
+        lastScan: null,
+        photos: 4,
+        elsewhere: elsewhere.get(r.id) ?? null,
+      }));
+    const away = roots(false, "C:\\");
     return {
       volumes: [
         {
@@ -227,16 +242,12 @@ export function fakeBackend() {
           mount: "D:\\",
           lastMount: "D:\\",
           photos: photos.length,
-          roots: ROOTS.map((r) => ({
-            id: r.id,
-            found: true,
-            name: r.name,
-            path: `D:\\${r.name}`,
-            relPath: r.name,
-            lastScan: null,
-            photos: 4,
-          })),
+          roots: roots(true, "D:\\"),
         },
+        // Sources found elsewhere: on a disk unplugged for good (an old computer's).
+        ...(away.length
+          ? [{ id: 2, label: "OS (C:)", online: false, mount: null, lastMount: "C:\\", photos: away.length * 4, roots: away }]
+          : []),
       ],
       total: photos.length,
       online: photos.length,
@@ -617,6 +628,13 @@ export function fakeBackend() {
       case "save_settings":
         settings = { ...(a.settings as Record<string, unknown>) };
         return { ...settings };
+      case "check_repoint":
+        return elsewhere.get(a.rootId as number) ?? { rootId: a.rootId, path: a.path, disk: "Disk", checked: 4, found: 0, problem: "not there" };
+      case "repoint_folder": {
+        const r = elsewhere.get(a.rootId as number)!;
+        elsewhere.delete(r.rootId);
+        return r;
+      }
       case "scan_status":
         return { current: null, queued: [] };
       case "update_status":
@@ -657,6 +675,7 @@ export function fakeBackend() {
     delay: (cmd: string, ms: number) => cmdDelays.set(cmd, ms),
     marked,
     missing,
+    elsewhere,
     inBin,
     sideways,
     turns,

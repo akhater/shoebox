@@ -15,6 +15,7 @@ pub mod paths;
 pub mod private;
 pub mod psd;
 pub mod repair;
+pub mod repoint;
 pub mod scan;
 pub mod search;
 pub mod settings;
@@ -612,6 +613,7 @@ fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQ
 /// stopped mid-scan, gets them read again when it shows up (and at start, for
 /// the disks already there); lenses not read yet too.
 fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lenses: Arc<Kick>) {
+    look_elsewhere(&app, &cat);
     let mut mask = volumes::drive_mask();
     let mut last_full = Instant::now();
     let mut online: HashSet<i64> = HashSet::new();
@@ -637,6 +639,7 @@ fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lens
         match cat.refresh_volumes() {
             Ok(true) => {
                 let _ = cat.refresh_roots();
+                look_elsewhere(&app, &cat);
                 let _ = app.emit("volumes-changed", ());
                 lenses.kick();
                 resume_changes(app.clone(), cat.clone());
@@ -645,6 +648,23 @@ fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lens
             Err(e) => log::warn!("volume refresh failed: {e:#}"),
         }
     }
+}
+
+/// Looks for the sources that aren't here at the same path on the disks plugged in now (see
+/// [`repoint::look_elsewhere`]); the window is told when that changed.
+fn look_elsewhere(app: &AppHandle, cat: &Catalog) {
+    match repoint::look_elsewhere(cat) {
+        Ok(true) => {
+            let _ = app.emit("volumes-changed", ());
+        }
+        Ok(false) => {}
+        Err(e) => log::warn!("looking for sources elsewhere: {e:#}"),
+    }
+}
+
+/// [`look_elsewhere`] in the background, after the sources changed.
+pub(crate) fn look_elsewhere_soon(app: AppHandle, cat: Arc<Catalog>) {
+    std::thread::spawn(move || look_elsewhere(&app, &cat));
 }
 
 /// Previews, thumbnails and face pictures a PC that stopped mid-write left
@@ -909,6 +929,8 @@ pub fn run() {
             commands::rename_volume,
             commands::regenerate,
             commands::remove_folder,
+            commands::check_repoint,
+            commands::repoint_folder,
             commands::catalog_stats,
             commands::search_photos,
             commands::people,

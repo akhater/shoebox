@@ -3,6 +3,14 @@
 //!
 //!   shoebox-cli add <folder>     add a folder and scan it
 //!   shoebox-cli scan [root-id]   rescan one folder, or every plugged-in one
+//!   shoebox-cli repoint          folders whose disk is unplugged (or that aren't found on it) found at the
+//!                                same path on a disk plugged in now: a new computer's system disk, a disk
+//!                                copied onto another (JSON; the window offers them)
+//!   shoebox-cli repoint <root-id> <folder> [--check]   the folder's photos live in <folder> now: points
+//!                                it there, in the catalog only (no file touched), then scans it. Same
+//!                                folder id, same photos with their tags, faces and people. A sample of its
+//!                                photos is looked for there first (JSON: "checked", "found");
+//!                                --check: only look
 //!   shoebox-cli retry [disk-id]  read again only the files that couldn't be read (or were left
 //!                                half-read by a stopped scan), on one plugged-in disk or all of
 //!                                them (the window does it at start and when a disk is plugged in).
@@ -244,7 +252,7 @@ use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::db::stored_rel;
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::{self, Progress};
-use shoebox_lib::{cull, dates, focus, gear, organize, tags, upright};
+use shoebox_lib::{cull, dates, focus, gear, organize, repoint, tags, upright};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -278,6 +286,24 @@ fn main() -> anyhow::Result<()> {
             let report = scan::scan_root(&cat, id, &cancel, false, &show)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Some("repoint") => match (args.get(1), args.get(2)) {
+            (None, _) => {
+                repoint::look_elsewhere(&cat)?;
+                let found: Vec<_> = cat.found_elsewhere().into_values().collect();
+                println!("{}", serde_json::to_string_pretty(&found)?);
+            }
+            (Some(id), Some(folder)) => {
+                let id: i64 = id.parse()?;
+                if args.get(3).is_some_and(|a| a == "--check") {
+                    println!("{}", serde_json::to_string_pretty(&repoint::check(&cat, id, Path::new(folder))?)?);
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&repoint::repoint(&cat, id, Path::new(folder))?)?);
+                    let report = scan::scan_root(&cat, id, &cancel, false, &show)?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+            }
+            _ => anyhow::bail!("repoint [<root-id> <folder> [--check]]"),
+        },
         Some("scan") => {
             let ids = match args.get(1) {
                 Some(id) => vec![id.parse()?],

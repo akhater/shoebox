@@ -4,6 +4,7 @@
 use crate::db::{self, FILE_MISSING, FILE_PRESENT, PREVIEW_OK, under_sql};
 use crate::gear::{self, Kind};
 use crate::paths::{self, DataDir};
+use crate::repoint::Repoint;
 use crate::settings::Settings;
 use crate::volumes::{self, MountedVolume};
 use anyhow::{Result, anyhow, bail};
@@ -28,6 +29,9 @@ pub struct Catalog {
     /// (renamed, moved, deleted): (volume id, relative path). Their photos are
     /// treated like an unplugged disk's - unreachable, not missing.
     unreachable: RwLock<Vec<(i64, String)>>,
+    /// Sources not here (unplugged, or not found on their disk) found at the same path on a disk plugged in
+    /// now, by root id: offered to the user, never taken by themselves (see [`crate::repoint`]).
+    elsewhere: RwLock<HashMap<i64, Repoint>>,
     /// Notices every commit to the catalog, by Shoebox or another program
     /// (shoebox-cli): a connection that never writes, its `data_version` last
     /// seen, and how many times it changed. See [`Catalog::generation`].
@@ -60,6 +64,7 @@ impl Catalog {
             settings: RwLock::new(settings),
             online: RwLock::new(HashMap::new()),
             unreachable: RwLock::new(Vec::new()),
+            elsewhere: RwLock::new(HashMap::new()),
             watch: Mutex::new((watch, version, 0)),
             disks_changed: AtomicU64::new(0),
             kept_overview: Kept::new(1),
@@ -176,6 +181,38 @@ impl Catalog {
 
     pub fn online_ids(&self) -> Vec<i64> {
         self.online.read().unwrap().keys().copied().collect()
+    }
+
+    /// Every known disk plugged in now: volume id -> where it is mounted.
+    pub fn online_mounts(&self) -> HashMap<i64, String> {
+        self.online.read().unwrap().clone()
+    }
+
+    /// Whether a source's folder is there now: its disk plugged in and the folder found on it.
+    pub fn root_is_here(&self, volume_id: i64, rel: &str) -> bool {
+        self.mount_of(volume_id).is_some() && !self.is_unreachable(volume_id, rel)
+    }
+
+    /// A disk the catalog has just started keeping something on is plugged in at `mount`.
+    pub(crate) fn note_plugged_in(&self, volume_id: i64, mount: &str) {
+        self.online.write().unwrap().insert(volume_id, mount.to_string());
+        self.disks_changed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Sources not here that were found elsewhere (see [`crate::repoint::look_elsewhere`]), by root id.
+    pub fn found_elsewhere(&self) -> HashMap<i64, Repoint> {
+        self.elsewhere.read().unwrap().clone()
+    }
+
+    /// Keeps what [`crate::repoint::look_elsewhere`] found. Returns true if that changed.
+    pub(crate) fn set_found_elsewhere(&self, found: HashMap<i64, Repoint>) -> bool {
+        let mut cur = self.elsewhere.write().unwrap();
+        let changed = *cur != found;
+        *cur = found;
+        if changed {
+            self.disks_changed.fetch_add(1, Ordering::SeqCst);
+        }
+        changed
     }
 
     /// Re-reads which known disks are plugged in. Returns true if that changed.
@@ -551,6 +588,7 @@ impl Catalog {
 
     fn overview_now(&self) -> Result<Overview> {
         let online = self.online.read().unwrap().clone();
+        let elsewhere = self.found_elsewhere();
         let state = state_sql(&self.online_sql());
         let db = self.read()?;
         let shown = self.shown_sql("p");
@@ -603,8 +641,10 @@ impl Catalog {
             v.roots = root_stmt
                 .query_map([v.id], |r| {
                     let rel: String = r.get(1)?;
+                    let id: i64 = r.get(0)?;
                     Ok(RootInfo {
-                        id: r.get(0)?,
+                        id,
+                        elsewhere: elsewhere.get(&id).cloned(),
                         found: !self.is_unreachable(v.id, &rel),
                         name: rel.rsplit(SEP).next().filter(|s| !s.is_empty()).unwrap_or("Whole disk").to_string(),
                         path: shown_path(&shown_mount, &rel),
@@ -1478,7 +1518,7 @@ fn status_sql(state: &str) -> String {
     format!("CASE {state} WHEN 2 THEN 'online' WHEN 1 THEN 'offline' ELSE 'missing' END")
 }
 
-fn find_volume(db: &Connection, mv: &MountedVolume) -> Result<Option<i64>> {
+pub(crate) fn find_volume(db: &Connection, mv: &MountedVolume) -> Result<Option<i64>> {
     Ok(db
         .query_row(
             "SELECT id FROM volumes WHERE serial = ?1 AND fs = ?2 AND size_bytes = ?3",
@@ -1488,7 +1528,7 @@ fn find_volume(db: &Connection, mv: &MountedVolume) -> Result<Option<i64>> {
         .optional()?)
 }
 
-fn upsert_volume(db: &Connection, mv: &MountedVolume) -> Result<i64> {
+pub(crate) fn upsert_volume(db: &Connection, mv: &MountedVolume) -> Result<i64> {
     if let Some(id) = find_volume(db, mv)? {
         db.execute(
             "UPDATE volumes SET last_mount = ?1, last_seen = ?2 WHERE id = ?3",
@@ -1505,7 +1545,7 @@ fn upsert_volume(db: &Connection, mv: &MountedVolume) -> Result<i64> {
 }
 
 /// What a disk is called the first time it is cataloged.
-fn new_volume_label(mv: &MountedVolume) -> String {
+pub(crate) fn new_volume_label(mv: &MountedVolume) -> String {
     // "OS (C:)" for a drive letter; a disk mounted in a folder, or anywhere on
     // macOS and Linux, goes by its name.
     let at = mv.mount.trim_end_matches('\\');
@@ -1543,7 +1583,7 @@ fn shown_file(mount: &str, rel: &str, name: &str) -> String {
 /// Refuses a folder with a name in its path that can't be kept in the catalog
 /// on this system ([`volumes::name_is_storable`], or not Unicode): its photos
 /// could not be told from those of other folders, or opened again.
-fn ensure_keepable(path: &Path) -> Result<()> {
+pub(crate) fn ensure_keepable(path: &Path) -> Result<()> {
     for part in path.components() {
         if let std::path::Component::Normal(name) = part
             && !name.to_str().is_some_and(volumes::name_is_storable)
@@ -2211,6 +2251,8 @@ pub struct RootInfo {
     pub rel_path: String,
     pub last_scan: Option<i64>,
     pub photos: i64,
+    /// Not here, but found at the same path on a disk plugged in now: where, to offer pointing the source there.
+    pub elsewhere: Option<Repoint>,
 }
 
 #[derive(Serialize)]

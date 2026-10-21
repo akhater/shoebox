@@ -245,6 +245,11 @@ button {
 .icon-btn.tiny.spin {
   opacity: 1;
 }
+/* A source not here, found at the same path on a disk plugged in now: offered, always shown. */
+.icon-btn.tiny.found-elsewhere {
+  opacity: 1;
+  color: var(--accent);
+}
 .icon-btn.spin svg {
   animation: spin 1s linear infinite;
 }
@@ -567,6 +572,14 @@ button {
 }
 .banner.warn {
   color: #f0a18c;
+}
+/* A source not here whose photos were found elsewhere: offered. */
+.banner.found {
+  color: var(--text);
+}
+.banner.found > svg {
+  color: var(--accent);
+  flex: none;
 }
 
 /* Grid */

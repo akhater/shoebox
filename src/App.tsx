@@ -13,6 +13,7 @@ import {
   Focus,
   Pencil,
   FolderPlus,
+  FolderSync,
   FolderX,
   LockKeyhole,
   LockKeyholeOpen,
@@ -1192,6 +1193,33 @@ export default function App() {
     }
   };
 
+  // A source whose photos live somewhere else now (a new computer, a disk copied onto another): the catalog
+  // follows them there once a sample of them is found there, then scans it. No file is touched.
+  const repointFolder = async (r: RootInfo, path?: string) => {
+    const dir = path ?? (await open({ directory: true, multiple: false, title: `Where are the photos of ${r.name} now?` }));
+    if (typeof dir !== "string") return;
+    try {
+      const c = await api.checkRepoint(r.id, dir);
+      if (c.problem) {
+        setMessage({ text: c.problem, warn: true });
+        return;
+      }
+      if (c.found < c.checked) {
+        const yes = await ask(
+          `${fmtNum(c.found)} of the ${fmtNum(c.checked)} photos of "${r.name}" looked for are in ${c.path}, unchanged. The others aren't there.\n\n` +
+            `Point "${r.name}" there anyway? Your files are not touched. After the scan, its photos not found there show as missing; they stay in the catalog.`,
+          { title: "Point to its new place", kind: "warning", okLabel: "Point it there", cancelLabel: "Cancel" },
+        );
+        if (!yes) return;
+      }
+      await api.repointFolder(r.id, dir);
+      setMessage({ text: `${r.name} is now ${c.path}, on ${c.disk}. Its photos keep their tags and faces; scanning it there.` });
+      refresh();
+    } catch (e) {
+      setMessage({ text: String(e), warn: true });
+    }
+  };
+
   // Missing photos deleted outside Shoebox: out of the catalog, files already gone.
   const forgetMissing = async (ids: number[]) => {
     const n = ids.length;
@@ -1409,7 +1437,7 @@ export default function App() {
     for (const v of overview?.volumes ?? []) {
       if (scope.kind === "volume" && v.id === scope.id) return { title: v.label, offline: !v.online };
       const r = v.roots.find((r) => scope.kind === "root" && r.id === scope.id);
-      if (r) return { title: r.relPath ? r.name : v.label, sub: r.path, offline: !v.online, lost: v.online && !r.found };
+      if (r) return { title: r.relPath ? r.name : v.label, sub: r.path, offline: !v.online, lost: v.online && !r.found, root: r };
     }
     return { title: "" };
   }, [scope, overview, peopleList, browse, privateStatus?.name]);
@@ -1478,6 +1506,7 @@ export default function App() {
         queuedRoots={queued}
         onRegenerate={(id) => regenerate(id)}
         onRemove={removeFolder}
+        onRepoint={repointFolder}
         people={shownPeople.length}
         peopleNew={peopleNew}
         peopleOpen={view === "people"}
@@ -1797,12 +1826,31 @@ export default function App() {
           </div>
         )}
 
-        {"offline" in scopeInfo && scopeInfo.offline && (
-          <div className="banner">
-            <Unplug size={15} /> This disk is unplugged. You're browsing Shoebox's copies; nothing is lost.
+        {"root" in scopeInfo && scopeInfo.root?.elsewhere ? (
+          <div className="banner found">
+            <FolderSync size={15} />
+            <span>
+              {scopeInfo.offline ? "This disk is unplugged" : `This folder isn't at ${scopeInfo.sub} any more`}, but its
+              photos are at <b>{scopeInfo.root.elsewhere.path}</b> on {scopeInfo.root.elsewhere.disk}.
+            </span>
+            <span className="grow" />
+            <button
+              className="btn small primary"
+              onClick={() => repointFolder(scopeInfo.root!, scopeInfo.root!.elsewhere!.path)}
+              title="Shoebox follows the photos there, with their tags and faces, then scans the folder. Your files are not touched."
+            >
+              Use it
+            </button>
           </div>
+        ) : (
+          "offline" in scopeInfo &&
+          scopeInfo.offline && (
+            <div className="banner">
+              <Unplug size={15} /> This disk is unplugged. You're browsing Shoebox's copies; nothing is lost.
+            </div>
+          )
         )}
-        {"lost" in scopeInfo && scopeInfo.lost && (
+        {"lost" in scopeInfo && scopeInfo.lost && !scopeInfo.root?.elsewhere && (
           <div className="banner warn">
             <FolderX size={15} /> This folder isn't at {scopeInfo.sub} any more. Its photos stay in the catalog, shown
             from Shoebox's copies. Put it back and press ↻ next to it to scan it again.

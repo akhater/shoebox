@@ -1468,3 +1468,41 @@ describe("the Private filter", () => {
     expect(be.calls.filter((c) => c.cmd === "list_photos").at(-1)?.args.filters).toMatchObject({ private: [] });
   });
 });
+
+describe("a source whose photos live somewhere else now", () => {
+  const found = { rootId: 30, path: "C:\\Photos\\Trip", disk: "New laptop (C:)", checked: 4, found: 4, problem: null };
+
+  test("found at the same path on a disk plugged in: one click points it there, and it is offered no more", async () => {
+    const be = fakeBackend();
+    be.elsewhere.set(30, found);
+    const host = await renderApp();
+    const offered = () => host.querySelectorAll<HTMLButtonElement>(".sidebar-scroll .found-elsewhere");
+    expect(offered()).toHaveLength(1);
+    expect(sidebarItem(host, "Trip").title).toContain("Found at C:\\Photos\\Trip on New laptop (C:)");
+
+    await click(offered()[0]);
+    await wait(300);
+    expect(be.calls.filter((c) => c.cmd === "repoint_folder").map((c) => c.args)).toEqual([
+      { rootId: 30, path: "C:\\Photos\\Trip" },
+    ]);
+    expect(offered()).toHaveLength(0);
+  });
+
+  test("its menu offers the place found, and choosing a folder that isn't it changes nothing", async () => {
+    const be = fakeBackend();
+    be.elsewhere.set(30, found);
+    const host = await renderApp();
+    const row = sidebarItem(host, "Trip");
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    await wait(30);
+    const menu = host.querySelector<HTMLElement>(".folder-menu")!;
+    expect(byText(menu, "button", "Use the one on New laptop (C:)")).toBeTruthy();
+    expect(byText(menu, "button", "Point to its new place…")).toBeTruthy();
+    // A source that is here has neither.
+    await key(menu, "Escape");
+    sidebarItem(host, "Fast").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    await wait(30);
+    expect(host.querySelector(".folder-menu")!.textContent).not.toMatch(/Point to its new place|Use the one/);
+    expect(be.calls.some((c) => c.cmd === "repoint_folder")).toBe(false);
+  });
+});

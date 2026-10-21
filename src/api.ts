@@ -181,6 +181,23 @@ export interface RootInfo {
   relPath: string;
   lastScan: number | null;
   photos: number;
+  /** Not here (disk unplugged, or folder not found on it), but found at the same path on a disk plugged in now. */
+  elsewhere: Repoint | null;
+}
+
+/** What pointing a source at a folder found there: a sample of its photos looked for. */
+export interface Repoint {
+  rootId: number;
+  /** The folder, as the system writes it. */
+  path: string;
+  /** The disk holding it, by its name in Shoebox. */
+  disk: string;
+  /** Photos of the source looked for there. */
+  checked: number;
+  /** Of those, the ones there, unchanged. */
+  found: number;
+  /** Why the source can't be pointed there; null when it can. */
+  problem: string | null;
 }
 
 export interface VolumeInfo {
@@ -413,6 +430,10 @@ export const api = {
   /** Takes the missing photos among these out of the catalog. No file is touched. */
   forgetMissing: (ids: number[]) => invoke<{ photos: number; files: number }>("forget_missing", { ids }),
   addFolder: (path: string) => invoke<number>("add_folder", { path }),
+  /** What pointing a source at a folder would find there. Reads only. */
+  checkRepoint: (rootId: number, path: string) => invoke<Repoint>("check_repoint", { rootId, path }),
+  /** Points a source at the folder where its photos are now (catalog only), then scans it there. */
+  repointFolder: (rootId: number, path: string) => invoke<Repoint>("repoint_folder", { rootId, path }),
   rescan: (rootId: number) => invoke<void>("rescan", { rootId }),
   rescanAll: () => invoke<number>("rescan_all"),
   cancelScan: () => invoke<void>("cancel_scan"),
