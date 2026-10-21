@@ -216,7 +216,7 @@ pub fn has_recycle_bin(_mount: &str) -> bool {
 pub fn mounted() -> Vec<MountedVolume> {
     let mut found: Vec<MountedVolume> = platform::all_mounts()
         .into_iter()
-        .filter(|e| platform::is_local_disk(e))
+        .filter(platform::is_local_disk)
         .filter_map(|e| platform::disk_info(&e).map(|info| volume_from(&e, info)))
         .collect();
     shortest_mount_first(&mut found);
