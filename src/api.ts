@@ -592,6 +592,9 @@ export interface CullStack {
   compared: "face" | "focusPoint" | "sharpest";
   /** Compared on what the originals showed: every frame was looked at closer. */
   closer: boolean;
+  /** "shot": frames of the same shot (a burst), the best one kept. "focus": the frames of a
+   *  focus bracket, to be merged into one picture: every one kept. */
+  kind: "shot" | "focus";
 }
 export interface Shoot {
   photos: number;

@@ -19,6 +19,7 @@ pub mod repoint;
 pub mod scan;
 pub mod search;
 pub mod settings;
+pub mod stacks;
 pub mod tags;
 pub mod trash_bin;
 pub mod turn;
@@ -360,6 +361,14 @@ fn lens_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<Kick>) {
         // Only the photo shown asks for them: nothing to tell the window.
         if let Err(e) = focus::find(&cat, &cancel) {
             log::warn!("finding focus points failed: {e:#}");
+        }
+        // Focus brackets found by a scan or just now: gathered into stacks.
+        match stacks::assign(&cat) {
+            Ok(n) if n > 0 => {
+                let _ = app.emit("catalog-changed", ());
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("gathering focus stacks failed: {e:#}"),
         }
     }
 }

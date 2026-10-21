@@ -1090,20 +1090,21 @@ impl Catalog {
     pub fn photo_detail(&self, id: i64) -> Result<PhotoDetail> {
         let online = self.online.read().unwrap().clone();
         let db = self.read()?;
-        let (focus, mut d) = db
+        let ((focus, stack), mut d) = db
             .query_row(
                 &format!(
                     "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
                             exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown, p.turn,
-                            MAX(COALESCE(p.sideways, 0), 0), p.focus, p.private, p.taken_original
+                            MAX(COALESCE(p.sideways, 0), 0), p.focus, p.private, p.taken_original, p.stack
                        FROM photos p WHERE id = ?1 AND {}",
                     self.shown_sql("p")
                 ),
                 [id],
                 |r| {
                     let focus: Option<Vec<u8>> = r.get(20)?;
+                    let stack: Option<i64> = r.get(23)?;
                     Ok((
-                        focus,
+                        (focus, stack),
                         PhotoDetail {
                             id: r.get(0)?,
                             kind: r.get(1)?,
@@ -1128,6 +1129,7 @@ impl Catalog {
                             sideways: r.get(19)?,
                             private: r.get::<_, i64>(21)? == 1,
                             focus: None,
+                            stack: None,
                             problems: Vec::new(),
                             files: Vec::new(),
                         },
@@ -1141,6 +1143,9 @@ impl Catalog {
             Some(blob) => crate::focus::decode(&db, &blob)?.map(|f| f.turned(d.turn)),
             None => None,
         };
+        if let Some(stack) = stack {
+            d.stack = crate::stacks::place(&db, stack, id)?;
+        }
         d.files = db
             .prepare(
                 "SELECT f.id, f.name, f.size, f.state, f.error, fo.rel_path, v.id, v.label, v.last_mount
@@ -1382,14 +1387,21 @@ impl Catalog {
         let ids = &self.shown_ids(ids)?[..];
         let db = self.read()?;
         let mut stmt = db.prepare(
-            "SELECT p.id, p.camera_shown, p.exposure, p.focal, (SELECT MIN(f.name) FROM files f WHERE f.photo_id = p.id)
+            "SELECT p.id, p.camera_shown, p.exposure, p.focal, (SELECT MIN(f.name) FROM files f WHERE f.photo_id = p.id),
+                    p.stack
                FROM photos p WHERE p.id IN (SELECT value FROM json_each(?1))",
         )?;
         let out = stmt
             .query_map([serde_json::to_string(ids)?], |r| {
                 Ok((
                     r.get(0)?,
-                    crate::cull::ShotInfo { camera: r.get(1)?, exposure: r.get(2)?, focal: r.get(3)?, name: r.get(4)? },
+                    crate::cull::ShotInfo {
+                        camera: r.get(1)?,
+                        exposure: r.get(2)?,
+                        focal: r.get(3)?,
+                        name: r.get(4)?,
+                        stack: r.get(5)?,
+                    },
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -2288,6 +2300,8 @@ pub struct PhotoDetail {
     pub private: bool,
     /// Where the camera focused, as the photo is shown; None when its file doesn't say.
     pub focus: Option<crate::focus::Focus>,
+    /// Its place in a focus stack, when it is a frame of one (see stacks.rs).
+    pub stack: Option<crate::stacks::Place>,
     /// What Cull found wrong with it, once measured: filled in by
     /// [`crate::cull::QualityIndex::photo_detail`], empty here.
     pub problems: Vec<crate::cull::Found>,

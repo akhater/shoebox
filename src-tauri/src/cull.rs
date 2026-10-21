@@ -293,6 +293,9 @@ pub struct Shot {
     /// "1/15" or "0.5s", as the catalog keeps it.
     pub exposure: Option<String>,
     pub focal: Option<f64>,
+    /// A frame of a focus stack (see stacks.rs): soft away from where it is
+    /// focused by design, so only what spoils the merge counts against it.
+    pub focus_stack: bool,
 }
 
 /// A problem and how to say it.
@@ -326,7 +329,7 @@ pub fn problems(q: &Quality, shot: &Shot) -> Vec<Found> {
     let sharpest = best.rel(best.sharpest);
     // No edge anywhere in a frame with something in it: blurred beyond measure.
     let blurry = sharpest.map_or(p.detail < 0.15, |s| s >= BLURRY);
-    if blurry {
+    if blurry && !shot.focus_stack {
         let mut text = "Blurry everywhere: shake, motion or focus missed".to_string();
         if let Some(slow) = slow_shutter(shot) {
             text = format!("Blurry everywhere: {slow}");
@@ -345,8 +348,12 @@ pub fn problems(q: &Quality, shot: &Shot) -> Vec<Found> {
     }
     if let Some(how) = q.close.as_ref().and_then(|c| c.shaken(true)) {
         add(Problem::Soft, with_shutter(format!("Shaken at 100%: the picture is {how}")));
-    } else if close && best.full_px(best.sharpest).is_some_and(|s| s >= SOFT_PX) {
+    } else if close && !shot.focus_stack && best.full_px(best.sharpest).is_some_and(|s| s >= SOFT_PX) {
         add(Problem::Soft, "Soft at 100%: nothing is quite sharp".into());
+    }
+    // Where a frame of a focus stack is sharp is where the camera put it.
+    if shot.focus_stack {
+        return out;
     }
     if let (Some(face), Some(face_px)) = (best.rel(best.face), best.full_px(best.face)) {
         let soft = if close { face_px >= FACE_SOFT_PX } else { face >= FACE_SOFT };
@@ -373,7 +380,7 @@ pub fn problems(q: &Quality, shot: &Shot) -> Vec<Found> {
 
 impl Shot {
     pub fn of(info: &ShotInfo) -> Self {
-        Shot { exposure: info.exposure.clone(), focal: info.focal }
+        Shot { exposure: info.exposure.clone(), focal: info.focal, focus_stack: info.stack.is_some() }
     }
 
     /// How long the shutter was open, s, and the focal length, mm, when the file says.
@@ -1361,6 +1368,7 @@ impl QualityIndex {
                 FrameIn {
                     id: *id,
                     taken: list.taken[i],
+                    stack: info.stack,
                     camera: info.camera.clone(),
                     vector: vectors.get(id).cloned(),
                     quality: measured.get(id).copied(),
@@ -1586,6 +1594,20 @@ pub struct Stack {
     pub compared: Compared,
     /// Compared on what the originals showed: every frame was looked at closer.
     pub closer: bool,
+    pub kind: StackKind,
+}
+
+/// What makes frames one stack.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StackKind {
+    /// Frames of the same shot (a burst, or the same framing soon after):
+    /// the best one is kept.
+    #[default]
+    Shot,
+    /// The frames of a focus bracket (see stacks.rs), to be merged into one
+    /// picture: every one is kept.
+    Focus,
 }
 
 /// Where the frames of a stack are compared, to find the one to keep: where
@@ -1698,6 +1720,8 @@ pub struct Unreadable {
 struct FrameIn {
     id: i64,
     taken: i64,
+    /// The focus stack it is a frame of (its first frame's id).
+    stack: Option<i64>,
     camera: Option<String>,
     vector: Option<Vec<f32>>,
     quality: Option<Quality>,
@@ -1709,6 +1733,8 @@ struct FrameIn {
 #[derive(Clone, Debug, Default)]
 pub struct ShotInfo {
     pub camera: Option<String>,
+    /// The focus stack it is a frame of: its first frame's id (see stacks.rs).
+    pub stack: Option<i64>,
     pub exposure: Option<String>,
     pub focal: Option<f64>,
     pub name: Option<String>,
@@ -1723,7 +1749,9 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// it when taken by the same camera, the same way up, soon after, and laid
 /// out like both the frame before it and the stack's first (so a stack never
 /// drifts from pose to pose), and CLIP finds it alike. Without measures or
-/// descriptions, only frames a second apart are one burst.
+/// descriptions, only frames a second apart are one burst. The frames of a
+/// focus stack are one stack, whatever they look like, and no other frame
+/// joins them: focus moving from near to far changes the picture.
 fn suggest(frames: Vec<FrameIn>) -> Vec<Stack> {
     let layout = |f: &FrameIn| f.quality.and_then(|q| q.preview.layout);
     let upright = |f: &FrameIn| (f.row.w > 0 && f.row.h > 0).then_some(f.row.h > f.row.w);
@@ -1731,6 +1759,9 @@ fn suggest(frames: Vec<FrameIn>) -> Vec<Stack> {
     for mut f in frames {
         let joins = groups.last().is_some_and(|g| {
             let (first, prev) = (&g[0], &g[g.len() - 1]);
+            if prev.stack.is_some() || f.stack.is_some() {
+                return prev.stack == f.stack;
+            }
             f.row.alike = match (&prev.vector, &f.vector) {
                 (Some(a), Some(b)) => Some(dot(a, b)),
                 _ => None,
@@ -1769,6 +1800,9 @@ fn same_capture(a: &FrameIn, b: &FrameIn) -> bool {
 }
 
 fn stack_of(frames: Vec<FrameIn>) -> Stack {
+    if frames.first().is_some_and(|f| f.stack.is_some()) {
+        return focus_stack_of(frames);
+    }
     let found: Vec<Vec<Found>> =
         frames.iter().map(|f| f.quality.map(|q| problems(&q, &f.shot)).unwrap_or_default()).collect();
     // Frames compare on their faces, else where the camera focused, else on
@@ -1841,7 +1875,35 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
             row
         })
         .collect();
-    Stack { frames: rows, keeper, compared, closer: all_close }
+    Stack { frames: rows, keeper, compared, closer: all_close, kind: StackKind::Shot }
+}
+
+/// A focus stack: every frame is needed to merge it, so none is suggested
+/// for rejection, and none is soft for being focused elsewhere
+/// ([`Shot::focus_stack`]). A frame that would spoil the merge (shaken,
+/// empty, very dark) says so, and is left to the user.
+fn focus_stack_of(frames: Vec<FrameIn>) -> Stack {
+    let n = frames.len();
+    let closer = frames.iter().all(|f| f.quality.is_some_and(|q| q.close.is_some()));
+    let rows = frames
+        .into_iter()
+        .map(|f| {
+            let mut row = f.row;
+            let found = f.quality.map(|q| problems(&q, &f.shot)).unwrap_or_default();
+            row.closer = f.quality.is_some_and(|q| q.close.is_some());
+            row.problems = found.iter().map(|p| p.problem).collect();
+            let spoils = found.iter().any(|p| p.problem.major());
+            let why = match (f.quality.is_some(), n) {
+                (false, _) => "Not measured yet".to_string(),
+                (true, 1) => "A frame of a focus stack".to_string(),
+                (true, _) => format!("One of the {n} frames of a focus stack: each is needed to merge it"),
+            };
+            row.suggest = if f.quality.is_none() || spoils { Suggest::None } else { Suggest::Keep };
+            row.reasons = std::iter::once(why).chain(found.into_iter().map(|p| p.text)).collect();
+            row
+        })
+        .collect();
+    Stack { frames: rows, keeper: 0, compared: Compared::Sharpest, closer, kind: StackKind::Focus }
 }
 
 impl Shoot {
@@ -1887,7 +1949,7 @@ impl QualityIndex {
             log::warn!("cull: photo {id}: not measured: {e:#}");
         }
         let mut d = cat.photo_detail(id)?;
-        let shot = Shot { exposure: d.exposure.clone(), focal: d.focal };
+        let shot = Shot { exposure: d.exposure.clone(), focal: d.focal, focus_stack: d.stack.is_some() };
         d.problems = self.get(id).map(|q| problems(&q, &shot)).unwrap_or_default();
         Ok(d)
     }
@@ -1992,7 +2054,7 @@ mod tests {
         assert!(s.doubled.unwrap() < 0.05 && s.smeared.unwrap() < 0.05, "{s:?}");
         assert!(g.doubled.unwrap() >= DOUBLED_CLOSE, "{g:?}");
         let q = looked_closer(&shaken, true);
-        let shot = Shot { exposure: Some("1s".into()), focal: Some(35.0) };
+        let shot = Shot { exposure: Some("1s".into()), focal: Some(35.0), ..Default::default() };
         let found = problems(&q, &shot);
         assert_eq!(found.iter().map(|f| f.problem).collect::<Vec<_>>(), [Problem::Soft], "{found:?}");
         assert_eq!(found[0].text, "Shaken at 100%: the picture is doubled (1 s at 35 mm is slow for a steady hand)");
@@ -2057,7 +2119,7 @@ mod tests {
     #[test]
     fn problems_of_typical_frames() {
         // 1080 px previews.
-        let shot = Shot { exposure: Some("1/15".into()), focal: Some(200.0) };
+        let shot = Shot { exposure: Some("1/15".into()), focal: Some(200.0), ..Default::default() };
         let blurry = Quality { preview: measure(&squares(1080, 720, 2.5), &[], &[]), close: None };
         let found = problems(&blurry, &shot);
         assert_eq!(found.iter().map(|f| f.problem).collect::<Vec<_>>(), [Problem::Blurry]);
@@ -2178,6 +2240,7 @@ mod tests {
         FrameIn {
             id,
             taken,
+            stack: None,
             camera: Some("EOS R6".into()),
             vector,
             quality: Some(Quality { preview, close: None }),
@@ -2327,6 +2390,32 @@ mod tests {
         assert!(stacks[0].frames.iter().all(|f| f.suggest == Suggest::Keep), "{:?}", stacks[0].frames);
     }
 
+    /// Frames of a focus stack, sharp only where each was focused, and a
+    /// frame of another shot taken the same second.
+    #[test]
+    fn a_focus_stack_keeps_every_frame_and_takes_in_no_other() {
+        let in_stack = |id, blur| {
+            let mut f = frame(id, 100, None, blur);
+            (f.stack, f.shot.focus_stack) = (Some(1), true);
+            f
+        };
+        let stacks = suggest(vec![in_stack(1, 3.0), in_stack(2, 0.3), in_stack(3, 2.0), frame(4, 100, None, 0.3)]);
+        assert_eq!(stacks.iter().map(|s| s.frames.len()).collect::<Vec<_>>(), [3, 1]);
+        assert_eq!(stacks[0].kind, StackKind::Focus);
+        for f in &stacks[0].frames {
+            assert_eq!((f.suggest, f.problems.len()), (Suggest::Keep, 0), "{f:?}");
+        }
+        assert_eq!(stacks[0].frames[0].reasons[0], "One of the 3 frames of a focus stack: each is needed to merge it");
+        assert_eq!(stacks[1].kind, StackKind::Shot);
+        // Shaken spoils the merge: said, and left to the user, never rejected.
+        let mut shaken = in_stack(2, 0.3);
+        shaken.quality.as_mut().unwrap().preview =
+            Measures { doubled: Some(0.9), slow_shutter: true, ..shaken.quality.unwrap().preview };
+        let s = &suggest(vec![in_stack(1, 0.3), shaken])[0];
+        assert_eq!(s.frames[1].suggest, Suggest::None);
+        assert!(s.frames[1].reasons[1].starts_with("Shaken"), "{:?}", s.frames[1].reasons);
+    }
+
     #[test]
     fn a_blurry_single_is_suggested_for_rejection_and_a_blurry_burst_keeps_nothing() {
         let stacks = suggest(vec![frame(1, 100, None, 3.0)]);
@@ -2337,13 +2426,16 @@ mod tests {
 
     #[test]
     fn shutter_speeds_read_as_the_catalog_keeps_them() {
-        let slow = |e: &str, f: f64| slow_shutter(&Shot { exposure: Some(e.into()), focal: Some(f) });
+        let slow =
+            |e: &str, f: f64| slow_shutter(&Shot { exposure: Some(e.into()), focal: Some(f), ..Default::default() });
         assert!(slow("1/15", 200.0).is_some());
         assert!(slow("1/400", 200.0).is_none());
         assert_eq!(slow("0.5s", 35.0).unwrap(), "0.5 s at 35 mm is slow for a steady hand");
         assert!(slow("1/1000", 1200.0).is_none(), "faster than 1/500 is never slow");
         // Shake is possible from 1/focal on; unknown without both.
-        let shaky = |e: Option<&str>, f: Option<f64>| Shot { exposure: e.map(String::from), focal: f }.shaky();
+        let shaky = |e: Option<&str>, f: Option<f64>| {
+            Shot { exposure: e.map(String::from), focal: f, ..Default::default() }.shaky()
+        };
         assert!(shaky(Some("1/50"), Some(50.0)) && shaky(Some("2s"), Some(17.0)));
         assert!(!shaky(Some("1/125"), Some(35.0)) && !shaky(Some("1s"), None) && !shaky(None, Some(35.0)));
     }

@@ -8,7 +8,7 @@
 //! A Photoshop file, whatever its name, is read by [`crate::psd`].
 //! Shoebox only ever opens photos for reading.
 
-use crate::focus::Focus;
+use crate::focus::{Bracket, Focus};
 use crate::formats::Kind;
 use anyhow::{Result, anyhow};
 use chrono::NaiveDateTime;
@@ -55,6 +55,8 @@ pub struct Meta {
     pub height: Option<u32>,
     /// Where the camera focused, as the picture stands upright.
     pub focus: Option<Focus>,
+    /// A frame of a focus bracket, when the maker's note says.
+    pub bracket: Option<Bracket>,
 }
 
 impl Meta {
@@ -77,7 +79,8 @@ impl Meta {
             focal,
             width,
             height,
-            focus
+            focus,
+            bracket
         );
         if self.orientation == 0 {
             self.orientation = o.orientation;
@@ -127,25 +130,24 @@ pub fn read_lens(path: &Path, kind: Kind) -> Option<String> {
     lens.as_deref().and_then(crate::gear::file_name)
 }
 
-/// Where the camera focused, from the photo's metadata only (its maker note),
-/// as the picture stands upright: for photos read before Shoebox knew focus
-/// points ([`crate::focus::find`]).
-pub fn read_focus(path: &Path, kind: Kind) -> Option<Focus> {
+/// Where the camera focused, as the picture stands upright, and whether the
+/// photo is a frame of a focus bracket, from its metadata only (its maker
+/// note): for photos read before Shoebox knew them ([`crate::focus::find`]).
+pub fn read_note(path: &Path, kind: Kind) -> (Option<Focus>, Option<Bracket>) {
     if crate::psd::is_psd(path) {
-        return None;
+        return (None, None);
     }
     match kind {
         Kind::Raw => catch_unwind(AssertUnwindSafe(|| {
-            let src = RawSource::new(path).ok()?;
+            let Ok(src) = RawSource::new(path) else { return (None, None) };
             // A CRW keeps its orientation where only rawler (reading it all) finds it.
             if src.buf().get(6..14) == Some(b"HEAPCCDR") {
-                return rawler_meta(path).ok()?.focus;
+                return (rawler_meta(path).ok().and_then(|m| m.focus), None);
             }
-            with_notes(&src, |n| note_focus(n, None))
+            with_notes(&src, |n| (note_focus(n, None), note_bracket(n)))
         }))
-        .ok()
-        .flatten(),
-        Kind::Image => exif_meta(path).and_then(|m| m.focus),
+        .unwrap_or_default(),
+        Kind::Image => exif_meta(path).map(|m| (m.focus, m.bracket)).unwrap_or_default(),
     }
 }
 
@@ -296,6 +298,11 @@ fn tiff_notes<R: Read + Seek, T>(tiff: &GenericTiffReader, r: &mut R, f: impl Fn
 fn note_focus(n: &Notes, picture: Option<(u32, u32)>) -> Option<Focus> {
     let src = crate::focus::Source { make: n.make, model: n.model, ifds: n.ifds, note: n.note };
     crate::focus::read(&src, picture).map(|f| f.upright(n.orientation))
+}
+
+/// Whether the file is a frame of a focus bracket, as its maker's note says.
+fn note_bracket(n: &Notes) -> Option<Bracket> {
+    crate::focus::bracket(&crate::focus::Source { make: n.make, model: n.model, ifds: n.ifds, note: n.note })
 }
 
 /// Where a CRW's camera focused: Canon's AFInfo, in its heap, not yet
@@ -695,13 +702,14 @@ fn rawler_meta(path: &Path) -> Result<Meta> {
         meta.focal = ex.focal_length.as_ref().and_then(|r| ratio(r.n, r.d));
         meta.orientation = ex.orientation.unwrap_or(0);
     }
-    let (clues, focus) = if src.buf().get(6..14) == Some(b"HEAPCCDR") {
-        (ciff_clues(src.buf()), ciff_focus(src.buf()).map(|f| f.upright(meta.orientation)))
+    let (clues, focus, bracket) = if src.buf().get(6..14) == Some(b"HEAPCCDR") {
+        (ciff_clues(src.buf()), ciff_focus(src.buf()).map(|f| f.upright(meta.orientation)), None)
     } else {
-        with_notes(&src, |n| (clues(n.make, n.ifds, n.note), note_focus(n, None)))
+        with_notes(&src, |n| (clues(n.make, n.ifds, n.note), note_focus(n, None), note_bracket(n)))
     };
     meta.lens = raw_lens(clues, table_lens);
     meta.focus = focus;
+    meta.bracket = bracket;
     Ok(meta)
 }
 
@@ -791,6 +799,7 @@ pub(crate) fn meta_of(ex: &exif::Exif) -> Meta {
         width: uint(Tag::PixelXDimension),
         height: uint(Tag::PixelYDimension),
         focus: exif_notes(ex, |n| note_focus(n, picture)),
+        bracket: exif_notes(ex, note_bracket),
     }
 }
 

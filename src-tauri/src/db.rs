@@ -392,8 +392,30 @@ fn migrate(conn: &Connection) -> Result<()> {
             crate::upright::SURE
         ))?;
     }
+    if version < 20 {
+        // Safe to run again on a catalog that already has them (its version set back by hand).
+        let has_bracket =
+            conn.prepare("SELECT 1 FROM pragma_table_info('photos') WHERE name = 'bracket'")?.exists([])?;
+        let columns = if has_bracket {
+            ""
+        } else {
+            "ALTER TABLE photos ADD COLUMN bracket TEXT;
+             ALTER TABLE photos ADD COLUMN stack INTEGER;"
+        };
+        conn.execute_batch(&format!("BEGIN; {columns} {SCHEMA_V20} PRAGMA user_version = 20; COMMIT;"))?;
+    }
     Ok(())
 }
+
+/// Focus stacks (see stacks.rs). `photos.bracket`: the photo is a frame of a
+/// focus bracket, as its maker's note says (JSON, `focus::Bracket`).
+/// `photos.stack`: the id of the first frame of the stack it is in, worked
+/// out from the frames. Few photos are either: indexes of their own keep
+/// finding them as small as they are.
+const SCHEMA_V20: &str = r#"
+CREATE INDEX IF NOT EXISTS photos_bracket ON photos (id) WHERE bracket IS NOT NULL;
+CREATE INDEX IF NOT EXISTS photos_stack ON photos (stack) WHERE stack IS NOT NULL;
+"#;
 
 /// Dates the user corrected (see dates.rs). `photos.taken_original`: the date
 /// the photo's file gives, kept once the user moves `taken_ts` (the date
