@@ -113,6 +113,17 @@ run from anywhere, including an external drive.
 The builds are not code-signed yet, so Windows SmartScreen or macOS Gatekeeper
 may show a warning on first launch.
 
+On macOS, Gatekeeper may refuse to open Shoebox at all, saying it is damaged or
+cannot be opened. After moving Shoebox to Applications, remove the quarantine
+flag macOS puts on downloaded apps by running this in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Shoebox.app"
+```
+
+For the portable version, run the same command on the extracted `Shoebox`
+folder instead.
+
 ### Platforms
 
 - **Windows 10 and 11.** Fully supported. HEIC photos are read through
