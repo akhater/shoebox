@@ -202,6 +202,7 @@ function rememberDeclined(place: string) {
 /** The question open about a source found elsewhere, and how it gets its answer. */
 interface RepointQuestion {
   name: string;
+  photos: number;
   was: { path: string; disk: string; unplugged: boolean };
   now: Repoint;
   answer: (use: boolean) => void;
@@ -1243,7 +1244,7 @@ export default function App() {
       const v = overview?.volumes.find((v) => v.roots.some((x) => x.id === r.id));
       const was = { path: r.path, disk: v?.label ?? "its disk", unplugged: !!v && !v.online };
       const yes = await new Promise<boolean>((answer) => {
-        repointAsk.current = { name: r.name, was, now: c, answer };
+        repointAsk.current = { name: r.name, photos: r.photos, was, now: c, answer };
         setRepointAsking(repointAsk.current);
       });
       repointAsk.current = null;
@@ -2246,6 +2247,7 @@ export default function App() {
       {repointAsking && (
         <RepointDialog
           name={repointAsking.name}
+          photos={repointAsking.photos}
           was={repointAsking.was}
           now={repointAsking.now}
           onUse={() => repointAsking.answer(true)}

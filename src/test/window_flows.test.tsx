@@ -1482,7 +1482,7 @@ describe("a source whose photos live somewhere else now", () => {
 
   test("found at the same path on a disk plugged in: Shoebox asks by itself, and Use it points it there", async () => {
     const be = fakeBackend();
-    be.elsewhere.set(30, found);
+    be.elsewhere.set(30, { ...found, checked: 2, found: 2 }); // a sample of its 4 photos
     const host = await renderApp();
     await wait(300);
     const q = question(host)!;
@@ -1490,7 +1490,9 @@ describe("a source whose photos live somewhere else now", () => {
     expect(q.querySelector(".lead")!.textContent).toMatch(/^It looks like its disk was replaced/);
     expect(q.querySelector(".repoint-place.was")!.textContent).toContain("Not plugged in");
     expect(q.querySelector(".repoint-place.now")!.textContent).toContain("C:\\Photos\\Trip");
-    expect(q.querySelector(".repoint-check")!.textContent).toBe("All 4 photos checked are there, unchanged.");
+    expect(q.querySelector(".repoint-check")!.textContent).toBe(
+      "Checked 2 of its 4 photos, spread across the folder: all there, unchanged.",
+    );
     expect(repointed(be)).toEqual([]);
 
     await answer(host, "Use it");

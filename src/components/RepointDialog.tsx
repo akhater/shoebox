@@ -5,6 +5,8 @@ import { fmtNum, type Repoint } from "../api";
 interface Props {
   /** The source, as the sidebar names it. */
   name: string;
+  /** Its photos: the check looks for a sample of them. */
+  photos: number;
   /** Where it was: its path, its disk's name, and whether that disk is unplugged (else its folder is gone). */
   was: { path: string; disk: string; unplugged: boolean };
   /** Where its photos were found, and how many of those looked for are there. */
@@ -16,7 +18,7 @@ interface Props {
 
 /** "Pictures is on Acer (C:) now": a source found where its photos are now (a new computer, a replaced disk),
  *  the old place and the new one side by side, before anything changes. */
-export function RepointDialog({ name, was, now, onUse, onClose }: Props) {
+export function RepointDialog({ name, photos, was, now, onUse, onClose }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -26,6 +28,16 @@ export function RepointDialog({ name, was, now, onUse, onClose }: Props) {
   }, [onClose]);
 
   const all = now.found === now.checked;
+  const missed = fmtNum(now.checked - now.found);
+  // A sample, not the folder: says so, or "40" reads as all it holds.
+  const checked =
+    now.checked < photos
+      ? `Checked ${fmtNum(now.checked)} of its ${fmtNum(photos)} photos, spread across the folder: ${
+          all ? "all there, unchanged." : `${fmtNum(now.found)} there, unchanged; ${missed} not.`
+        }`
+      : all
+        ? `All ${fmtNum(now.checked)} of its photos are there, unchanged.`
+        : `${fmtNum(now.found)} of its ${fmtNum(now.checked)} photos are there, unchanged; ${missed} not.`;
   return (
     <div className="modal-back" onClick={onClose}>
       <div
@@ -78,15 +90,12 @@ export function RepointDialog({ name, was, now, onUse, onClose }: Props) {
         {now.checked > 0 && (
           <p className={`repoint-check ${all ? "" : "some"}`}>
             {all ? <Check size={16} /> : <TriangleAlert size={16} />}
-            {all
-              ? `All ${fmtNum(now.checked)} photos checked are there, unchanged.`
-              : `${fmtNum(now.found)} of the ${fmtNum(now.checked)} photos checked are there, unchanged; the others aren't.`}
+            {checked}
           </p>
         )}
         <p className="repoint-note">
-          Tags, faces and people stay with the photos, and a quick scan picks up new ones.
-          {all ? "" : " Photos not found there show as missing after it; they stay in the catalog."} Your files are not
-          touched.
+          Tags, faces and people stay with the photos. A scan then goes through every photo there and picks up new
+          ones{all ? "" : "; photos not found show as missing, and stay in the catalog"}. Your files are not touched.
         </p>
         <div className="modal-foot">
           <button className="btn" onClick={onClose}>
