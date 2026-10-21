@@ -4,7 +4,7 @@
 import { emit } from "@tauri-apps/api/event";
 import { act } from "react";
 import { describe, expect, test } from "vitest";
-import { ALL, fakeBackend, photosOf, SEARCH } from "./backend";
+import { ALL, type FakeBackend, fakeBackend, photosOf, SEARCH } from "./backend";
 import {
   backButton,
   byText,
@@ -1472,26 +1472,56 @@ describe("the Private filter", () => {
 describe("a source whose photos live somewhere else now", () => {
   const found = { rootId: 30, path: "C:\\Photos\\Trip", disk: "New laptop (C:)", checked: 4, found: 4, problem: null };
 
-  test("found at the same path on a disk plugged in: one click points it there, and it is offered no more", async () => {
+  const questions = (be: FakeBackend) => be.calls.filter((c) => c.cmd === "plugin:dialog|message").map((c) => c.args);
+  const repointed = (be: FakeBackend) => be.calls.filter((c) => c.cmd === "repoint_folder").map((c) => c.args);
+  const offered = (host: HTMLElement) => host.querySelectorAll<HTMLButtonElement>(".sidebar-scroll .found-elsewhere");
+
+  test("found at the same path on a disk plugged in: Shoebox asks by itself, and Use it points it there", async () => {
     const be = fakeBackend();
     be.elsewhere.set(30, found);
     const host = await renderApp();
-    const offered = () => host.querySelectorAll<HTMLButtonElement>(".sidebar-scroll .found-elsewhere");
-    expect(offered()).toHaveLength(1);
-    expect(sidebarItem(host, "Trip").title).toContain("Found at C:\\Photos\\Trip on New laptop (C:)");
-
-    await click(offered()[0]);
     await wait(300);
-    expect(be.calls.filter((c) => c.cmd === "repoint_folder").map((c) => c.args)).toEqual([
-      { rootId: 30, path: "C:\\Photos\\Trip" },
-    ]);
-    expect(offered()).toHaveLength(0);
+    const [q, ...more] = questions(be);
+    expect(more).toEqual([]);
+    expect(q.title).toBe("Trip is on New laptop (C:) now");
+    expect(q.message).toMatch(/^It looks like the disk holding "Trip" was replaced/);
+    expect(q.message).toContain("Its photos are at C:\\Photos\\Trip, on New laptop (C:): all 4 checked are there, unchanged.");
+    expect(repointed(be)).toEqual([{ rootId: 30, path: "C:\\Photos\\Trip" }]);
+    expect(offered(host)).toHaveLength(0);
+  });
+
+  test("after Not now it isn't asked again; its button still offers it, asking first", async () => {
+    const be = fakeBackend();
+    be.elsewhere.set(30, found);
+    be.dialogs("cancel");
+    const host = await renderApp();
+    await wait(300);
+    expect(questions(be)).toHaveLength(1);
+    expect(repointed(be)).toEqual([]);
+    expect(sidebarItem(host, "Trip").title).toContain("Found at C:\\Photos\\Trip on New laptop (C:)");
+    expect(localStorage.getItem("shoebox.repointDeclined")).toContain("30|C:\\\\Photos\\\\Trip");
+
+    // Disks come and go: not asked again.
+    await act(async () => {
+      await emit("volumes-changed", null);
+    });
+    await wait(300);
+    expect(questions(be)).toHaveLength(1);
+
+    be.dialogs("ok");
+    await click(offered(host)[0]);
+    await wait(300);
+    expect(questions(be)).toHaveLength(2);
+    expect(repointed(be)).toEqual([{ rootId: 30, path: "C:\\Photos\\Trip" }]);
+    expect(offered(host)).toHaveLength(0);
   });
 
   test("its menu offers the place found, and choosing a folder that isn't it changes nothing", async () => {
     const be = fakeBackend();
     be.elsewhere.set(30, found);
+    be.dialogs("cancel");
     const host = await renderApp();
+    await wait(300);
     const row = sidebarItem(host, "Trip");
     row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
     await wait(30);

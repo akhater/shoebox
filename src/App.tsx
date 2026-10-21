@@ -176,6 +176,27 @@ function loadRowHeight() {
   }
 }
 
+/** Places a source found elsewhere was declined at ("Not now": `<root id>|<path>`), remembered between sessions. */
+const DECLINED = "shoebox.repointDeclined";
+
+function declinedPlaces(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(DECLINED) ?? "[]") as string[];
+  } catch {
+    return [];
+  }
+}
+
+const declinedBefore = (place: string) => declinedPlaces().includes(place);
+
+function rememberDeclined(place: string) {
+  try {
+    localStorage.setItem(DECLINED, JSON.stringify([...declinedPlaces().filter((p) => p !== place), place].slice(-50)));
+  } catch {
+    /* per-viewer convenience only */
+  }
+}
+
 /** A status-bar message, optionally with one action (Undo). */
 export interface Message {
   text: string;
@@ -1195,7 +1216,8 @@ export default function App() {
 
   // A source whose photos live somewhere else now (a new computer, a disk copied onto another): the catalog
   // follows them there once a sample of them is found there, then scans it. No file is touched.
-  const repointFolder = async (r: RootInfo, path?: string) => {
+  // Says how it ended: "not now" when the user declined.
+  const repointFolder = async (r: RootInfo, path?: string): Promise<"done" | "not now" | undefined> => {
     const dir = path ?? (await open({ directory: true, multiple: false, title: `Where are the photos of ${r.name} now?` }));
     if (typeof dir !== "string") return;
     try {
@@ -1204,21 +1226,51 @@ export default function App() {
         setMessage({ text: c.problem, warn: true });
         return;
       }
-      if (c.found < c.checked) {
-        const yes = await ask(
-          `${fmtNum(c.found)} of the ${fmtNum(c.checked)} photos of "${r.name}" looked for are in ${c.path}, unchanged. The others aren't there.\n\n` +
-            `Point "${r.name}" there anyway? Your files are not touched. After the scan, its photos not found there show as missing; they stay in the catalog.`,
-          { title: "Point to its new place", kind: "warning", okLabel: "Point it there", cancelLabel: "Cancel" },
-        );
-        if (!yes) return;
-      }
+      // Always said first: the scan that follows takes the status line at once.
+      const v = overview?.volumes.find((v) => v.roots.some((x) => x.id === r.id));
+      const unplugged = !!v && !v.online;
+      const all = c.found === c.checked;
+      const seen =
+        c.checked === 0
+          ? ""
+          : all
+            ? `: all ${fmtNum(c.checked)} checked are there, unchanged`
+            : `: ${fmtNum(c.found)} of the ${fmtNum(c.checked)} checked are there, unchanged; the others aren't`;
+      const yes = await ask(
+        (unplugged
+          ? `It looks like the disk holding "${r.name}" was replaced: a new computer, or a disk copied onto another.\n\n` +
+            `It was at ${r.path}, on ${v.label}, which isn't plugged in. `
+          : `It looks like "${r.name}" moved to another disk.\n\nIt was at ${r.path}${v ? `, on ${v.label}` : ""}, and isn't there any more. `) +
+          `Its photos are at ${c.path}, on ${c.disk}${seen}.\n\n` +
+          `Use that folder from now on? Shoebox follows the photos there with their tags, faces and people, then scans it for new ones. Your files are not touched.` +
+          (all ? "" : " After the scan, photos not found there show as missing; they stay in the catalog."),
+        { title: `${r.name} is on ${c.disk} now`, kind: all ? "info" : "warning", okLabel: "Use it", cancelLabel: "Not now" },
+      );
+      if (!yes) return "not now";
       await api.repointFolder(r.id, dir);
       setMessage({ text: `${r.name} is now ${c.path}, on ${c.disk}. Its photos keep their tags and faces; scanning it there.` });
       refresh();
+      return "done";
     } catch (e) {
       setMessage({ text: String(e), warn: true });
     }
   };
+
+  // A source found where its photos are now is news (a new computer, a replaced disk): Shoebox asks by itself,
+  // once a session per place, looking when what was found changes (the overview), never on a timer. "Not now"
+  // is remembered: its row and its view keep offering it, without asking again.
+  const offeredNow = useRef(new Set<string>());
+  useEffect(() => {
+    if (!overview) return;
+    for (const r of overview.volumes.flatMap((v) => v.roots)) {
+      if (!r.elsewhere) continue;
+      const place = `${r.id}|${r.elsewhere.path}`;
+      if (offeredNow.current.has(place) || declinedBefore(place)) continue;
+      offeredNow.current.add(place);
+      void repointFolder(r, r.elsewhere.path).then((how) => how === "not now" && rememberDeclined(place));
+      return; // one question at a time: the next comes with the next overview
+    }
+  }, [overview]);
 
   // Missing photos deleted outside Shoebox: out of the catalog, files already gone.
   const forgetMissing = async (ids: number[]) => {

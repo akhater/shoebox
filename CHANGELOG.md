@@ -10,8 +10,9 @@ Newest first. Same format and versioning as Argentum.
   new computer, or after copying a disk onto another, a folder showed as
   unplugged for good: disks are recognised by their serial, never by their
   letter. Shoebox now looks for such a folder at the same path on the disks
-  plugged in, checks by content that its photos are there, and offers it: a
-  button on the folder in the sidebar and in its view. "Point to its new
+  plugged in, checks by content that its photos are there, and asks: "It
+  looks like the disk holding ... was replaced". After "Not now", a button on
+  the folder in the sidebar and in its view still offers it. "Point to its new
   place..." in the folder's menu does it for any other folder. Only the
   catalog changes: the same folder, the same photos with their tags, faces
   and people; no file is touched. A scan follows; photos not found there
