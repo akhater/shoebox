@@ -66,6 +66,7 @@ import {
   privateTitle,
   type PrivateStatus,
   type Progress,
+  type Repoint,
   type Report,
   type RootInfo,
   type Shifted,
@@ -86,6 +87,7 @@ import { DatesCheckDialog, movedText } from "./components/DatesCheckDialog";
 import { FixDatesDialog } from "./components/FixDatesDialog";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
+import { RepointDialog } from "./components/RepointDialog";
 import { StraysDialog } from "./components/StraysDialog";
 import { FindMoreDialog } from "./components/FindMoreDialog";
 import { TagEditor } from "./components/Tags";
@@ -195,6 +197,14 @@ function rememberDeclined(place: string) {
   } catch {
     /* per-viewer convenience only */
   }
+}
+
+/** The question open about a source found elsewhere, and how it gets its answer. */
+interface RepointQuestion {
+  name: string;
+  was: { path: string; disk: string; unplugged: boolean };
+  now: Repoint;
+  answer: (use: boolean) => void;
 }
 
 /** A status-bar message, optionally with one action (Undo). */
@@ -1217,6 +1227,8 @@ export default function App() {
   // A source whose photos live somewhere else now (a new computer, a disk copied onto another): the catalog
   // follows them there once a sample of them is found there, then scans it. No file is touched.
   // Says how it ended: "not now" when the user declined.
+  const repointAsk = useRef<RepointQuestion | null>(null);
+  const [repointAsking, setRepointAsking] = useState<RepointQuestion | null>(null);
   const repointFolder = async (r: RootInfo, path?: string): Promise<"done" | "not now" | undefined> => {
     const dir = path ?? (await open({ directory: true, multiple: false, title: `Where are the photos of ${r.name} now?` }));
     if (typeof dir !== "string") return;
@@ -1226,26 +1238,16 @@ export default function App() {
         setMessage({ text: c.problem, warn: true });
         return;
       }
-      // Always said first: the scan that follows takes the status line at once.
+      // Always asked first: the scan that follows takes the status line at once. One question at a time.
+      if (repointAsk.current) return;
       const v = overview?.volumes.find((v) => v.roots.some((x) => x.id === r.id));
-      const unplugged = !!v && !v.online;
-      const all = c.found === c.checked;
-      const seen =
-        c.checked === 0
-          ? ""
-          : all
-            ? `: all ${fmtNum(c.checked)} checked are there, unchanged`
-            : `: ${fmtNum(c.found)} of the ${fmtNum(c.checked)} checked are there, unchanged; the others aren't`;
-      const yes = await ask(
-        (unplugged
-          ? `It looks like the disk holding "${r.name}" was replaced: a new computer, or a disk copied onto another.\n\n` +
-            `It was at ${r.path}, on ${v.label}, which isn't plugged in. `
-          : `It looks like "${r.name}" moved to another disk.\n\nIt was at ${r.path}${v ? `, on ${v.label}` : ""}, and isn't there any more. `) +
-          `Its photos are at ${c.path}, on ${c.disk}${seen}.\n\n` +
-          `Use that folder from now on? Shoebox follows the photos there with their tags, faces and people, then scans it for new ones. Your files are not touched.` +
-          (all ? "" : " After the scan, photos not found there show as missing; they stay in the catalog."),
-        { title: `${r.name} is on ${c.disk} now`, kind: all ? "info" : "warning", okLabel: "Use it", cancelLabel: "Not now" },
-      );
+      const was = { path: r.path, disk: v?.label ?? "its disk", unplugged: !!v && !v.online };
+      const yes = await new Promise<boolean>((answer) => {
+        repointAsk.current = { name: r.name, was, now: c, answer };
+        setRepointAsking(repointAsk.current);
+      });
+      repointAsk.current = null;
+      setRepointAsking(null);
       if (!yes) return "not now";
       await api.repointFolder(r.id, dir);
       setMessage({ text: `${r.name} is now ${c.path}, on ${c.disk}. Its photos keep their tags and faces; scanning it there.` });
@@ -2240,6 +2242,15 @@ export default function App() {
             <p className="muted small">Enter adds · commas add several · Esc closes. Tags stay with the photo when it moves or is copied.</p>
           </div>
         </div>
+      )}
+      {repointAsking && (
+        <RepointDialog
+          name={repointAsking.name}
+          was={repointAsking.was}
+          now={repointAsking.now}
+          onUse={() => repointAsking.answer(true)}
+          onClose={() => repointAsking.answer(false)}
+        />
       )}
       {straysFor && (
         <StraysDialog

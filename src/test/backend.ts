@@ -211,8 +211,6 @@ export function fakeBackend() {
   const calls: Call[] = [];
   /** Sources not found where they were, and where they were found (a test sets them). */
   const elsewhere = new Map<number, Repoint>();
-  /** How the user answers questions (ask): with their OK button unless a test says otherwise. */
-  let dialogsSay: "ok" | "cancel" = "ok";
   /** Extra time for some answers: by command, and by view (`viewName`) for the commands named. */
   const cmdDelays = new Map<string, number>();
   const viewDelays = new Map<string, { ms: number; cmds: string[] }>();
@@ -479,11 +477,9 @@ export function fakeBackend() {
         for (const id of gone) photos.splice(photos.findIndex((p) => p.id === id), 1);
         return { photos: gone.length, files: gone.length };
       }
-      // ask(): answered with its OK button, or Cancel when a test says so.
-      case "plugin:dialog|message": {
-        const buttons = (a.buttons as { OkCancelCustom?: [string, string] } | undefined)?.OkCancelCustom ?? ["Yes", "No"];
-        return buttons[dialogsSay === "ok" ? 0 : 1];
-      }
+      // ask(): answered with its OK button.
+      case "plugin:dialog|message":
+        return (a.buttons as { OkCancelCustom?: [string, string] } | undefined)?.OkCancelCustom?.[0] ?? "Yes";
       case "mark_photos":
         for (const id of a.ids as number[]) (a.marked ? marked.add(id) : marked.delete(id));
         return (a.ids as number[]).length;
@@ -680,10 +676,6 @@ export function fakeBackend() {
     marked,
     missing,
     elsewhere,
-    /** Answers the questions asked from now on with OK or Cancel. */
-    dialogs: (answer: "ok" | "cancel") => {
-      dialogsSay = answer;
-    },
     inBin,
     sideways,
     turns,
