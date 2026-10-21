@@ -16,6 +16,7 @@ use crate::gear;
 use crate::models;
 use crate::organize::{self, DeletePlan, DeleteReport};
 use crate::private;
+use crate::repoint::{self, Repoint};
 use crate::scan::Progress;
 use crate::settings::Settings;
 use crate::tags;
@@ -112,14 +113,17 @@ pub async fn get_photo(state: State<'_, AppState>, id: i64) -> Res<PhotoDetail> 
 
 /// Adds a folder and queues its first scan.
 #[tauri::command]
-pub async fn add_folder(state: State<'_, AppState>, path: String) -> Res<i64> {
+pub async fn add_folder(app: AppHandle, state: State<'_, AppState>, path: String) -> Res<i64> {
     let (cat, scans) = (state.cat.clone(), state.scans.clone());
-    in_order(move || {
+    let id = in_order(move || {
         let id = cat.add_root(Path::new(&path))?;
         scans.push(id, false);
         Ok(id)
     })
-    .await
+    .await?;
+    // A source not here found where this one is now isn't offered any more.
+    crate::look_elsewhere_soon(app, state.cat.clone());
+    Ok(id)
 }
 
 #[tauri::command]
@@ -188,13 +192,38 @@ pub async fn regenerate(state: State<'_, AppState>, root_id: Option<i64>) -> Res
 
 /// Takes a folder out of the catalog. Its files on disk are not touched.
 #[tauri::command]
-pub async fn remove_folder(state: State<'_, AppState>, root_id: i64) -> Res<RemoveReport> {
+pub async fn remove_folder(app: AppHandle, state: State<'_, AppState>, root_id: i64) -> Res<RemoveReport> {
     if state.scans.current.lock().unwrap().as_ref().is_some_and(|p| p.root_id == root_id) {
         return Err("That folder is being scanned. Stop the scan first.".into());
     }
     state.scans.forget(root_id);
     let cat = state.cat.clone();
-    in_order(move || cat.remove_root(root_id)).await
+    let report = in_order(move || cat.remove_root(root_id)).await?;
+    crate::look_elsewhere_soon(app, state.cat.clone());
+    Ok(report)
+}
+
+/// What pointing a source at the folder `path` would find there: a sample of its photos looked for. Reads only.
+#[tauri::command]
+pub async fn check_repoint(state: State<'_, AppState>, root_id: i64, path: String) -> Res<Repoint> {
+    let cat = state.cat.clone();
+    blocking(move || repoint::check(&cat, root_id, Path::new(&path))).await
+}
+
+/// Points a source whose photos live somewhere else now (a new computer, a copied disk) at the folder `path`,
+/// in the catalog only, and scans it there. Its photos keep their tags, faces and people.
+#[tauri::command]
+pub async fn repoint_folder(state: State<'_, AppState>, root_id: i64, path: String) -> Res<Repoint> {
+    if state.scans.current.lock().unwrap().as_ref().is_some_and(|p| p.root_id == root_id) {
+        return Err("That folder is being scanned. Stop the scan first.".into());
+    }
+    let (cat, scans) = (state.cat.clone(), state.scans.clone());
+    in_order(move || {
+        let done = repoint::repoint(&cat, root_id, Path::new(&path))?;
+        scans.push(root_id, false);
+        Ok(done)
+    })
+    .await
 }
 
 /// Which of these photos are missing everywhere, and which of those are in the

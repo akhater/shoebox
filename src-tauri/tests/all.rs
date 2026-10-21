@@ -36,6 +36,7 @@ mod photoshop;
 mod private_photos;
 mod reassign_faces;
 mod regroup_resumes;
+mod repoint;
 mod scan_copies;
 mod search_reused_id;
 mod stored_gear_names;

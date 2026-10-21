@@ -13,6 +13,7 @@ import {
   Focus,
   Pencil,
   FolderPlus,
+  FolderSync,
   FolderX,
   LockKeyhole,
   LockKeyholeOpen,
@@ -65,6 +66,7 @@ import {
   privateTitle,
   type PrivateStatus,
   type Progress,
+  type Repoint,
   type Report,
   type RootInfo,
   type Shifted,
@@ -85,6 +87,7 @@ import { DatesCheckDialog, movedText } from "./components/DatesCheckDialog";
 import { FixDatesDialog } from "./components/FixDatesDialog";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
+import { RepointDialog } from "./components/RepointDialog";
 import { StraysDialog } from "./components/StraysDialog";
 import { FindMoreDialog } from "./components/FindMoreDialog";
 import { TagEditor } from "./components/Tags";
@@ -173,6 +176,36 @@ function loadRowHeight() {
   } catch {
     return 200;
   }
+}
+
+/** Places a source found elsewhere was declined at ("Not now": `<root id>|<path>`), remembered between sessions. */
+const DECLINED = "shoebox.repointDeclined";
+
+function declinedPlaces(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(DECLINED) ?? "[]") as string[];
+  } catch {
+    return [];
+  }
+}
+
+const declinedBefore = (place: string) => declinedPlaces().includes(place);
+
+function rememberDeclined(place: string) {
+  try {
+    localStorage.setItem(DECLINED, JSON.stringify([...declinedPlaces().filter((p) => p !== place), place].slice(-50)));
+  } catch {
+    /* per-viewer convenience only */
+  }
+}
+
+/** The question open about a source found elsewhere, and how it gets its answer. */
+interface RepointQuestion {
+  name: string;
+  photos: number;
+  was: { path: string; disk: string; unplugged: boolean };
+  now: Repoint;
+  answer: (use: boolean) => void;
 }
 
 /** A status-bar message, optionally with one action (Undo). */
@@ -1192,6 +1225,56 @@ export default function App() {
     }
   };
 
+  // A source whose photos live somewhere else now (a new computer, a disk copied onto another): the catalog
+  // follows them there once a sample of them is found there, then scans it. No file is touched.
+  // Says how it ended: "not now" when the user declined.
+  const repointAsk = useRef<RepointQuestion | null>(null);
+  const [repointAsking, setRepointAsking] = useState<RepointQuestion | null>(null);
+  const repointFolder = async (r: RootInfo, path?: string): Promise<"done" | "not now" | undefined> => {
+    const dir = path ?? (await open({ directory: true, multiple: false, title: `Where are the photos of ${r.name} now?` }));
+    if (typeof dir !== "string") return;
+    try {
+      const c = await api.checkRepoint(r.id, dir);
+      if (c.problem) {
+        setMessage({ text: c.problem, warn: true });
+        return;
+      }
+      // Always asked first: the scan that follows takes the status line at once. One question at a time.
+      if (repointAsk.current) return;
+      const v = overview?.volumes.find((v) => v.roots.some((x) => x.id === r.id));
+      const was = { path: r.path, disk: v?.label ?? "its disk", unplugged: !!v && !v.online };
+      const yes = await new Promise<boolean>((answer) => {
+        repointAsk.current = { name: r.name, photos: r.photos, was, now: c, answer };
+        setRepointAsking(repointAsk.current);
+      });
+      repointAsk.current = null;
+      setRepointAsking(null);
+      if (!yes) return "not now";
+      await api.repointFolder(r.id, dir);
+      setMessage({ text: `${r.name} is now ${c.path}, on ${c.disk}. Its photos keep their tags and faces; scanning it there.` });
+      refresh();
+      return "done";
+    } catch (e) {
+      setMessage({ text: String(e), warn: true });
+    }
+  };
+
+  // A source found where its photos are now is news (a new computer, a replaced disk): Shoebox asks by itself,
+  // once a session per place, looking when what was found changes (the overview), never on a timer. "Not now"
+  // is remembered: its row and its view keep offering it, without asking again.
+  const offeredNow = useRef(new Set<string>());
+  useEffect(() => {
+    if (!overview) return;
+    for (const r of overview.volumes.flatMap((v) => v.roots)) {
+      if (!r.elsewhere) continue;
+      const place = `${r.id}|${r.elsewhere.path}`;
+      if (offeredNow.current.has(place) || declinedBefore(place)) continue;
+      offeredNow.current.add(place);
+      void repointFolder(r, r.elsewhere.path).then((how) => how === "not now" && rememberDeclined(place));
+      return; // one question at a time: the next comes with the next overview
+    }
+  }, [overview]);
+
   // Missing photos deleted outside Shoebox: out of the catalog, files already gone.
   const forgetMissing = async (ids: number[]) => {
     const n = ids.length;
@@ -1409,7 +1492,7 @@ export default function App() {
     for (const v of overview?.volumes ?? []) {
       if (scope.kind === "volume" && v.id === scope.id) return { title: v.label, offline: !v.online };
       const r = v.roots.find((r) => scope.kind === "root" && r.id === scope.id);
-      if (r) return { title: r.relPath ? r.name : v.label, sub: r.path, offline: !v.online, lost: v.online && !r.found };
+      if (r) return { title: r.relPath ? r.name : v.label, sub: r.path, offline: !v.online, lost: v.online && !r.found, root: r };
     }
     return { title: "" };
   }, [scope, overview, peopleList, browse, privateStatus?.name]);
@@ -1478,6 +1561,7 @@ export default function App() {
         queuedRoots={queued}
         onRegenerate={(id) => regenerate(id)}
         onRemove={removeFolder}
+        onRepoint={repointFolder}
         people={shownPeople.length}
         peopleNew={peopleNew}
         peopleOpen={view === "people"}
@@ -1797,12 +1881,31 @@ export default function App() {
           </div>
         )}
 
-        {"offline" in scopeInfo && scopeInfo.offline && (
-          <div className="banner">
-            <Unplug size={15} /> This disk is unplugged. You're browsing Shoebox's copies; nothing is lost.
+        {"root" in scopeInfo && scopeInfo.root?.elsewhere ? (
+          <div className="banner found">
+            <FolderSync size={15} />
+            <span>
+              {scopeInfo.offline ? "This disk is unplugged" : `This folder isn't at ${scopeInfo.sub} any more`}, but its
+              photos are at <b>{scopeInfo.root.elsewhere.path}</b> on {scopeInfo.root.elsewhere.disk}.
+            </span>
+            <span className="grow" />
+            <button
+              className="btn small primary"
+              onClick={() => repointFolder(scopeInfo.root!, scopeInfo.root!.elsewhere!.path)}
+              title="Shoebox follows the photos there, with their tags and faces, then scans the folder. Your files are not touched."
+            >
+              Use it
+            </button>
           </div>
+        ) : (
+          "offline" in scopeInfo &&
+          scopeInfo.offline && (
+            <div className="banner">
+              <Unplug size={15} /> This disk is unplugged. You're browsing Shoebox's copies; nothing is lost.
+            </div>
+          )
         )}
-        {"lost" in scopeInfo && scopeInfo.lost && (
+        {"lost" in scopeInfo && scopeInfo.lost && !scopeInfo.root?.elsewhere && (
           <div className="banner warn">
             <FolderX size={15} /> This folder isn't at {scopeInfo.sub} any more. Its photos stay in the catalog, shown
             from Shoebox's copies. Put it back and press ↻ next to it to scan it again.
@@ -2140,6 +2243,16 @@ export default function App() {
             <p className="muted small">Enter adds · commas add several · Esc closes. Tags stay with the photo when it moves or is copied.</p>
           </div>
         </div>
+      )}
+      {repointAsking && (
+        <RepointDialog
+          name={repointAsking.name}
+          photos={repointAsking.photos}
+          was={repointAsking.was}
+          now={repointAsking.now}
+          onUse={() => repointAsking.answer(true)}
+          onClose={() => repointAsking.answer(false)}
+        />
       )}
       {straysFor && (
         <StraysDialog

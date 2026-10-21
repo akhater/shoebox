@@ -4,7 +4,7 @@
 import { emit } from "@tauri-apps/api/event";
 import { act } from "react";
 import { describe, expect, test } from "vitest";
-import { ALL, fakeBackend, photosOf, SEARCH } from "./backend";
+import { ALL, type FakeBackend, fakeBackend, photosOf, SEARCH } from "./backend";
 import {
   backButton,
   byText,
@@ -1472,5 +1472,84 @@ describe("the Private filter", () => {
     expect(chips()).not.toContain("Private");
     expect(gridIds(host)).toEqual(ALL.filter((id) => id !== 101 && id !== 102));
     expect(be.calls.filter((c) => c.cmd === "list_photos").at(-1)?.args.filters).toMatchObject({ private: [] });
+  });
+});
+
+describe("a source whose photos live somewhere else now", () => {
+  const found = { rootId: 30, path: "C:\\Photos\\Trip", disk: "New laptop (C:)", checked: 4, found: 4, problem: null };
+
+  const question = (host: HTMLElement) => host.querySelector<HTMLElement>(".repoint-modal");
+  const answer = async (host: HTMLElement, button: "Use it" | "Not now") => {
+    await click(byText(question(host)!, "button", button));
+    await wait(300);
+  };
+  const repointed = (be: FakeBackend) => be.calls.filter((c) => c.cmd === "repoint_folder").map((c) => c.args);
+  const offered = (host: HTMLElement) => host.querySelectorAll<HTMLButtonElement>(".sidebar-scroll .found-elsewhere");
+
+  test("found at the same path on a disk plugged in: Shoebox asks by itself, and Use it points it there", async () => {
+    const be = fakeBackend();
+    be.elsewhere.set(30, { ...found, checked: 2, found: 2 }); // a sample of its 4 photos
+    const host = await renderApp();
+    await wait(300);
+    const q = question(host)!;
+    expect(q.querySelector("h2")!.textContent!.trim()).toBe("Trip is on New laptop (C:) now");
+    expect(q.querySelector(".lead")!.textContent).toMatch(/^It looks like its disk was replaced/);
+    expect(q.querySelector(".repoint-place.was")!.textContent).toContain("Not plugged in");
+    expect(q.querySelector(".repoint-place.now")!.textContent).toContain("C:\\Photos\\Trip");
+    expect(q.querySelector(".repoint-check")!.textContent).toBe(
+      "Checked 2 of its 4 photos, spread across the folder: all there, unchanged.",
+    );
+    expect(repointed(be)).toEqual([]);
+
+    await answer(host, "Use it");
+    expect(question(host)).toBeNull();
+    expect(repointed(be)).toEqual([{ rootId: 30, path: "C:\\Photos\\Trip" }]);
+    expect(offered(host)).toHaveLength(0);
+  });
+
+  test("after Not now it isn't asked again; its button still offers it, asking first", async () => {
+    const be = fakeBackend();
+    be.elsewhere.set(30, found);
+    const host = await renderApp();
+    await wait(300);
+    await answer(host, "Not now");
+    expect(question(host)).toBeNull();
+    expect(repointed(be)).toEqual([]);
+    expect(sidebarItem(host, "Trip").title).toContain("Found at C:\\Photos\\Trip on New laptop (C:)");
+    expect(localStorage.getItem("shoebox.repointDeclined")).toContain("30|C:\\\\Photos\\\\Trip");
+
+    // Disks come and go: not asked again.
+    await act(async () => {
+      await emit("volumes-changed", null);
+    });
+    await wait(300);
+    expect(question(host)).toBeNull();
+
+    await click(offered(host)[0]);
+    await wait(300);
+    expect(repointed(be)).toEqual([]);
+    await answer(host, "Use it");
+    expect(repointed(be)).toEqual([{ rootId: 30, path: "C:\\Photos\\Trip" }]);
+    expect(offered(host)).toHaveLength(0);
+  });
+
+  test("its menu offers the place found, and choosing a folder that isn't it changes nothing", async () => {
+    const be = fakeBackend();
+    be.elsewhere.set(30, found);
+    const host = await renderApp();
+    await wait(300);
+    await answer(host, "Not now");
+    const row = sidebarItem(host, "Trip");
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    await wait(30);
+    const menu = host.querySelector<HTMLElement>(".folder-menu")!;
+    expect(byText(menu, "button", "Use the one on New laptop (C:)")).toBeTruthy();
+    expect(byText(menu, "button", "Point to its new place…")).toBeTruthy();
+    // A source that is here has neither.
+    await key(menu, "Escape");
+    sidebarItem(host, "Fast").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    await wait(30);
+    expect(host.querySelector(".folder-menu")!.textContent).not.toMatch(/Point to its new place|Use the one/);
+    expect(repointed(be)).toEqual([]);
   });
 });

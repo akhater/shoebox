@@ -245,6 +245,11 @@ button {
 .icon-btn.tiny.spin {
   opacity: 1;
 }
+/* A source not here, found at the same path on a disk plugged in now: offered, always shown. */
+.icon-btn.tiny.found-elsewhere {
+  opacity: 1;
+  color: var(--accent);
+}
 .icon-btn.spin svg {
   animation: spin 1s linear infinite;
 }
@@ -567,6 +572,14 @@ button {
 }
 .banner.warn {
   color: #f0a18c;
+}
+/* A source not here whose photos were found elsewhere: offered. */
+.banner.found {
+  color: var(--text);
+}
+.banner.found > svg {
+  color: var(--accent);
+  flex: none;
 }
 
 /* Grid */
@@ -3659,4 +3672,100 @@ button.link:hover {
 }
 .viewer-private {
   color: var(--accent);
+}
+
+/* A source found where its photos are now: the old place and the new one side by side. */
+.repoint-modal {
+  width: 540px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.repoint-modal .modal-head h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.repoint-modal .modal-head h2 svg {
+  color: var(--accent);
+  flex: none;
+}
+.repoint-modal .lead,
+.repoint-modal .repoint-note {
+  margin: 0;
+  line-height: 1.5;
+}
+.repoint-modal .lead {
+  color: var(--text);
+}
+.repoint-modal .repoint-note {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.repoint-places {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+.repoint-place {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+.repoint-place.now {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.repoint-when {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.repoint-disk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-weight: 600;
+}
+.repoint-disk svg {
+  flex: none;
+}
+.repoint-place.was .repoint-disk {
+  color: var(--muted);
+}
+.repoint-path {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.repoint-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.repoint-arrow {
+  color: var(--accent);
+}
+.repoint-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--on);
+}
+.repoint-check.some {
+  color: var(--accent);
+}
+.repoint-check svg {
+  flex: none;
 }

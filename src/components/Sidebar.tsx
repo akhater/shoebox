@@ -7,6 +7,7 @@ import {
   Ellipsis,
   Folder,
   FolderPlus,
+  FolderSync,
   FolderX,
   HardDrive,
   Images,
@@ -84,6 +85,8 @@ interface Props {
   onCheckDates: (t: FolderTarget) => void;
   onRegenerate: (rootId: number) => void;
   onRemove: (root: RootInfo) => void;
+  /** Points a source at where its photos are now: `path` when found there already, else the user picks it. */
+  onRepoint: (root: RootInfo, path?: string) => void;
   onRename: (volumeId: number, label: string) => void;
   /** Renames a folder on its disk and in the catalog. */
   onRenameFolder: (volumeId: number, relPath: string, name: string) => Promise<void>;
@@ -952,6 +955,25 @@ function FolderMenu({
         }
       }}
     >
+      {t.root && !here && (
+        <>
+          {t.root.elsewhere && (
+            <button
+              onClick={act(() => p.onRepoint(t.root!, t.root!.elsewhere!.path))}
+              title={`${t.root.elsewhere.path}: its photos are there`}
+            >
+              Use the one on {t.root.elsewhere.disk}
+            </button>
+          )}
+          <button
+            onClick={act(() => p.onRepoint(t.root!))}
+            title="Its photos live somewhere else now (a new computer, a disk copied onto another): choose that folder. The catalog follows; your files are not touched."
+          >
+            Point to its new place…
+          </button>
+          <hr />
+        </>
+      )}
       <button disabled={!here} onClick={act(() => p.onShowFolder(t.v.id, t.relPath))}>
         Show in {FILE_MANAGER.name}
       </button>
@@ -1033,6 +1055,7 @@ function Source({
   const tree = p.browse?.folders.find((x) => x.rootId === r.id)?.children ?? [];
   const t: FolderTarget = { v, relPath: r.relPath, name: r.name, rootId: r.id, root: r, key, path: r.path, count: r.photos };
   const where = v.online ? `on ${v.label}, plugged in` : `on ${v.label}, unplugged - browsing Shoebox's copies`;
+  const found = r.elsewhere ? `\nFound at ${r.elsewhere.path} on ${r.elsewhere.disk}: click its button to use it` : "";
   return (
     <div className={v.online ? "" : "is-offline"}>
       <div
@@ -1050,8 +1073,8 @@ function Source({
         onKeyDown={(e) => folderKeys(e, t, f)}
         title={
           lost
-            ? `Folder not found at ${r.path}\nIts photos stay in the catalog, shown from Shoebox's copies.`
-            : `${r.path}\n${where}\n${waiting ? WAITING : fmtAgo(r.lastScan)}`
+            ? `Folder not found at ${r.path}\nIts photos stay in the catalog, shown from Shoebox's copies.${found}`
+            : `${r.path}\n${where}\n${waiting ? WAITING : fmtAgo(r.lastScan)}${found}`
         }
       >
         <Twisty open={open.has(key)} onClick={() => toggle(key)} hidden={!tree.length} />
@@ -1065,18 +1088,33 @@ function Source({
         <FolderName t={t} f={f} />
         {sameName && r.relPath && <span className="muted small ellipsis source-disk">{v.label}</span>}
         <span className={`dot ${v.online ? "on" : "off"}`} />
-        <button
-          tabIndex={-1}
-          className={`icon-btn tiny ${busy ? "spin" : waiting ? "shown" : ""}`}
-          disabled={!v.online || busy || waiting}
-          onClick={(e) => {
-            e.stopPropagation();
-            p.onRescan(r.id);
-          }}
-          title={waiting ? WAITING : v.online ? "Scan again" : "Plug the disk in to scan"}
-        >
-          {waiting ? <Clock size={12} /> : <RefreshCw size={12} />}
-        </button>
+        {r.elsewhere ? (
+          <button
+            tabIndex={-1}
+            className="icon-btn tiny found-elsewhere"
+            onClick={(e) => {
+              e.stopPropagation();
+              p.onRepoint(r, r.elsewhere!.path);
+            }}
+            title={`Found on ${r.elsewhere.disk}: ${r.elsewhere.path}\nClick to use it. The catalog follows; your files are not touched.`}
+            aria-label={`Use ${r.elsewhere.path}`}
+          >
+            <FolderSync size={12} />
+          </button>
+        ) : (
+          <button
+            tabIndex={-1}
+            className={`icon-btn tiny ${busy ? "spin" : waiting ? "shown" : ""}`}
+            disabled={!v.online || busy || waiting}
+            onClick={(e) => {
+              e.stopPropagation();
+              p.onRescan(r.id);
+            }}
+            title={waiting ? WAITING : v.online ? "Scan again" : "Plug the disk in to scan"}
+          >
+            {waiting ? <Clock size={12} /> : <RefreshCw size={12} />}
+          </button>
+        )}
         <button
           tabIndex={-1}
           className="icon-btn tiny"
