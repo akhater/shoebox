@@ -6,6 +6,17 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **Focus stacks are one picture.** The frames a camera shoots for focus
+  stacking (focus bracketing) are gathered into a stack, shown as one tile
+  with a badge counting its frames; the badge, or "See all" in the viewer,
+  opens the stack on its own. Marking, tagging or turning the tile applies to
+  all its frames. Cull keeps every frame of a stack, takes no other frame
+  into it, and no longer calls a frame blurry for being sharp only where it
+  was focused; a shaken, empty or very dark frame is still pointed out.
+  Canon cameras with focus bracketing say so in each frame (other makers to
+  follow); photos read before are read again from their disks when plugged in
+  (metadata only). Headless: `shoebox-cli stacks`, and `list` shows stacks
+  as the grid does.
 - **A folder whose disk was replaced can be pointed at its new place.** On a
   new computer, or after copying a disk onto another, a folder showed as
   unplugged for good: disks are recognised by their serial, never by their

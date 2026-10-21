@@ -3333,6 +3333,9 @@ button.link:hover {
   position: absolute;
   right: 4px;
   bottom: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
   padding: 0 5px;
   border-radius: 8px;
   background: rgba(10, 10, 12, 0.75);
@@ -3768,4 +3771,30 @@ button.link:hover {
 }
 .repoint-check svg {
   flex: none;
+}
+
+/* A focus stack shown as one tile: its frame count, bottom left (after the
+   offline or missing badge when there is one); a click shows its frames. */
+.stack-badge {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px 1px 5px;
+  border-radius: 9px;
+  background: rgba(10, 10, 12, 0.72);
+  color: #e9e9ec;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  cursor: pointer;
+}
+.stack-badge.after-state {
+  left: 34px;
+}
+.stack-badge:hover {
+  background: var(--accent);
+  color: #fff;
 }

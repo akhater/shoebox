@@ -19,7 +19,7 @@ use crate::db::FILE_PRESENT;
 use anyhow::Result;
 use rawler::formats::tiff::{IFD, Value};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Version of how focus points are read. Photos an older version read are
@@ -28,7 +28,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Pentax / Ricoh, and any maker's EXIF SubjectArea (phones).
 /// 2: Canon: a zone in a fine grid is one outline whatever its size, and a
 /// photo focused by hand has no point drawn.
-pub const FOCUS_READER: i64 = 2;
+/// 3: Canon: a frame of a focus bracket says so ([`Bracket`]).
+pub const FOCUS_READER: i64 = 3;
 
 /// What a point was in this photo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -244,6 +245,45 @@ pub fn read(src: &Source, picture: Option<(u32, u32)>) -> Option<Focus> {
     Some(focus).filter(|f| !f.is_empty())
 }
 
+/// A frame of a focus bracket: the camera took a series of frames, focus a
+/// step further each time, to be merged into one picture sharp from front to
+/// back. Read from the maker's note of the makers that say so (Canon so
+/// far); which frames make one stack is worked out in stacks.rs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bracket {
+    /// Frames the camera was set to take: at most this many (a Canon stops
+    /// sooner once focus reaches infinity). 0: not said.
+    pub shots: u16,
+    /// The focus step between frames, in the camera's own units. 0: not said.
+    pub step: u16,
+    /// Seconds the camera waits between frames (for a flash to recharge).
+    pub interval: u16,
+    /// How far this frame is focused: the near and far ends of its range, in
+    /// the camera's units, when it says. Focus only moves away during a
+    /// bracket: a frame focused nearer than the one before starts another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance: Option<[u16; 2]>,
+}
+
+impl Bracket {
+    /// The camera was set the same way for both frames.
+    pub fn same_settings(&self, other: &Bracket) -> bool {
+        (self.shots, self.step, self.interval) == (other.shots, other.step, other.interval)
+    }
+
+    /// Focused nearer than `before` was: focus went back, a new bracket.
+    pub fn refocused_after(&self, before: &Bracket) -> bool {
+        matches!((self.distance, before.distance), (Some([_, far]), Some([near, _])) if far < near)
+    }
+}
+
+/// Whether the file is a frame of a focus bracket, when its maker's note says.
+pub fn bracket(src: &Source) -> Option<Bracket> {
+    let note = src.note?;
+    if src.make.trim().to_ascii_lowercase().starts_with("canon") { canon_bracket(note) } else { None }
+}
+
 fn shorts(ifd: &IFD, tag: u16) -> Option<Vec<u16>> {
     match &ifd.get_entry(tag)?.value {
         Value::Short(v) => Some(v.clone()),
@@ -255,6 +295,17 @@ fn shorts(ifd: &IFD, tag: u16) -> Option<Vec<u16>> {
 
 fn first(ifd: &IFD, tag: u16) -> Option<u16> {
     shorts(ifd, tag)?.first().copied()
+}
+
+/// 32-bit values (signed or not), and 16-bit ones, as they are.
+fn longs(ifd: &IFD, tag: u16) -> Option<Vec<i64>> {
+    match &ifd.get_entry(tag)?.value {
+        Value::Long(v) => Some(v.iter().map(|&l| l as i64).collect()),
+        Value::SLong(v) => Some(v.iter().map(|&l| l as i64).collect()),
+        Value::Short(v) => Some(v.iter().map(|&s| s as i64).collect()),
+        Value::SShort(v) => Some(v.iter().map(|&s| s as i64).collect()),
+        _ => None,
+    }
 }
 
 fn rationals(ifd: &IFD, tag: u16) -> Option<Vec<f64>> {
@@ -316,6 +367,23 @@ const CANON_AF_INFO2: u16 = 0x0026;
 const CANON_AF_INFO3: u16 = 0x003c;
 /// Shot info: index 26 is the kind of camera (250: a compact, its Y down).
 const CANON_SHOT_INFO: u16 = 0x0004;
+/// Focus bracketing (cameras since about 2018): its size in bytes, then on
+/// (1) or off, the number of shots, the focus step, exposure smoothing,
+/// merged in camera, that merge cropped, and the flash interval (s). Every
+/// frame of a bracket says the same: none says which frame it is.
+const CANON_FOCUS_BRACKETING: u16 = 0x4053;
+/// File info: the focus distance, far end at 20 and near end at 21 (cm;
+/// 65535 at infinity), on the cameras that give it.
+const CANON_FILE_INFO: u16 = 0x0093;
+
+fn canon_bracket(note: &IFD) -> Option<Bracket> {
+    let v = longs(note, CANON_FOCUS_BRACKETING)?;
+    let at = |i: usize| v.get(i).map_or(0, |&n| n.clamp(0, u16::MAX as i64) as u16);
+    let distance = shorts(note, CANON_FILE_INFO)
+        .and_then(|f| Some([*f.get(21)?, *f.get(20)?]))
+        .filter(|&[near, far]| near > 0 && far >= near);
+    (v.get(1) == Some(&1)).then(|| Bracket { shots: at(2), step: at(3), interval: at(7), distance })
+}
 
 fn canon(note: &IFD, model: &str) -> Option<Found> {
     let compact = shorts(note, CANON_SHOT_INFO).and_then(|v| v.get(26).copied()) == Some(250);
@@ -764,12 +832,21 @@ pub struct FocusReport {
     pub read: usize,
     /// Of those, with focus points.
     pub found: usize,
+    /// Of those, frames of a focus bracket.
+    pub brackets: usize,
 }
 
 /// Photos an older Shoebox read, before it knew focus points (or another
-/// maker's): their originals on the disks plugged in are read again,
-/// metadata only, never the picture; the others wait for their disk.
+/// maker's, or focus brackets): their originals on the disks plugged in are
+/// read again, metadata only, never the picture; the others wait for their
+/// disk. The frames of focus brackets found are then gathered into stacks.
 pub fn find(cat: &Catalog, cancel: &AtomicBool) -> Result<FocusReport> {
+    // Reader 3 learned only Canon's brackets: other makers' photos read by 2
+    // have nothing new to give.
+    cat.db().execute(
+        "UPDATE photos SET focus_read = 3 WHERE focus_read = 2 AND lower(COALESCE(make, '')) NOT LIKE 'canon%'",
+        [],
+    )?;
     let online = cat.online_ids();
     let mut report = FocusReport::default();
     if online.is_empty() {
@@ -794,17 +871,22 @@ pub fn find(cat: &Catalog, cancel: &AtomicBool) -> Result<FocusReport> {
             }
             // Unplugged meanwhile: it waits for its disk.
             let Ok((path, kind, _)) = cat.original(id) else { continue };
-            read.push((id, crate::imaging::read_focus(&path, kind)));
+            let (focus, bracket) = crate::imaging::read_note(&path, kind);
+            read.push((id, focus, bracket));
         }
         let db = cat.db();
         let tx = db.unchecked_transaction()?;
-        for (id, focus) in &read {
+        for (id, focus, bracket) in &read {
             let blob = stored(&tx, focus.as_ref())?;
-            tx.execute("UPDATE photos SET focus = ?1, focus_read = ?2 WHERE id = ?3", params![blob, FOCUS_READER, id])?;
+            tx.execute(
+                "UPDATE photos SET focus = ?1, focus_read = ?2, bracket = ?3 WHERE id = ?4",
+                params![blob, FOCUS_READER, crate::stacks::stored(bracket.as_ref()), id],
+            )?;
         }
         tx.commit()?;
         report.read += read.len();
-        report.found += read.iter().filter(|(_, f)| f.is_some()).count();
+        report.found += read.iter().filter(|(_, f, _)| f.is_some()).count();
+        report.brackets += read.iter().filter(|(_, _, b)| b.is_some()).count();
         if cancel.load(Ordering::Relaxed) {
             break;
         }

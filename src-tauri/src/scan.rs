@@ -812,6 +812,7 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
         };
 
         let focus = focus::stored(&tx, meta.focus.as_ref())?;
+        let bracket = crate::stacks::stored(meta.bracket.as_ref());
         let result = if let Some(pid) = same_fp.or(edited).or(recaptured) {
             // New content is looked at again by the upright model, unless the
             // user has decided how the photo stands. A date the user corrected
@@ -824,12 +825,12 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
                         model = ?6, lens = COALESCE(?7, lens), width = ?8, height = ?9, iso = ?10, fnumber = ?11, exposure = ?12,
                         focal = ?13, preview_state = ?14, error = ?15, lens_read = ?17,
                         sideways = CASE WHEN ?18 AND COALESCE(sideways, 0) <> ?19 THEN NULL ELSE sideways END,
-                        focus = ?20, focus_read = ?21
+                        focus = ?20, focus_read = ?21, bracket = ?22
                   WHERE id = ?16",
                 params![
                     fp, ckey, taken_ts, taken_exif, meta.make, meta.model, meta.lens, meta.width, meta.height,
                     meta.iso, meta.fnumber, meta.exposure, meta.focal, PREVIEW_PENDING, error, pid,
-                    imaging::LENS_READER, same_fp.is_none(), db::SIDEWAYS_DECIDED, focus, focus::FOCUS_READER
+                    imaging::LENS_READER, same_fp.is_none(), db::SIDEWAYS_DECIDED, focus, focus::FOCUS_READER, bracket
                 ],
             )?;
             // The user's turn stays with the photo.
@@ -838,8 +839,9 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
         } else {
             tx.execute(
                 "INSERT INTO photos (fingerprint, capture_key, kind, taken_ts, taken_exif, make, model, lens, width,
-                        height, iso, fnumber, exposure, focal, preview_state, error, added_at, lens_read, focus, focus_read)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                        height, iso, fnumber, exposure, focal, preview_state, error, added_at, lens_read, focus, focus_read,
+                        bracket)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     fp,
                     ckey,
@@ -860,7 +862,8 @@ fn ingest(cat: &Catalog, job: &Job, fp: &str, s: &Settings, reading: &Mutex<Read
                     db::now(),
                     imaging::LENS_READER,
                     focus,
-                    focus::FOCUS_READER
+                    focus::FOCUS_READER,
+                    bracket
                 ],
             )?;
             (tx.last_insert_rowid(), Outcome::Added, 0)

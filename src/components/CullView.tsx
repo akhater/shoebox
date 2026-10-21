@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { Check, CheckCheck, LoaderCircle, ScanSearch, Star, Trash2, TriangleAlert, X } from "lucide-react";
+import { Check, CheckCheck, Layers, LoaderCircle, ScanSearch, Star, Trash2, TriangleAlert, X } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -523,6 +523,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
             </div>
             <div className="muted small cull-meta">
               Frame {at.frame + 1} of {stack.frames.length}
+              {stack.kind === "focus" && " of a focus stack"}
               {frame.name && ` · ${frame.name}`}
               {frame.blur != null &&
                 ` · ${comparedAt[stack.compared]} ${frame.blur.toFixed(2)}‰ of the width${stack.closer ? " (original)" : " (preview)"}`}
@@ -562,7 +563,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
                   title={f.reasons.join(" · ")}
                 >
                   <img src={thumbUrl(f.id, f.rev)} alt="" loading="lazy" draggable={false} />
-                  {i === stack.keeper && stack.frames.length > 1 && (
+                  {i === stack.keeper && stack.frames.length > 1 && stack.kind !== "focus" && (
                     <span className="cull-keeper" title="The frame Cull would keep">
                       <Star size={12} />
                     </span>
@@ -759,10 +760,21 @@ const ShotList = memo(function ShotList({
         className={`cull-shot ${i === current ? "current" : ""} ${selected.has(i) ? "selected" : ""}`}
         style={{ top: i * ROW }}
         onClick={(e) => onClick(i, e)}
-        title={`${s.frames.length > 1 ? `${s.frames.length} frames of the same shot` : "A single frame"} · Ctrl or Shift click: select several shots`}
+        title={`${
+          s.kind === "focus"
+            ? `A focus stack of ${s.frames.length} frames, to be merged: all kept`
+            : s.frames.length > 1
+              ? `${s.frames.length} frames of the same shot`
+              : "A single frame"
+        } · Ctrl or Shift click: select several shots`}
       >
         <img src={thumbUrl(k.id, k.rev)} alt="" loading="lazy" draggable={false} />
-        {s.frames.length > 1 && <span className="cull-shot-count">{s.frames.length}</span>}
+        {(s.frames.length > 1 || s.kind === "focus") && (
+          <span className="cull-shot-count">
+            {s.kind === "focus" && <Layers size={10} />}
+            {s.frames.length}
+          </span>
+        )}
         {rejected > 0 && (
           <span className="cull-shot-done rejected">
             <Trash2 size={12} />

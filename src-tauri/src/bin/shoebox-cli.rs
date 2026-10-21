@@ -44,7 +44,9 @@
 //!                                before each Kopia snapshot; see .kopiaignore)
 //!   shoebox-cli list [oldest|newest|name|added] [limit] [filters] [scope]   photos in grid order
 //!                                (JSON); scope = JSON as the window's, e.g. a person's photos found
-//!                                since the user last looked: {"kind":"person","id":42,"newOnly":true}
+//!                                since the user last looked: {"kind":"person","id":42,"newOnly":true}.
+//!                                As in the grid, a focus stack is one entry ("frames": its photos);
+//!                                {"kind":"stack","id":<its first frame>} lists them one by one
 //!   shoebox-cli facets [filters]  what each filter offers, with counts (JSON)
 //!   shoebox-cli days [filters]    photos taken each day, as the calendar shows them (JSON)
 //!       filters = JSON, any of {"dates":["2026-09-26"],"cameras":[..],"lenses":[..],
@@ -126,12 +128,18 @@
 //!   shoebox-cli find-lenses       photos without a lens: read again from their originals
 //!                                 (metadata only, plugged-in disks), or from the same shot's other file
 //!   shoebox-cli lens <file>       the lens Shoebox reads in a file
-//!   shoebox-cli find-focus        photos read before Shoebox knew their camera's focus points:
-//!                                 read again from their originals (metadata only, plugged-in disks)
+//!   shoebox-cli find-focus        photos read before Shoebox knew their camera's focus points
+//!                                 (or focus brackets): read again from their originals
+//!                                 (metadata only, plugged-in disks), then focus stacks gathered
 //!   shoebox-cli focus <file>      where the camera focused, as Shoebox reads it in a file: each
 //!                                 point a fraction of the upright picture (x, y its top-left
 //!                                 corner), "inFocus", "chosen", "area" (the zone given) or
-//!                                 "other" (the camera's other points); also in `photo <id>`
+//!                                 "other" (the camera's other points); also in `photo <id>`.
+//!                                 "bracket": the file is a frame of a focus bracket (Canon):
+//!                                 shots set, focus step, interval (s), focus distance (cm)
+//!   shoebox-cli stacks            focus stacks (the frames of one focus bracket, gathered from
+//!                                 the photos whose camera says so; JSON): each stack's frames
+//!                                 in the order taken, the first one's id naming the stack
 //!
 //! Private photos (JSON out). Every password is its own private space: no
 //! password is wrong, a new one starts an empty space. Its photos are hidden from
@@ -284,6 +292,7 @@ fn main() -> anyhow::Result<()> {
             let folder = args.get(1).ok_or_else(|| anyhow::anyhow!("add <folder>"))?;
             let id = cat.add_root(Path::new(folder))?;
             let report = scan::scan_root(&cat, id, &cancel, false, &show)?;
+            shoebox_lib::stacks::assign(&cat)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Some("repoint") => match (args.get(1), args.get(2)) {
@@ -315,6 +324,7 @@ fn main() -> anyhow::Result<()> {
                     Err(e) => println!("folder {id}: {e:#}"),
                 }
             }
+            shoebox_lib::stacks::assign(&cat)?;
         }
         Some("retry") => {
             let ids = match args.get(1) {
@@ -732,6 +742,8 @@ fn main() -> anyhow::Result<()> {
             let filters: Filters = args.get(3).map(|f| serde_json::from_str(f)).transpose()?.unwrap_or_default();
             let scope: Scope = args.get(4).map(|s| serde_json::from_str(s)).transpose()?.unwrap_or(Scope::All);
             let list = cat.list_photos(&scope, sort, &filters)?;
+            // As the grid shows it: a focus stack is one entry, by its first frame shown.
+            let list = if scope.gathers_stacks() { list.stacked() } else { list };
             let mut out = Vec::new();
             const STATES: [&str; 3] = ["missing", "offline", "online"];
             for (i, id) in list.ids.iter().take(limit).enumerate() {
@@ -747,6 +759,10 @@ fn main() -> anyhow::Result<()> {
                     "marked": list.marked[i] == 1,
                     // On a person: found in it since the user last looked at them.
                     "new": list.fresh[i] == 1,
+                    // A frame of a focus stack: the stack (its first frame's id), and the
+                    // frames this entry stands for when it stands for several.
+                    "stack": (list.stack[i] != 0).then_some(list.stack[i]),
+                    "frames": list.members.get(id),
                 }));
             }
             println!(
@@ -851,13 +867,26 @@ fn main() -> anyhow::Result<()> {
             let lens = shoebox_lib::imaging::read_lens(Path::new(file), kind);
             println!("{}", serde_json::json!({ "file": file, "lens": lens, "ms": t.elapsed().as_millis() as u64 }));
         }
-        Some("find-focus") => println!("{}", serde_json::to_string_pretty(&focus::find(&cat, &cancel)?)?),
+        Some("find-focus") => {
+            let report = focus::find(&cat, &cancel)?;
+            let restacked = shoebox_lib::stacks::assign(&cat)?;
+            println!(
+                "{}",
+                serde_json::json!({ "read": report.read, "found": report.found,
+                "brackets": report.brackets, "restacked": restacked })
+            );
+        }
+        Some("stacks") => {
+            shoebox_lib::stacks::assign(&cat)?;
+            println!("{}", serde_json::to_string_pretty(&shoebox_lib::stacks::list(&cat)?)?);
+        }
         Some("focus") => {
             let file = args.get(1).ok_or_else(|| anyhow::anyhow!("focus <file>"))?;
             let kind = shoebox_lib::formats::kind_of(file).ok_or_else(|| anyhow::anyhow!("{file}: not a photo"))?;
             let t = std::time::Instant::now();
-            let focus = shoebox_lib::imaging::read_focus(Path::new(file), kind);
-            println!("{}", serde_json::json!({ "file": file, "focus": focus, "ms": t.elapsed().as_millis() as u64 }));
+            let (focus, bracket) = shoebox_lib::imaging::read_note(Path::new(file), kind);
+            let ms = t.elapsed().as_millis() as u64;
+            println!("{}", serde_json::json!({ "file": file, "focus": focus, "bracket": bracket, "ms": ms }));
         }
         Some("facets") => {
             // What each filter offers, with counts: shoebox-cli facets [filters JSON]

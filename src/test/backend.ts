@@ -342,9 +342,9 @@ export function fakeBackend() {
         prev.frames.push(frame(p, "keep", ["The best of these 2 frames"]));
         prev.keeper = 1;
       } else if (n === 4) {
-        stacks.push({ frames: [frame(p, "reject", ["Blurry everywhere: shake, motion or focus missed"], ["blurry"])], keeper: 0, compared: "sharpest", closer: false });
+        stacks.push({ frames: [frame(p, "reject", ["Blurry everywhere: shake, motion or focus missed"], ["blurry"])], keeper: 0, compared: "sharpest", closer: false, kind: "shot" });
       } else {
-        stacks.push({ frames: [frame(p, "keep", [])], keeper: 0, compared: "sharpest", closer: false });
+        stacks.push({ frames: [frame(p, "keep", [])], keeper: 0, compared: "sharpest", closer: false, kind: "shot" });
       }
     }
     // Compared where the camera focused when every frame's file says and the point is sharp
@@ -411,6 +411,7 @@ export function fakeBackend() {
       turn: turns.get(id) ?? 0,
       sideways: sideways.get(id) ?? 0,
       focus: focusOf.get(id) ?? null,
+      stack: null,
       problems: foundIn.get(id) ?? [],
       private: isPrivate(id),
       files: [

@@ -6,6 +6,7 @@ import {
   FolderInput,
   FolderOpen,
   ImageOff,
+  Layers,
   LockKeyhole,
   Trash2,
   Undo2,
@@ -70,6 +71,8 @@ interface Props {
   onPerson: (personId: number) => void;
   /** Show the folder a copy of the photo is in. */
   onFolder: (copy: FileLoc) => void;
+  /** Show every frame of the focus stack the photo is a frame of (by its first frame's id). */
+  onStack?: (stack: number) => void;
   /** Tags were added or taken off (filter counts follow). */
   onTagsChanged: () => void;
   /** Everyone in People, to say who a face is. */
@@ -115,6 +118,7 @@ export function Viewer({
   onForget,
   onPerson,
   onFolder,
+  onStack,
   onTagsChanged,
   everyone,
   onFacesChanged,
@@ -662,6 +666,25 @@ export function Viewer({
                   <dt>Focus</dt>
                   <dd>
                     <FocusSummary focus={d.focus} legend={!!drawFocus} />
+                  </dd>
+                </>
+              )}
+              {d.stack && (
+                <>
+                  <dt>Stack</dt>
+                  <dd>
+                    Frame {d.stack.frame} of {fmtNum(d.stack.frames)} of a focus stack
+                    {onStack && (
+                      <div>
+                        <button
+                          className="btn small"
+                          onClick={() => onStack(d.stack!.stack)}
+                          title="Its frames, in the order taken, to be merged into one picture"
+                        >
+                          <Layers size={14} /> See all {fmtNum(d.stack.frames)}
+                        </button>
+                      </div>
+                    )}
                   </dd>
                 </>
               )}
