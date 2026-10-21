@@ -453,10 +453,11 @@ fn read_all(
 /// scan's. A file not stamped by the latest scan was not there for it (see `mark_missing`), so two scans of a small
 /// folder that finish within one millisecond must not share a stamp, or a deleted file would still look seen.
 fn next_scan_id() -> i64 {
-    static LAST: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    static LAST: Mutex<i64> = Mutex::new(0);
     let now = chrono::Utc::now().timestamp_millis();
-    let (Ok(last) | Err(last)) = LAST.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |last| Some(now.max(last + 1)));
-    now.max(last + 1)
+    let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *last = now.max(*last + 1);
+    *last
 }
 
 /// Whether a file or folder name can be kept in the catalog on this system: it
