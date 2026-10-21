@@ -4,6 +4,20 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.43.3 - unreleased
 
+### Added
+
+- **A folder whose disk was replaced can be pointed at its new place.** On a
+  new computer, or after copying a disk onto another, a folder showed as
+  unplugged for good: disks are recognised by their serial, never by their
+  letter. Shoebox now looks for such a folder at the same path on the disks
+  plugged in, checks by content that its photos are there, and offers it: a
+  button on the folder in the sidebar and in its view. "Point to its new
+  place..." in the folder's menu does it for any other folder. Only the
+  catalog changes: the same folder, the same photos with their tags, faces
+  and people; no file is touched. A scan follows; photos not found there
+  show as missing and stay in the catalog. Works the same on Windows, macOS
+  and Linux. Headless: `shoebox-cli repoint`.
+
 ## 26.43.2 - 2026-10-21
 
 ### Added
