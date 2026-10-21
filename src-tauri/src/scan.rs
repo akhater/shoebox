@@ -123,7 +123,7 @@ pub fn scan_root(
     let root_name =
         base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| base.display().to_string());
 
-    let scan_id = chrono::Utc::now().timestamp_millis();
+    let scan_id = next_scan_id();
     let mut report = Report { root_id, ..Default::default() };
     let mut progress = Progress { root_id, root_name, phase: "listing".into(), ..Default::default() };
     on_progress(&progress);
@@ -447,6 +447,16 @@ fn read_all(
     }
     progress.read = read.into_inner();
     Ok(())
+}
+
+/// The number a scan stamps on every file it sees: the time in milliseconds, but never the same as an earlier
+/// scan's. A file not stamped by the latest scan was not there for it (see `mark_missing`), so two scans of a small
+/// folder that finish within one millisecond must not share a stamp, or a deleted file would still look seen.
+fn next_scan_id() -> i64 {
+    static LAST: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    let now = chrono::Utc::now().timestamp_millis();
+    let (Ok(last) | Err(last)) = LAST.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |last| Some(now.max(last + 1)));
+    now.max(last + 1)
 }
 
 /// Whether a file or folder name can be kept in the catalog on this system: it
@@ -933,6 +943,12 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         // Latin-1 "IMG_é.jpg" on a system that stores names as bytes.
         assert!(!keepable(OsStr::from_bytes(b"IMG_\xe9.jpg")));
+    }
+
+    #[test]
+    fn scans_started_in_the_same_millisecond_get_different_numbers() {
+        let ids: Vec<i64> = (0..1000).map(|_| next_scan_id()).collect();
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "every scan number is newer than the last");
     }
 
     #[test]
