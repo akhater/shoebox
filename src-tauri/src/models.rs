@@ -57,8 +57,11 @@ pub struct ModelSpec {
     later: bool,
 }
 
+#[cfg(windows)]
 const DIRECTML_PACKAGE: &str = "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.22.0/microsoft.ml.onnxruntime.directml.1.22.0.nupkg";
+#[cfg(windows)]
 const DIRECTML_SHA256: &str = "29f9872d786236b79aa83f94482f3a17c14297e4833768d6d0ed4883ee732e60";
+#[cfg(windows)]
 const DIRECTML_SIZE: u64 = 17_898_472;
 
 const CLIP_FILES: &[FileSpec] = &[
@@ -209,8 +212,8 @@ const RUNTIME_CPU_FILES: &[FileSpec] = &[FileSpec {
     },
 }];
 
-/// DirectML is Windows only.
-#[cfg(not(windows))]
+/// DirectML is Windows only (x64 and ARM64).
+#[cfg(not(all(windows, any(target_arch = "x86_64", target_arch = "aarch64"))))]
 const RUNTIME_GPU_FILES: &[FileSpec] = &[];
 /// No runtime published for this system: AI features stay off.
 #[cfg(not(any(
@@ -218,6 +221,14 @@ const RUNTIME_GPU_FILES: &[FileSpec] = &[];
     all(any(target_os = "macos", target_os = "linux"), any(target_arch = "x86_64", target_arch = "aarch64"))
 )))]
 const RUNTIME_CPU_FILES: &[FileSpec] = &[];
+
+/// Microsoft publishes an ONNX Runtime Shoebox can use for this system (the
+/// same systems as the lists above; a test keeps the two in step). When it
+/// doesn't, word search, faces and sideways photos are off, and say so.
+const RUNTIME_PUBLISHED: bool = cfg!(any(
+    all(windows, any(target_arch = "x86_64", target_arch = "aarch64")),
+    all(any(target_os = "macos", target_os = "linux"), any(target_arch = "x86_64", target_arch = "aarch64"))
+));
 
 const MODELS: &[ModelSpec] = &[
     ModelSpec {
@@ -440,7 +451,9 @@ pub fn runtime_ready() -> bool {
     ready(RUNTIME_GPU) || ready(RUNTIME_CPU)
 }
 
-pub const RUNTIME_MISSING: &str = if cfg!(windows) {
+pub const RUNTIME_MISSING: &str = if !RUNTIME_PUBLISHED {
+    "AI features (word search, faces, sideways photos) aren't available on this system yet: no ONNX Runtime is published for it."
+} else if cfg!(windows) {
     "The AI runtime isn't here. Download it in Settings > AI models (or: shoebox-cli models download runtime-gpu)."
 } else {
     "The AI runtime isn't here. Download it in Settings > AI models (or: shoebox-cli models download runtime-cpu)."
@@ -469,6 +482,10 @@ pub fn download(id: &str, cancel: &AtomicBool, progress: &dyn Fn(u64, u64)) -> R
     let m = spec(id)?;
     if m.later {
         bail!("{} isn't used by Shoebox yet: there is nothing to download.", m.feature);
+    }
+    // Several hundred MB of models nothing could run.
+    if !RUNTIME_PUBLISHED {
+        bail!("{RUNTIME_MISSING}");
     }
     let dir = models_dir();
     let todo: Vec<&FileSpec> = m.files.iter().filter(|f| !file_ok(&dir, f)).collect();
@@ -704,6 +721,14 @@ mod tests {
         for f in RUNTIME_GPU_FILES {
             assert_eq!(f.path, format!("onnxruntime-directml/{}", crate::ai::RUNTIME_LIB));
         }
+    }
+
+    /// A system with a runtime to download has exactly one for the processor,
+    /// and one without has none: its messages say AI isn't available there.
+    #[test]
+    fn a_runtime_is_listed_where_one_is_published() {
+        assert_eq!(RUNTIME_PUBLISHED, RUNTIME_CPU_FILES.len() == 1);
+        assert_eq!(RUNTIME_PUBLISHED, RUNTIME_MISSING.contains("Settings"));
     }
 
     #[test]

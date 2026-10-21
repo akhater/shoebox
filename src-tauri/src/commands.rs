@@ -758,7 +758,7 @@ pub async fn move_folder(
     };
     cancel.store(false, Ordering::Relaxed);
     scans.paused.store(true, Ordering::Relaxed); // nothing scans while files move
-    let name = m.rel.rsplit('\\').next().unwrap_or("").to_string();
+    let name = m.rel.rsplit(crate::volumes::SEP).next().unwrap_or("").to_string();
     std::thread::spawn(move || {
         let emit = |e: FolderMoveEvent| {
             let _ = app.emit("folder-move", e);

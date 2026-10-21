@@ -64,6 +64,10 @@ pub struct Report {
     /// Known photos read again (regenerated previews, edited files, retried failures).
     pub reread: u64,
     pub errors: u64,
+    /// Photos and folders left out because their names can't be kept in the
+    /// catalog on this system (see [`keepable`]). They are not in the catalog,
+    /// so nothing recorded is touched by leaving them out.
+    pub skipped: u64,
     /// Only the files that couldn't be read before, on a disk just plugged in.
     pub retry: bool,
     pub cancelled: bool,
@@ -130,16 +134,17 @@ pub fn scan_root(
     let mut batch: Vec<Seen> = Vec::new();
     let mut jobs: Vec<Job> = Vec::new();
     let mut last_emit = Instant::now();
-    // Never catalog Shoebox's own previews, wherever its catalog folder lives.
-    let own = cat.data.root.to_string_lossy().to_lowercase();
-    let walker = WalkDir::new(&base).follow_links(false).into_iter().filter_entry(|e| {
+    // Never catalog Shoebox's own previews, wherever its catalog folder lives
+    // (spelled as given, and with any links followed).
+    let own = own_folders(&cat.data.root);
+    let mut walker = WalkDir::new(&base).follow_links(false).into_iter().filter_entry(|e| {
         !(e.depth() > 0
             && e.file_type().is_dir()
             && (formats::skip_dir(&e.file_name().to_string_lossy())
-                || e.path().to_string_lossy().to_lowercase() == own
-                || busy.iter().any(|b| db::is_under(&rel_of(&mount, e.path()), b))))
+                || own.contains(&db::place_key(e.path()))
+                || busy.iter().any(|b| db::is_under(&volumes::rel_of(&mount, e.path()), b))))
     });
-    for entry in walker {
+    while let Some(entry) = walker.next() {
         if cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
             break;
@@ -148,10 +153,18 @@ pub fn scan_root(
             Ok(e) => e,
             Err(err) => {
                 log::warn!("scan: can't read {:?}: {err}", err.path());
-                errored.push(err.path().map(|p| rel_of(&mount, p)).unwrap_or_else(|| root.rel_path.clone()));
+                errored.push(err.path().map(|p| volumes::rel_of(&mount, p)).unwrap_or_else(|| root.rel_path.clone()));
                 continue;
             }
         };
+        // A folder whose name can't be kept is not walked, like one that can't
+        // be read: what is in it is not listed, and the catalog is left as it is.
+        if entry.depth() > 0 && entry.file_type().is_dir() && !keepable(entry.file_name()) {
+            left_out(&mut report, entry.path());
+            errored.push(volumes::rel_of(&mount, entry.path()));
+            walker.skip_current_dir();
+            continue;
+        }
         if !entry.file_type().is_file() {
             continue;
         }
@@ -159,18 +172,24 @@ pub fn scan_root(
         if formats::kind_of(&name).is_none() {
             continue;
         }
+        // A photo that couldn't be opened again from what is stored of it is
+        // never listed (never recorded, so never taken for gone either).
+        if !keepable(entry.file_name()) {
+            left_out(&mut report, entry.path());
+            continue;
+        }
         let parent = entry.path().parent().unwrap_or(&base);
         let md = match entry.metadata() {
             Ok(m) => m,
             Err(err) => {
                 log::warn!("scan: can't stat {}: {err}", entry.path().display());
-                errored.push(rel_of(&mount, parent));
+                errored.push(volumes::rel_of(&mount, parent));
                 continue;
             }
         };
         let mtime =
             md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
-        batch.push(Seen { rel_folder: rel_of(&mount, parent), name, size: md.len(), mtime });
+        batch.push(Seen { rel_folder: volumes::rel_of(&mount, parent), name, size: md.len(), mtime });
         report.found += 1;
         if batch.len() >= 500 {
             record(
@@ -278,7 +297,7 @@ pub fn retry_failed(
     let mut jobs = Vec::new();
     for (file_id, photo_id, rel, name, size, mtime) in failed {
         let Some(kind) = formats::kind_of(&name) else { continue };
-        let path = PathBuf::from(format!("{}\\{}", volumes::join(&mount, &rel).trim_end_matches('\\'), name));
+        let path = PathBuf::from(volumes::file_path(&mount, &rel, &name));
         // Not there right now: left as it is (only a full scan may call it missing).
         let Ok(md) = std::fs::metadata(&path) else { continue };
         let now_mtime =
@@ -430,10 +449,45 @@ fn read_all(
     Ok(())
 }
 
-/// Path relative to the volume root, backslashes, no leading separator.
-fn rel_of(mount: &str, p: &Path) -> String {
-    let s = p.to_string_lossy();
-    s.get(mount.len()..).unwrap_or("").trim_matches('\\').to_string()
+/// Whether a file or folder name can be kept in the catalog on this system: it
+/// is valid Unicode, so the path can be opened again from what is stored, and
+/// it holds nothing that would be read as a separator of the stored paths
+/// ([`volumes::name_is_storable`]).
+fn keepable(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(volumes::name_is_storable)
+}
+
+/// Notes a file or folder left out because its name can't be kept (see
+/// [`keepable`]): counted, and the first few said in the log.
+fn left_out(report: &mut Report, path: &Path) {
+    report.skipped += 1;
+    if report.skipped <= 20 {
+        log::warn!("scan: {} has a name that can't be kept in the catalog on this system: left out", path.display());
+    }
+}
+
+/// Where Shoebox's own folder (previews, thumbnails...) is, by [`db::place_key`]:
+/// as it is spelled, and where its links lead.
+fn own_folders(root: &Path) -> Vec<String> {
+    let mut keys = vec![db::place_key(root)];
+    if let Some(real) = resolved(root).map(|r| db::place_key(&r))
+        && !keys.contains(&real)
+    {
+        keys.push(real);
+    }
+    keys
+}
+
+/// The folder with every link followed (not on Windows, whose paths come out
+/// of it in a form nothing else is spelled in).
+#[cfg(unix)]
+fn resolved(p: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(p).ok()
+}
+
+#[cfg(not(unix))]
+fn resolved(_: &Path) -> Option<PathBuf> {
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -480,7 +534,7 @@ fn record(
             )
             .optional()?;
         let kind = formats::kind_of(&s.name).expect("filtered while listing");
-        let path = PathBuf::from(format!("{}\\{}", volumes::join(mount, &s.rel_folder).trim_end_matches('\\'), s.name));
+        let path = PathBuf::from(volumes::file_path(mount, &s.rel_folder, &s.name));
         let job = |file_id: i64, prev_photo: Option<i64>, force: bool| Job {
             file_id,
             path: path.clone(),
@@ -857,4 +911,42 @@ fn local_naive_ts(utc_secs: i64) -> i64 {
     chrono::DateTime::from_timestamp(utc_secs, 0)
         .map(|t| t.with_timezone(&chrono::Local).naive_local().and_utc().timestamp())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn a_name_is_kept_when_it_can_be_stored_and_opened_again() {
+        assert!(keepable(OsStr::new("IMG_0001.CR3")));
+        assert!(keepable(OsStr::new("Été à la plage 2026.jpg")));
+        // A backslash is a separator in the stored paths: only where no name can
+        // hold one (Windows) is it never a problem.
+        assert_eq!(keepable(OsStr::new(r"holiday\IMG_0001.jpg")), cfg!(windows));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_unicode_is_not_kept() {
+        use std::os::unix::ffi::OsStrExt;
+        // Latin-1 "IMG_é.jpg" on a system that stores names as bytes.
+        assert!(!keepable(OsStr::from_bytes(b"IMG_\xe9.jpg")));
+    }
+
+    #[test]
+    fn what_is_left_out_is_counted() {
+        let mut report = Report::default();
+        for n in 0..25 {
+            left_out(&mut report, Path::new(&format!("a{n}")));
+        }
+        assert_eq!(report.skipped, 25);
+    }
+
+    #[test]
+    fn the_catalog_folder_is_told_by_its_spelling() {
+        let own = own_folders(Path::new("catalog-folder-that-is-not-there"));
+        assert_eq!(own, [db::place_key(Path::new("catalog-folder-that-is-not-there"))]);
+    }
 }

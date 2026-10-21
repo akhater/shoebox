@@ -360,9 +360,8 @@ impl DataDir {
             .journal()
             .ok_or_else(|| io::Error::other(format!("{} can't be read", self.root.join(MOVE_JOURNAL).display())))?;
         let target = journal.to.clone();
-        let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
-        let (t, c) = (lower(&target), lower(&self.root));
-        let done = read_pointer().and_then(|p| p.data_dir).is_some_and(|d| lower(&d) == t);
+        let (t, c) = (folded(&target), folded(&self.root));
+        let done = read_pointer().and_then(|p| p.data_dir).is_some_and(|d| folded(&d) == t);
         let undone = !done && !t.starts_with(&c) && !c.starts_with(&t);
         if undone {
             for sub in &journal.renamed {
@@ -686,9 +685,8 @@ fn old_catalog_entries(dir: &Path) -> io::Result<(Vec<PathBuf>, bool)> {
 pub fn remove_old_catalog(current: &DataDir) -> anyhow::Result<Option<PathBuf>> {
     let Some(mut p) = read_pointer() else { return Ok(None) };
     let Some(old) = p.old_data_dir.clone() else { return Ok(None) };
-    let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
-    let (o, c) = (lower(&old), lower(&current.root));
-    let in_use = o.starts_with(&c) || c.starts_with(&o) || lower(&models_dir()).starts_with(&o);
+    let (o, c) = (folded(&old), folded(&current.root));
+    let in_use = o.starts_with(&c) || c.starts_with(&o) || folded(&models_dir()).starts_with(&o);
     // Never the catalog (or models) in use; and nothing left to remove.
     if in_use || is_gone(&old) {
         p.old_data_dir = None;
@@ -707,6 +705,17 @@ pub fn remove_old_catalog(current: &DataDir) -> anyhow::Result<Option<PathBuf>> 
     p.old_data_dir = None;
     write_pointer(&p)?;
     Ok(Some(old))
+}
+
+/// A path as compared to tell whether two are the same place: lower case where
+/// the file system ignores case (Windows, macOS), as it is on Linux, where
+/// `/Photos` and `/photos` are two folders.
+fn folded(p: &Path) -> PathBuf {
+    if cfg!(any(windows, target_os = "macos")) {
+        PathBuf::from(p.to_string_lossy().to_lowercase())
+    } else {
+        p.to_path_buf()
+    }
 }
 
 /// Not there while the folder holding it is: deleted, not on an unplugged disk.

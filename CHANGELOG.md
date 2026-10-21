@@ -6,6 +6,14 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **macOS and Linux get the checks Windows had.** Every pull request now also
+  builds the window and runs clippy and the tests on Linux and on macOS, so a
+  change that only breaks there is caught before a release is built.
+- On a system Microsoft publishes no ONNX Runtime for, word search, faces and
+  sideways photos say they are not available there yet, and no model is
+  downloaded for nothing.
+- Linux and macOS notice when the PC has restarted, so the check of Shoebox's
+  own files after a crash runs after a restart, not at every start.
 - **A private space can have a name**, shown next to Private in the
   sidebar, the Private view's title and Settings while its password has it
   open. Name or rename it by right-clicking the Private row (or F2, or a
@@ -43,6 +51,14 @@ Newest first. Same format and versioning as Argentum.
   `dates-undo` and `dates-leave` do the same headless (JSON out).
 - `shoebox-cli gpu-check`: each AI model's answer to a test input on the GPU
   against the CPU's.
+
+### Changed
+
+- A folder named `lost+found` (the one a Linux file system keeps at its root)
+  is no longer walked, and on macOS and Linux a Mac's `._` notes beside photos
+  on a FAT or exFAT disk are no longer taken for photos.
+- Moving or removing a catalog folder compares paths ignoring case only where
+  the file system does (Windows and macOS), not on Linux.
 
 ### Fixed
 

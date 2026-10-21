@@ -45,6 +45,7 @@ import {
   type VolumeInfo,
 } from "../api";
 import boxLogo from "../assets/shoebox-box.png";
+import { diskPath, FILE_MANAGER } from "../paths";
 import { TurnPhotoIcon } from "./TurnControl";
 
 interface Props {
@@ -950,7 +951,7 @@ function FolderMenu({
       }}
     >
       <button disabled={!here} onClick={act(() => p.onShowFolder(t.v.id, t.relPath))}>
-        Show in Explorer
+        Show in {FILE_MANAGER.name}
       </button>
       <hr />
       <button disabled={!here} onClick={act(() => onNewFolder(t))}>
@@ -1121,14 +1122,14 @@ function Tree({
 }) {
   const s: Scope = { kind: "folder", volumeId: n.volumeId, relPath: n.relPath };
   const key = `f:${n.volumeId}:${n.relPath}`;
-  const mount = (v.mount ?? v.lastMount ?? "?:\\").replace(/\\$/, "");
+  const mount = v.mount ?? v.lastMount ?? "?:\\";
   const t: FolderTarget = {
     v,
     relPath: n.relPath,
     name: n.name,
     rootId: root,
     key,
-    path: `${mount}\\${n.relPath}`,
+    path: diskPath(mount, n.relPath),
     count: n.count,
   };
   return (

@@ -29,6 +29,11 @@ const IMAGE_EXT: &[&str] = &[
 ];
 
 pub fn kind_of(name: &str) -> Option<Kind> {
+    // A Mac's note about a file (`._IMG_0001.CR2`), left beside it on a disk that
+    // can't keep it itself (FAT, exFAT, a network share): not a photo.
+    if cfg!(not(windows)) && name.starts_with("._") {
+        return None;
+    }
     let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
     if RAW_EXT.contains(&ext.as_str()) {
         Some(Kind::Raw)
@@ -43,11 +48,45 @@ pub fn extension(name: &str) -> String {
     name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default()
 }
 
-/// Folders never worth walking: hidden ones (digiKam's `.dtrash` included),
-/// the recycle bin and Windows' own.
+/// Folders never worth walking: hidden ones (digiKam's `.dtrash` included, and
+/// the `.Trashes` and `.Spotlight-V100` of a Mac's disks), the recycle bin and
+/// Windows' own, and the `lost+found` Linux file systems keep at their root
+/// (readable by root only).
 pub fn skip_dir(name: &str) -> bool {
     name.starts_with('.')
         || name.eq_ignore_ascii_case("$RECYCLE.BIN")
         || name.eq_ignore_ascii_case("System Volume Information")
         || name.eq_ignore_ascii_case("$WINDOWS.~BT")
+        || name == "lost+found"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn photos_are_told_by_their_extension() {
+        assert_eq!(kind_of("IMG_1.CR3"), Some(Kind::Raw));
+        assert_eq!(kind_of("holiday.2026.JPG"), Some(Kind::Image));
+        assert_eq!(kind_of("notes.txt"), None);
+        assert_eq!(kind_of("README"), None);
+    }
+
+    /// Off Windows, where a disk may carry a Mac's notes beside the photos.
+    #[test]
+    fn a_macs_note_beside_a_photo_is_not_a_photo_off_windows() {
+        let expected = if cfg!(windows) { Some(Kind::Raw) } else { None };
+        assert_eq!(kind_of("._IMG_1.CR3"), expected);
+        assert_eq!(kind_of("IMG_1._.CR3"), Some(Kind::Raw));
+    }
+
+    #[test]
+    fn system_folders_are_not_walked() {
+        for name in
+            [".Trashes", ".Spotlight-V100", ".Trash-1000", "lost+found", "$RECYCLE.BIN", "System Volume Information"]
+        {
+            assert!(skip_dir(name), "{name}");
+        }
+        assert!(!skip_dir("Photos") && !skip_dir("lost found") && !skip_dir("2026-10-17 Trip"));
+    }
 }

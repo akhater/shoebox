@@ -168,7 +168,7 @@ pub fn plan(cat: &Catalog) -> Result<DeletePlan> {
         files.extend(companions(&name, &kind, entries).into_iter().map(|(n, s, role)| (folder.join(n), s, role)));
         for (p, size, role) in files {
             let s = p.to_string_lossy().into_owned();
-            if seen.insert(s.to_lowercase()) {
+            if seen.insert(db::place_key(&p)) {
                 disk.files += 1;
                 disk.bytes += size;
                 plan.bytes += size;
@@ -185,6 +185,9 @@ pub fn plan(cat: &Catalog) -> Result<DeletePlan> {
     Ok(plan)
 }
 
+/// The files in a folder, with their sizes. A file whose name can't be noted
+/// down in the journal and opened again from it (see [`noted`]) is left out: it
+/// is never taken along with a photo.
 fn list_folder(folder: &Path) -> Vec<(String, u64)> {
     std::fs::read_dir(folder)
         .into_iter()
@@ -192,7 +195,8 @@ fn list_folder(folder: &Path) -> Vec<(String, u64)> {
         .flatten()
         .filter_map(|e| {
             let m = e.metadata().ok().filter(|m| m.is_file())?;
-            Some((e.file_name().to_string_lossy().into_owned(), m.len()))
+            let name = e.file_name().into_string().ok().filter(|n| volumes::name_is_storable(n))?;
+            Some((name, m.len()))
         })
         .collect()
 }
@@ -284,10 +288,8 @@ fn delete_files(cat: &Catalog, current: &DeletePlan, chosen: &[&PlanFile]) -> Re
     let places: Vec<(i64, String, String)> = chosen
         .iter()
         .map(|f| {
-            let mount = disk(f.volume_id).mount.trim_end_matches('\\');
-            let rest = f.path.get(mount.len()..).unwrap_or("").trim_start_matches('\\');
-            let (rel, name) = rest.rsplit_once('\\').unwrap_or(("", rest));
-            (f.volume_id, rel.to_string(), name.to_string())
+            let (rel, name) = volumes::split_file(&disk(f.volume_id).mount, &f.path);
+            (f.volume_id, rel, name)
         })
         .collect();
     refuse_if_busy(cat, &places.iter().map(|(v, rel, _)| (*v, rel.as_str())).collect::<Vec<_>>())?;
@@ -380,7 +382,8 @@ fn forget_files(
     Ok(removed)
 }
 
-/// A name Windows accepts for a folder.
+/// A name every system accepts for a folder, Windows included: a disk goes
+/// from one system to another.
 fn valid_name(name: &str) -> Result<&str> {
     let n = name.trim();
     if n.is_empty() || n == "." || n == ".." || n.ends_with('.') {
@@ -399,7 +402,46 @@ fn valid_name(name: &str) -> Result<&str> {
 }
 
 fn child_rel(parent: &str, name: &str) -> String {
-    if parent.is_empty() { name.to_string() } else { format!("{parent}\\{name}") }
+    if parent.is_empty() { name.to_string() } else { format!("{parent}{}{name}", volumes::SEP) }
+}
+
+/// A path below a folder as the journal notes it: its names joined by
+/// [`volumes::SEP`], the same on every system. None when a name can't be noted
+/// down (not Unicode, or holding what would read as a separator).
+fn noted(inside: &Path) -> Option<String> {
+    let mut out = String::new();
+    for part in inside.components() {
+        let name = part.as_os_str().to_str().filter(|n| volumes::name_is_storable(n))?;
+        if !out.is_empty() {
+            out.push(volumes::SEP);
+        }
+        out.push_str(name);
+    }
+    Some(out)
+}
+
+/// The path on disk of a place noted by [`noted`], below `base`.
+fn below(base: &Path, inside: &str) -> PathBuf {
+    inside.split(volumes::SEP).fold(base.to_path_buf(), |path, name| path.join(name))
+}
+
+/// A catalog folder as the system writes it, for a message.
+fn shown(rel: &str) -> String {
+    rel.replace(volumes::SEP, std::path::MAIN_SEPARATOR_STR)
+}
+
+/// Gives a copy its original's modification time, which copying a file keeps
+/// on Windows but not on macOS or Linux: a scan then sees the file unchanged.
+#[cfg(unix)]
+fn keep_modified(original: &Path, copy: &Path) -> std::io::Result<()> {
+    let modified = std::fs::metadata(original)?.modified()?;
+    std::fs::File::open(copy)?.set_modified(modified)
+}
+
+/// Windows copies the modification time with the file.
+#[cfg(not(unix))]
+fn keep_modified(_original: &Path, _copy: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Renames a catalog folder on its disk and in the catalog in one step: its
@@ -410,15 +452,18 @@ pub fn rename_folder(cat: &Catalog, volume_id: i64, rel: &str, new_name: &str) -
     if rel.is_empty() {
         bail!("A whole disk can't be renamed here: double-click the disk to change its name in Shoebox.");
     }
-    let (parent, old) = rel.rsplit_once('\\').unwrap_or(("", rel));
+    let (parent, old) = rel.rsplit_once(volumes::SEP).unwrap_or(("", rel));
     if old == name {
         return Ok(rel.to_string());
     }
     let from = PathBuf::from(cat.folder_path(volume_id, rel)?);
     let new_rel = child_rel(parent, name);
     let to = from.with_file_name(name);
-    // "trip" -> "Trip" is the same folder on Windows; anything else must be free.
-    if to.exists() && !old.eq_ignore_ascii_case(name) {
+    // "trip" -> "Trip" is the same folder where the file system ignores case
+    // (Windows, macOS by default): then the folder is listed under its old
+    // name. Anything else must be free.
+    let case_only = old.eq_ignore_ascii_case(name);
+    if to.exists() && (!case_only || exact_entry(&to)) {
         bail!("There is already a folder or file called {name} there.");
     }
     let taken: bool = cat.db().query_row(
@@ -426,7 +471,7 @@ pub fn rename_folder(cat: &Catalog, volume_id: i64, rel: &str, new_name: &str) -
         params![volume_id, new_rel],
         |r| r.get(0),
     )?;
-    if taken && !old.eq_ignore_ascii_case(name) {
+    if taken && !case_only {
         bail!(
             "The catalog still remembers a folder called {name} there (its photos are missing). Choose another name."
         );
@@ -558,7 +603,7 @@ pub fn check_move(cat: &Catalog, m: &FolderMove) -> Result<(PathBuf, PathBuf, St
     if m.rel.is_empty() {
         bail!("A whole disk can't be moved.");
     }
-    let (parent, name) = m.rel.rsplit_once('\\').unwrap_or(("", &m.rel));
+    let (parent, name) = m.rel.rsplit_once(volumes::SEP).unwrap_or(("", &m.rel));
     if m.from == m.to {
         if db::is_under(&m.to_parent, &m.rel) {
             bail!("A folder can't go inside itself.");
@@ -632,7 +677,7 @@ pub fn move_folder(
     let mut files = Vec::new();
     for e in walkdir::WalkDir::new(&from).follow_links(false).min_depth(1) {
         let e = e.map_err(|e| anyhow!("Can't read part of {}: {e}. Nothing was moved.", from.display()))?;
-        let inside = e.path().strip_prefix(&from)?.to_str().map(str::to_string);
+        let inside = noted(e.path().strip_prefix(&from)?);
         let inside = inside.ok_or_else(|| {
             anyhow!("{} has a name Shoebox can't note down; it won't move it. Nothing was moved.", e.path().display())
         })?;
@@ -669,14 +714,18 @@ pub fn move_folder(
 
     let copy_all = |p: &mut MoveProgress| -> Result<()> {
         for d in &plan.dirs {
-            std::fs::create_dir(to.join(d))?;
+            std::fs::create_dir(below(&to, d))?;
         }
         for (f, size) in &plan.files {
             if cancel.load(Ordering::Relaxed) {
                 bail!("Stopped. Nothing was moved.");
             }
-            let dst = to.join(f);
-            std::fs::copy(from.join(f), &dst)?; // keeps the file's dates, so scans see it unchanged
+            let (src, dst) = (below(&from, f), below(&to, f));
+            std::fs::copy(&src, &dst)?;
+            // The copy has the file's dates, so scans see it unchanged.
+            if let Err(e) = keep_modified(&src, &dst) {
+                log::warn!("move: couldn't give {} the date of its original: {e}", dst.display());
+            }
             // On the disk, not just in memory (a read-only copy can't be opened to flush; Windows writes it soon anyway).
             if let Ok(out) = std::fs::OpenOptions::new().write(true).open(&dst) {
                 out.sync_all()?;
@@ -693,8 +742,9 @@ pub fn move_folder(
             if cancel.load(Ordering::Relaxed) {
                 bail!("Stopped. Nothing was moved.");
             }
-            if !same_bytes(&from.join(f), &to.join(f))? {
-                bail!("The copy of {} came out different. Nothing was moved.", from.join(f).display());
+            let original = below(&from, f);
+            if !same_bytes(&original, &below(&to, f))? {
+                bail!("The copy of {} came out different. Nothing was moved.", original.display());
             }
             p.files += 1;
             p.bytes += size;
@@ -758,8 +808,16 @@ fn give_up_copy(cat: &Catalog, journal: Journal, plan: &CopyOp, e: anyhow::Error
     e
 }
 
+/// Removes an original after its copy was checked. On macOS and Linux what
+/// stops a removal is the folder, not the file: nothing is changed to try again.
+#[cfg(not(windows))]
+fn remove_original(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
 /// Removes an original after its copy was checked; a read-only one is made
 /// writable first (it is going anyway).
+#[cfg(windows)]
 fn remove_original(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -1131,7 +1189,7 @@ fn undo_copy(cat: &Catalog, c: &CopyOp) -> Result<bool> {
     }
     let mut all = true;
     for (f, _) in &c.files {
-        let (orig, copy) = (from.join(f), to.join(f));
+        let (orig, copy) = (below(&from, f), below(&to, f));
         if copy.symlink_metadata().is_err() {
             continue;
         }
@@ -1142,7 +1200,7 @@ fn undo_copy(cat: &Catalog, c: &CopyOp) -> Result<bool> {
             all = false;
         }
     }
-    for d in c.dirs.iter().rev().map(|d| to.join(d)).chain(std::iter::once(to.clone())) {
+    for d in c.dirs.iter().rev().map(|d| below(&to, d)).chain(std::iter::once(to.clone())) {
         if std::fs::remove_dir(&d).is_err() && d.exists() {
             log::warn!("move: left {} (not empty)", d.display());
         }
@@ -1158,7 +1216,7 @@ fn finish_copy(cat: &Catalog, c: &CopyOp, check: bool, done_one: &mut dyn FnMut(
     let Some((from, to)) = copy_paths(cat, c) else { return Ok(None) };
     let mut left = Vec::new();
     for (f, _) in &c.files {
-        let (orig, copy) = (from.join(f), to.join(f));
+        let (orig, copy) = (below(&from, f), below(&to, f));
         if orig.symlink_metadata().is_ok() {
             let copied = !check || (copy.is_file() && same_bytes(&orig, &copy).unwrap_or(false));
             if !copied {
@@ -1174,7 +1232,7 @@ fn finish_copy(cat: &Catalog, c: &CopyOp, check: bool, done_one: &mut dyn FnMut(
         done_one();
     }
     // Folders bottom-up; one that isn't empty (something left, or added meanwhile) stays.
-    for d in c.dirs.iter().rev().map(|d| from.join(d)).chain(std::iter::once(from.clone())) {
+    for d in c.dirs.iter().rev().map(|d| below(&from, d)).chain(std::iter::once(from.clone())) {
         if std::fs::remove_dir(&d).is_err() && d.exists() {
             log::warn!("move: left {} (not empty)", d.display());
         }
@@ -1208,7 +1266,7 @@ fn settle_delete(cat: &Catalog, journal: Journal, d: &DeleteOp) -> Result<Settle
 impl Op {
     fn describe(&self, cat: &Catalog) -> String {
         match self {
-            Op::Rename(r) => format!("rename of {} to {}", place(cat, r.volume_id, &r.rel), r.new_rel),
+            Op::Rename(r) => format!("rename of {} to {}", place(cat, r.volume_id, &r.rel), shown(&r.new_rel)),
             Op::Copy(c) => format!("move of {} to {}", place(cat, c.from, &c.rel), place(cat, c.to, &c.new_rel)),
             Op::Delete(d) => format!("delete of {} file(s)", d.files.len()),
         }
@@ -1233,7 +1291,7 @@ fn place(cat: &Catalog, volume_id: i64, rel: &str) -> String {
         .db()
         .query_row("SELECT label FROM volumes WHERE id = ?1", [volume_id], |r| r.get(0))
         .unwrap_or_else(|_| format!("disk {volume_id}"));
-    format!("{label}: {rel}")
+    format!("{label}: {}", shown(rel))
 }
 
 /// Folders (disk id, path) that a rename, move or delete under way - or cut
@@ -1364,6 +1422,32 @@ mod tests {
                 "IMG_0001.JPG.agdata edits",
             ]
         );
+    }
+
+    #[test]
+    fn folders_are_joined_and_noted_with_the_catalogs_separator() {
+        assert_eq!(child_rel("", "Trip"), "Trip");
+        assert_eq!(child_rel("Photos", "Trip"), "Photos\\Trip");
+        assert_eq!(child_rel("Photos\\2026", "Trip"), "Photos\\2026\\Trip");
+        // Below a folder, the journal notes the same on every system...
+        let inside: PathBuf = ["Day 2", "RAW", "IMG_1.CR3"].into_iter().collect();
+        assert_eq!(noted(&inside).as_deref(), Some("Day 2\\RAW\\IMG_1.CR3"));
+        assert_eq!(noted(Path::new("IMG_1.CR3")).as_deref(), Some("IMG_1.CR3"));
+        // ...and finds its way back to the files with the system's own separator.
+        assert_eq!(below(Path::new("base"), "Day 2\\RAW\\IMG_1.CR3"), Path::new("base").join(&inside));
+        assert_eq!(below(Path::new("base"), "IMG_1.CR3"), Path::new("base").join("IMG_1.CR3"));
+        // Shown in a message as the system writes a path.
+        assert_eq!(shown("Photos\\Trip"), ["Photos", "Trip"].join(std::path::MAIN_SEPARATOR_STR));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_the_journal_cannot_note_stops_a_move() {
+        use std::os::unix::ffi::OsStrExt;
+        // A backslash is a name here, and would read as two folders in the journal.
+        assert_eq!(noted(&Path::new("Day 2").join("a\\b")), None);
+        let latin1 = Path::new("Day 2").join(std::ffi::OsStr::from_bytes(b"IMG_\xe9.jpg"));
+        assert_eq!(noted(&latin1), None);
     }
 
     #[test]
