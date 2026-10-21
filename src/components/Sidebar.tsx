@@ -439,7 +439,9 @@ export function Sidebar(p: Props) {
     };
   }, [anyMenu]);
 
-  const cls = (s: Scope, extra = "") => `nav-item ${!p.peopleOpen && sameScope(s, scope) ? "active" : ""} ${extra}`;
+  // What the photo view shows, unless People is open over it.
+  const onScreen = (s: Scope) => !p.peopleOpen && sameScope(s, scope);
+  const cls = (s: Scope, extra = "") => `nav-item ${onScreen(s) ? "active" : ""} ${extra}`;
 
   // Every folder added, by path, whatever disk it is on.
   const sources = (overview?.volumes ?? [])
@@ -490,7 +492,7 @@ export function Sidebar(p: Props) {
                 <TriangleAlert size={16} className="missing-icon" />
               </RailItem>
             )}
-            {((overview?.marked ?? 0) > 0 || scope.kind === "marked") && (
+            {((overview?.marked ?? 0) > 0 || onScreen({ kind: "marked" })) && (
               <RailItem
                 label={`Marked for deletion · ${fmtNum(overview?.marked ?? 0)}`}
                 className={cls({ kind: "marked" })}
@@ -499,7 +501,7 @@ export function Sidebar(p: Props) {
                 <Trash2 size={16} className="marked-icon" />
               </RailItem>
             )}
-            {((overview?.sideways ?? 0) > 0 || scope.kind === "sideways") && (
+            {((overview?.sideways ?? 0) > 0 || onScreen({ kind: "sideways" })) && (
               <RailItem
                 label={`Sideways · ${fmtNum(overview?.sideways ?? 0)}`}
                 className={cls({ kind: "sideways" })}
@@ -653,14 +655,14 @@ export function Sidebar(p: Props) {
               <span className="count">{fmtNum(overview!.missing)}</span>
             </button>
           )}
-          {((overview?.marked ?? 0) > 0 || scope.kind === "marked") && (
+          {((overview?.marked ?? 0) > 0 || onScreen({ kind: "marked" })) && (
             <button {...nav(0)} className={cls({ kind: "marked" })} onClick={() => onScope({ kind: "marked" })}>
               <Trash2 size={16} className="marked-icon" />
               <span className="grow">Marked for deletion</span>
               <span className="count">{fmtNum(overview?.marked ?? 0)}</span>
             </button>
           )}
-          {((overview?.sideways ?? 0) > 0 || scope.kind === "sideways") && (
+          {((overview?.sideways ?? 0) > 0 || onScreen({ kind: "sideways" })) && (
             <button
               {...nav(0)}
               className={cls({ kind: "sideways" })}

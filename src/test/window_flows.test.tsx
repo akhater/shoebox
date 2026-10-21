@@ -274,11 +274,17 @@ describe("turning photos", () => {
     await wait(100);
     expect(turnsAsked(be, "sideways_leave")).toEqual([{ ids: [203] }]);
     expect(gridIds(host)).toEqual([102]);
-    await click(byText(host, ".banner button", "Turn it as shown"));
+    await click(byText(host, ".banner button", "Turn it as suggested"));
     await wait(100);
     expect(turnsAsked(be, "sideways_accept")).toEqual([{ ids: [102] }]);
     expect(be.turns.get(102)).toBe(1);
     expect(gridIds(host)).toEqual([]);
+    // Emptied, Sideways stays listed while it is on screen, and goes once People opens over it.
+    const sideways = () => [...host.querySelectorAll(".sidebar-scroll .nav-item")].filter((e) => /^Sideways/.test(e.textContent ?? ""));
+    expect(sideways()).toHaveLength(1);
+    await click(sidebarItem(host, "People"));
+    await wait(100);
+    expect(sideways()).toHaveLength(0);
   });
 });
 
