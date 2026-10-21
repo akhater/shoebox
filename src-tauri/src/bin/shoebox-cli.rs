@@ -44,7 +44,9 @@
 //!                                before each Kopia snapshot; see .kopiaignore)
 //!   shoebox-cli list [oldest|newest|name|added] [limit] [filters] [scope]   photos in grid order
 //!                                (JSON); scope = JSON as the window's, e.g. a person's photos found
-//!                                since the user last looked: {"kind":"person","id":42,"newOnly":true}
+//!                                since the user last looked: {"kind":"person","id":42,"newOnly":true}.
+//!                                As in the grid, a focus stack is one entry ("frames": its photos);
+//!                                {"kind":"stack","id":<its first frame>} lists them one by one
 //!   shoebox-cli facets [filters]  what each filter offers, with counts (JSON)
 //!   shoebox-cli days [filters]    photos taken each day, as the calendar shows them (JSON)
 //!       filters = JSON, any of {"dates":["2026-09-26"],"cameras":[..],"lenses":[..],
@@ -740,6 +742,8 @@ fn main() -> anyhow::Result<()> {
             let filters: Filters = args.get(3).map(|f| serde_json::from_str(f)).transpose()?.unwrap_or_default();
             let scope: Scope = args.get(4).map(|s| serde_json::from_str(s)).transpose()?.unwrap_or(Scope::All);
             let list = cat.list_photos(&scope, sort, &filters)?;
+            // As the grid shows it: a focus stack is one entry, by its first frame shown.
+            let list = if scope.gathers_stacks() { list.stacked() } else { list };
             let mut out = Vec::new();
             const STATES: [&str; 3] = ["missing", "offline", "online"];
             for (i, id) in list.ids.iter().take(limit).enumerate() {
@@ -755,6 +759,10 @@ fn main() -> anyhow::Result<()> {
                     "marked": list.marked[i] == 1,
                     // On a person: found in it since the user last looked at them.
                     "new": list.fresh[i] == 1,
+                    // A frame of a focus stack: the stack (its first frame's id), and the
+                    // frames this entry stands for when it stands for several.
+                    "stack": (list.stack[i] != 0).then_some(list.stack[i]),
+                    "frames": list.members.get(id),
                 }));
             }
             println!(

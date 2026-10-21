@@ -411,6 +411,7 @@ export function fakeBackend() {
       turn: turns.get(id) ?? 0,
       sideways: sideways.get(id) ?? 0,
       focus: focusOf.get(id) ?? null,
+      stack: null,
       problems: foundIn.get(id) ?? [],
       private: isPrivate(id),
       files: [

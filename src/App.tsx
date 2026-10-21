@@ -80,6 +80,7 @@ import {
   type UpdateStatus,
   updatesApi,
   withoutPrivate,
+  withFrames,
 } from "./api";
 import { CalendarView } from "./components/CalendarView";
 import { CullView } from "./components/CullView";
@@ -938,7 +939,7 @@ export default function App() {
   /** From a person's page: the selected photos aren't them. Their face in
    *  each goes to whoever the user says. */
   const notThem = (p: Person) => {
-    const ids = shown.ids.filter((id) => selected.has(id));
+    const ids = withFrames(shown, shown.ids.filter((id) => selected.has(id)));
     run(
       people.inPhotos(ids).then((faces) => {
         const mine = faces.filter((f) => f.personId === p.id);
@@ -1357,12 +1358,13 @@ export default function App() {
   );
   // Selected photos that are private (listed only while their space is open).
   const privateSelected = useMemo(
-    () => (unlocked && selected.size > 0 ? shown.ids.filter((id, i) => shown.private[i] === 1 && selected.has(id)) : []),
+    () => (unlocked && selected.size > 0 ? withFrames(shown, shown.ids.filter((id, i) => shown.private[i] === 1 && selected.has(id))) : []),
     [unlocked, selected, shown],
   );
   const focusIndex = useMemo(() => (focusId == null ? null : shown.ids.indexOf(focusId)), [focusId, shown]);
   // Stable, so the grid isn't drawn again for a scan's progress or a letter typed in the search box.
   const openPhoto = useLatest((i: number) => setViewerId(shown.ids[i]));
+  const openStack = useLatest((id: number) => drill({ kind: "stack", id }));
   const selectPhotos = useLatest((cursor: number, sel: Set<number>) => {
     setFocusId(cursor >= 0 ? shown.ids[cursor] : null);
     setSelected(sel);
@@ -1468,6 +1470,7 @@ export default function App() {
     if (scope.kind === "missing") return { title: "Missing" };
     if (scope.kind === "marked") return { title: "Marked for deletion" };
     if (scope.kind === "sideways") return { title: "Sideways" };
+    if (scope.kind === "stack") return { title: "Focus stack", sub: "Its frames, in the order taken, to be merged into one picture" };
     if (scope.kind === "private")
       return { title: privateTitle(privateStatus?.name), sub: `Hidden everywhere once you lock (${PRIVATE_SHORTCUT})` };
     if (scope.kind === "date") return { title: fmtDateKey(scope.key) };
@@ -1521,7 +1524,9 @@ export default function App() {
                       ? "that look sideways"
                       : scope.kind === "private"
                         ? "that are private"
-                        : "in the catalog";
+                        : scope.kind === "stack"
+                          ? "of this focus stack"
+                          : "in the catalog";
     const filtered = filtersOn(filters) ? ", as the filters narrow them" : "";
     if (current && n > CULL_MAX)
       return `Cull works on up to ${fmtNum(CULL_MAX)} photos at once; this view has ${fmtNum(n)}: pick a folder or a day, or narrow it with the filters`;
@@ -2044,6 +2049,7 @@ export default function App() {
               list={gridList}
               rowHeight={gridRowHeight}
               onOpen={openPhoto}
+              onOpenStack={openStack}
               onSelect={selectPhotos}
               onMark={setMarked}
               onTag={setTagging}
@@ -2091,14 +2097,14 @@ export default function App() {
                 <span className="vsep" />
                 <button
                   className="btn ghost"
-                  onClick={() => setTagging(shown.ids.filter((id) => selected.has(id)))}
+                  onClick={() => setTagging(withFrames(shown, shown.ids.filter((id) => selected.has(id))))}
                   title="Tag the selected photos (T)"
                 >
                   <TagIcon size={15} /> Tag…
                 </button>
                 <button
                   className="btn ghost"
-                  onClick={() => setFixingDates(shown.ids.filter((id) => selected.has(id)))}
+                  onClick={() => setFixingDates(withFrames(shown, shown.ids.filter((id) => selected.has(id))))}
                   title="Move their dates in Shoebox (a camera clock set wrong): the files keep their own"
                 >
                   <CalendarClock size={15} /> Fix dates…
@@ -2107,7 +2113,7 @@ export default function App() {
                   <>
                     <button
                       className="btn ghost"
-                      onClick={() => leaveUpright(shown.ids.filter((id) => selected.has(id)))}
+                      onClick={() => leaveUpright(withFrames(shown, shown.ids.filter((id) => selected.has(id))))}
                       title="These stand right as they are: never suggested again"
                     >
                       Leave {selected.size === 1 ? "it" : fmtNum(selected.size)} as {selected.size === 1 ? "it is" : "they are"}
@@ -2115,7 +2121,7 @@ export default function App() {
                     <button
                       className="btn ghost"
                       onClick={() => {
-                        turnPhotos(shown.ids.filter((id) => selected.has(id)), "suggested");
+                        turnPhotos(withFrames(shown, shown.ids.filter((id) => selected.has(id))), "suggested");
                         setSelected(new Set());
                       }}
                     >
@@ -2126,7 +2132,7 @@ export default function App() {
                   <TurnControl
                     on="toolbar"
                     what={selected.size === 1 ? "the selected photo" : `the ${fmtNum(selected.size)} selected photos`}
-                    onTurn={(by) => turnPhotos(shown.ids.filter((id) => selected.has(id)), by)}
+                    onTurn={(by) => turnPhotos(withFrames(shown, shown.ids.filter((id) => selected.has(id))), by)}
                     onPreview={setTurnPreview}
                   />
                 )}
@@ -2142,7 +2148,7 @@ export default function App() {
                 {unlocked && privateSelected.length < selected.size && (
                   <button
                     className="btn ghost"
-                    onClick={() => makePrivate(shown.ids.filter((id, i) => selected.has(id) && shown.private[i] !== 1), true)}
+                    onClick={() => makePrivate(withFrames(shown, shown.ids.filter((id, i) => selected.has(id) && shown.private[i] !== 1)), true)}
                     title="Hidden from every view, search, People and agent once you lock"
                   >
                     <LockKeyhole size={15} /> Make private
@@ -2205,7 +2211,7 @@ export default function App() {
           list={shown}
           index={viewerIndex}
           onIndex={(i) => setViewerId(shown.ids[i])}
-          onToggleMark={() => setMarked([shown.ids[viewerIndex]], shown.marked[viewerIndex] !== 1)}
+          onToggleMark={() => setMarked(withFrames(shown, [shown.ids[viewerIndex]]), shown.marked[viewerIndex] !== 1)}
           onForget={() => forgetMissing([shown.ids[viewerIndex]])}
           onTagsChanged={refreshSoon}
           onPrivate={unlocked ? (isPrivate) => makePrivate([shown.ids[viewerIndex]], isPrivate) : undefined}
@@ -2216,6 +2222,7 @@ export default function App() {
           onLeave={leaveUpright}
           onPerson={(id) => drill({ kind: "person", id })}
           onFolder={goToFolder}
+          onStack={(id) => drill({ kind: "stack", id })}
           everyone={peopleList}
           onFacesChanged={() => {
             // The grid waits: on a person's page this photo may leave it.

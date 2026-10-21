@@ -19,7 +19,9 @@ export type Scope =
   /** Photos the upright model finds sideways or upside down, waiting for you. */
   | { kind: "sideways" }
   /** The private photos of the space open now (none while locked). */
-  | { kind: "private" };
+  | { kind: "private" }
+  /** The frames of a focus stack, by its first frame's id. */
+  | { kind: "stack"; id: number };
 
 export const sameScope = (a: Scope, b: Scope) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -251,7 +253,18 @@ export interface PhotoList {
   sideways: number[];
   /** 1 = a private photo (listed only while its space is open). */
   private: number[];
+  /** The focus stack each photo is a frame of (its first frame's id), 0 for none. */
+  stack?: number[];
+  /** How many frames each tile stands for: a focus stack is one tile in most views (1 for a
+   *  photo on its own). */
+  frames?: number[];
+  /** The frames of each tile that stands for several, by the id it is shown as (that one first). */
+  members?: Record<number, number[]>;
 }
+
+/** These photos of a list, each tile with all the frames it stands for: what an action on
+ *  selected tiles applies to. */
+export const withFrames = (l: PhotoList, ids: number[]) => ids.flatMap((id) => l.members?.[id] ?? [id]);
 
 export interface FileLoc {
   id: number;
@@ -300,6 +313,8 @@ export interface PhotoDetail {
   /** A private photo (shown only while its space is open). */
   private: boolean;
   files: FileLoc[];
+  /** Its place in a focus stack, when it is a frame of one. */
+  stack: { stack: number; frame: number; frames: number } | null;
 }
 
 /** What an autofocus point was in a photo: where focus was found, chosen
@@ -890,6 +905,9 @@ export function headOf(l: PhotoList, n: number): PhotoList {
     flags: l.flags.slice(0, n),
     sideways: l.sideways.slice(0, n),
     private: l.private.slice(0, n),
+    stack: l.stack?.slice(0, n),
+    frames: l.frames?.slice(0, n),
+    members: l.members,
   };
 }
 
@@ -899,7 +917,7 @@ export function withoutPrivate(l: PhotoList): PhotoList {
   if (!l.private?.includes(1)) return l;
   const keep = l.private.map((p) => p !== 1);
   return Object.fromEntries(
-    Object.entries(l).map(([k, a]) => [k, (a as unknown[]).filter((_, i) => keep[i])]),
+    Object.entries(l).map(([k, a]) => [k, Array.isArray(a) ? a.filter((_, i) => keep[i]) : a]),
   ) as unknown as PhotoList;
 }
 

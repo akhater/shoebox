@@ -86,8 +86,8 @@ pub async fn list_photos(
     let (cat, quality) = (state.cat.clone(), state.quality.clone());
     blocking(move || {
         let mut list = cat.list_photos(&scope, sort.unwrap_or_default(), &filters.unwrap_or_default())?;
-        list.flags = quality.flags(&list.ids);
-        Ok(list)
+        list.flags = quality.flags_in(&list.ids, &list.stack);
+        Ok(if scope.gathers_stacks() { list.stacked() } else { list })
     })
     .await
 }
@@ -310,7 +310,7 @@ pub async fn search_photos(
         let clear_ids: std::collections::HashSet<i64> = hits.iter().filter(|h| h.1 >= cutoff).map(|h| h.0).collect();
         let ranked: Vec<i64> = hits.iter().map(|h| h.0).collect();
         let mut list = cat.ranked_in_scope(&ranked, &scope, &filters)?;
-        list.flags = quality.flags(&list.ids);
+        list.flags = quality.flags_in(&list.ids, &list.stack);
         let clear = list.ids.iter().take_while(|id| clear_ids.contains(id)).count();
         log::info!(
             "search {:?}: {clear} clear + {} possible in {} ms",
@@ -1014,7 +1014,7 @@ pub async fn cull_flags(state: State<'_, AppState>, ids: Vec<i64>) -> Res<Vec<u3
     let (cat, quality) = (state.cat.clone(), state.quality.clone());
     blocking(move || {
         quality.measure(&cat, &ids, &AtomicBool::new(false), &|_, _| {})?;
-        Ok(quality.flags(&ids))
+        Ok(quality.flags_in(&ids, &cat.stacks_of(&ids)?))
     })
     .await
 }

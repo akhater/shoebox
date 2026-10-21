@@ -407,9 +407,10 @@ fn slow_shutter(shot: &Shot) -> Option<String> {
     (secs > 1.0 / focal && secs > 1.0 / 500.0).then(|| format!("{shown} s at {focal:.0} mm is slow for a steady hand"))
 }
 
-/// The grid's badge for a photo measured as `q`: the bits of its problems.
-pub fn flags_of(q: &Quality) -> u32 {
-    problems(q, &Shot::default()).iter().fold(0, |f, p| f | p.problem.bit())
+/// The grid's badge for a photo measured as `q`, a frame of a focus stack
+/// or not: the bits of its problems.
+pub fn flags_of(q: &Quality, focus_stack: bool) -> u32 {
+    problems(q, &Shot { focus_stack, ..Default::default() }).iter().fold(0, |f, p| f | p.problem.bit())
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,8 +1014,18 @@ impl QualityIndex {
 
     /// The grid's badges for these photos (0: nothing wrong, or not measured yet).
     pub fn flags(&self, ids: &[i64]) -> Vec<u32> {
+        self.flags_in(ids, &[])
+    }
+
+    /// [`Self::flags`], for photos each a frame of the focus stack `stacks`
+    /// gives (0 for none, or nothing for all): a frame of one isn't blurry
+    /// for being sharp only where it was focused.
+    pub fn flags_in(&self, ids: &[i64], stacks: &[i64]) -> Vec<u32> {
         let measured = self.measured.read().unwrap();
-        ids.iter().map(|id| measured.get(id).map_or(0, flags_of)).collect()
+        ids.iter()
+            .enumerate()
+            .map(|(i, id)| measured.get(id).map_or(0, |q| flags_of(q, stacks.get(i).is_some_and(|&s| s != 0))))
+            .collect()
     }
 
     /// Measures every photo of the catalog that needs it (`shoebox-cli

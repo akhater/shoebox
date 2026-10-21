@@ -152,6 +152,21 @@ pub fn assign(cat: &Catalog) -> Result<usize> {
     Ok(changed.len())
 }
 
+impl Catalog {
+    /// The focus stack each of these photos is a frame of (its first frame's
+    /// id), 0 for none.
+    pub fn stacks_of(&self, ids: &[i64]) -> Result<Vec<i64>> {
+        let found: HashMap<i64, i64> = self
+            .read()?
+            .prepare(
+                "SELECT id, stack FROM photos WHERE stack IS NOT NULL AND id IN (SELECT value FROM json_each(?1))",
+            )?
+            .query_map([serde_json::to_string(ids)?], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids.iter().map(|id| found.get(id).copied().unwrap_or(0)).collect())
+    }
+}
+
 /// A photo's place in its focus stack.
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

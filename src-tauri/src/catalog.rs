@@ -732,7 +732,7 @@ impl Catalog {
             "SELECT p.id, COALESCE(p.taken_ts, 0), {state},
                     COALESCE(p.thumb_w, 0), COALESCE(p.thumb_h, 0), p.preview_rev, p.preview_state, p.marked,
                     COALESCE((SELECT {EXT_SQL} FROM files f WHERE f.photo_id = p.id ORDER BY f.state LIMIT 1), ''),
-                    p.kind = 'raw', {fresh}, MAX(COALESCE(p.sideways, 0), 0), p.private
+                    p.kind = 'raw', {fresh}, MAX(COALESCE(p.sideways, 0), 0), p.private, COALESCE(p.stack, 0)
                FROM photos p
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
                 AND (?10 IS NULL OR p.id IN (SELECT value FROM json_each(?10)))
@@ -758,6 +758,7 @@ impl Catalog {
             out.fresh.push(r.get(10)?);
             out.sideways.push(r.get(11)?);
             out.private.push(r.get(12)?);
+            out.stack.push(r.get(13)?);
         }
         Ok(out)
     }
@@ -955,6 +956,7 @@ impl Catalog {
             Scope::Marked => ("p.marked = 1".into(), 0, String::new()),
             Scope::Sideways => ("p.sideways > 0".into(), 0, String::new()),
             Scope::Private => (self.mine_sql("p"), 0, String::new()),
+            Scope::Stack { id } => ("p.stack = ?1".into(), *id, String::new()),
         };
         // Private photos, while locked, are in no view.
         Ok((format!("{filter} AND {}", self.shown_sql("p")), p1, p2))
@@ -1774,6 +1776,19 @@ pub enum Scope {
     Sideways,
     /// The private photos of the space open now (none while locked).
     Private,
+    /// The frames of a focus stack (see stacks.rs), by its first frame's id.
+    Stack {
+        id: i64,
+    },
+}
+
+impl Scope {
+    /// Its focus stacks are one tile each ([`PhotoList::stacked`]): not in
+    /// a stack's own view, nor in the lists of photos to deal with one by
+    /// one (missing, marked for deletion, sideways).
+    pub fn gathers_stacks(&self) -> bool {
+        !matches!(self, Scope::Stack { .. } | Scope::Missing | Scope::Marked | Scope::Sideways)
+    }
 }
 
 /// Narrows any view. Within a filter any ticked value matches, except where a
@@ -2116,8 +2131,45 @@ fn digits(it: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{FolderNode, MountedVolume, ensure_keepable, natural_cmp, new_volume_label, shown_file, shown_path};
+    use super::{
+        FolderNode, MountedVolume, PhotoList, Scope, ensure_keepable, natural_cmp, new_volume_label, shown_file,
+        shown_path,
+    };
     use std::path::Path;
+
+    /// Photos 1 to 6, 2-4 one focus stack (all marked for deletion) and 6
+    /// the only frame of another shown: one tile for the stack, where its
+    /// first frame was.
+    #[test]
+    fn a_focus_stack_is_one_tile() {
+        let n = 6;
+        let list = PhotoList {
+            ids: (1..=6).collect(),
+            stack: vec![0, 2, 2, 2, 0, 9],
+            marked: vec![0, 1, 1, 1, 0, 0],
+            taken: vec![0; n],
+            state: vec![2; n],
+            w: vec![1; n],
+            h: vec![1; n],
+            rev: vec![0; n],
+            preview: vec![1; n],
+            ext: vec![String::new(); n],
+            raw: vec![0; n],
+            fresh: vec![0; n],
+            flags: vec![0; n],
+            sideways: vec![0; n],
+            private: vec![0; n],
+            ..Default::default()
+        }
+        .stacked();
+        assert_eq!(list.ids, [1, 2, 5, 6]);
+        assert_eq!(list.frames, [1, 3, 1, 1]);
+        assert_eq!(list.marked, [0, 1, 0, 0]);
+        assert_eq!(list.members.get(&2), Some(&vec![2, 3, 4]));
+        assert_eq!(list.members.len(), 1);
+        assert_eq!(list.taken.len(), 4);
+        assert!(Scope::All.gathers_stacks() && !Scope::Stack { id: 2 }.gathers_stacks());
+    }
 
     #[test]
     fn folders_sort_like_explorer() {
@@ -2205,6 +2257,63 @@ pub struct PhotoList {
     pub sideways: Vec<i64>,
     /// 1 = a private photo (listed only while they are unlocked).
     pub private: Vec<i64>,
+    /// The focus stack each photo is a frame of (its first frame's id), 0 for none.
+    pub stack: Vec<i64>,
+    /// Once [`PhotoList::stacked`]: how many frames each tile stands for (1
+    /// for a photo on its own).
+    pub frames: Vec<i64>,
+    /// ...and the frames of each tile that stands for several, by the id it
+    /// is shown as, in the order listed (that one first).
+    pub members: HashMap<i64, Vec<i64>>,
+}
+
+impl PhotoList {
+    /// One tile per focus stack: the stack's first frame in the list stands
+    /// for it, where that frame is; the others leave the list. Its tile is
+    /// marked for deletion when all of them are.
+    pub fn stacked(self) -> Self {
+        let mut members: HashMap<i64, Vec<i64>> = HashMap::new();
+        let mut all_marked: HashMap<i64, bool> = HashMap::new();
+        for (i, &s) in self.stack.iter().enumerate() {
+            if s != 0 {
+                members.entry(s).or_default().push(self.ids[i]);
+                *all_marked.entry(s).or_insert(true) &= self.marked[i] == 1;
+            }
+        }
+        let mut seen = HashSet::new();
+        let keep: Vec<bool> = self.stack.iter().map(|&s| s == 0 || members[&s].len() < 2 || seen.insert(s)).collect();
+        fn kept<T>(v: Vec<T>, keep: &[bool]) -> Vec<T> {
+            v.into_iter().zip(keep).filter_map(|(x, k)| k.then_some(x)).collect()
+        }
+        let mut out = PhotoList {
+            ids: kept(self.ids, &keep),
+            taken: kept(self.taken, &keep),
+            state: kept(self.state, &keep),
+            w: kept(self.w, &keep),
+            h: kept(self.h, &keep),
+            rev: kept(self.rev, &keep),
+            preview: kept(self.preview, &keep),
+            marked: kept(self.marked, &keep),
+            ext: kept(self.ext, &keep),
+            raw: kept(self.raw, &keep),
+            fresh: kept(self.fresh, &keep),
+            flags: if self.flags.len() == keep.len() { kept(self.flags, &keep) } else { self.flags },
+            sideways: kept(self.sideways, &keep),
+            private: kept(self.private, &keep),
+            stack: kept(self.stack, &keep),
+            frames: Vec::new(),
+            members: HashMap::new(),
+        };
+        for (i, &s) in out.stack.iter().enumerate() {
+            let n = if s == 0 { 1 } else { members[&s].len() };
+            out.frames.push(n as i64);
+            if n > 1 {
+                out.marked[i] = all_marked[&s] as i64;
+                out.members.insert(out.ids[i], members[&s].clone());
+            }
+        }
+        out
+    }
 }
 
 /// Photos per day, for the calendar.

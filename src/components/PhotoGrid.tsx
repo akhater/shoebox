@@ -1,6 +1,6 @@
-import { Focus, ImageOff, LockKeyhole, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
+import { Focus, ImageOff, Layers, LockKeyhole, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { BIN, cull, fmtDeleted, fmtNum, problemsOf, thumbUrl, type MissingPhoto, type PhotoList } from "../api";
+import { BIN, cull, fmtDeleted, fmtNum, problemsOf, thumbUrl, withFrames, type MissingPhoto, type PhotoList } from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
 import { TimelineRail } from "./TimelineRail";
 import { turnedStyle } from "./TurnControl";
@@ -28,6 +28,8 @@ interface Props {
   /** The cursor moved and/or the selection changed. */
   onSelect: (cursor: number, selected: Set<number>) => void;
   onOpen: (index: number) => void;
+  /** A focus stack's badge clicked: show its frames (the stack by its first frame's id). */
+  onOpenStack?: (stack: number) => void;
   /** Delete: mark (or unmark) these photos for deletion. */
   onMark: (ids: number[], marked: boolean) => void;
   /** T: tag these photos. */
@@ -243,7 +245,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
         const ids = list.ids.filter((id) => selected.has(id));
         if (!ids.length && cur >= 0) ids.push(list.ids[cur]);
         if (!ids.length) return;
-        p.onTag(ids);
+        p.onTag(withFrames(list, ids));
         break;
       }
       case "r":
@@ -252,7 +254,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
         const ids = list.ids.filter((id) => selected.has(id));
         if (!ids.length && cur >= 0) ids.push(list.ids[cur]);
         if (!ids.length) return;
-        p.onTurn(ids, e.shiftKey ? -1 : 1);
+        p.onTurn(withFrames(list, ids), e.shiftKey ? -1 : 1);
         break;
       }
       case "Delete": {
@@ -261,7 +263,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
         if (!ids.length) return;
         const pos = new Map(list.ids.map((id, i) => [id, i]));
         const allMarked = ids.every((id) => list.marked[pos.get(id)!] === 1);
-        p.onMark(ids, !allMarked);
+        p.onMark(withFrames(list, ids), !allMarked);
         break;
       }
       default:
@@ -337,6 +339,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                 const inBin = state === 0 ? p.binned?.get(id) : undefined;
                 const problems = problemsOf(flagsAt(t.index));
                 const turn = ((((p.turned?.get(id) ?? 0) + (p.previewTurn && selected.has(id) ? p.previewTurn : 0)) % 4) + 4) % 4;
+                const frames = list.frames?.[t.index] ?? 1;
                 return (
                   <button
                     key={id}
@@ -387,6 +390,19 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                     {state === 0 && (
                       <span className={`badge missing ${inBin ? "in-bin" : ""}`}>
                         {inBin ? <Trash size={13} /> : <TriangleAlert size={13} />}
+                      </span>
+                    )}
+                    {frames > 1 && (
+                      <span
+                        className={`stack-badge ${state === 2 ? "" : "after-state"}`}
+                        title={`A focus stack of ${fmtNum(frames)} frames, to be merged into one picture: click to see them all`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          p.onOpenStack?.(list.stack?.[t.index] ?? id);
+                        }}
+                      >
+                        <Layers size={12} />
+                        {fmtNum(frames)}
                       </span>
                     )}
                     {list.fresh[t.index] === 1 && (
