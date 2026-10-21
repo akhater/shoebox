@@ -62,6 +62,17 @@ Newest first. Same format and versioning as Argentum.
 
 ### Fixed
 
+- **Folders can be added on macOS and Linux.** Adding a folder failed there
+  with "Shoebox can't recognise disks on this system yet", because disks were
+  only recognised on Windows. A disk is now told apart by its file system
+  UUID (a FAT or exFAT disk keeps the serial Windows shows for it), so it is
+  the same disk wherever it is mounted: `/Volumes/...` on a Mac, `/media/...`
+  or `/mnt/...` on Linux. Folder paths are stored the same way on every
+  system, and paths shown in the window, "Show in folder" and pictures use
+  each system's own form. A photo or folder whose name can't be kept (a
+  backslash in a name, or a name that isn't valid Unicode) is left out, counted
+  in the scan's summary, and never taken for missing. A folder moved to
+  another disk keeps its photos' dates on macOS and Linux too.
 - **Sideways photos found again on a GPU that gets the model wrong.** A GPU
   can run an AI model and still get its answers wrong: on an Intel Arc, the
   sideways check's answers all came out unsure, so it suggested no turn at
