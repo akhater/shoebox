@@ -19,6 +19,16 @@ Newest first. Same format and versioning as Argentum.
   show as missing and stay in the catalog. Works the same on Windows, macOS
   and Linux. Headless: `shoebox-cli repoint`.
 
+### Fixed
+
+- In Sideways, the buttons that turn photos the way Shoebox suggests say
+  "as suggested" (they said "as shown", though they turn the same way
+  whether the grid shows the photos as they are or as Shoebox would turn
+  them).
+- An emptied Sideways or Marked for deletion no longer stays in the sidebar
+  at 0 once People is opened over it: it stays only while it is the view on
+  screen.
+
 ## 26.43.2 - 2026-10-21
 
 ### Added

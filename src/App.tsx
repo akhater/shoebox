@@ -1982,7 +1982,7 @@ export default function App() {
             <span className="grow" />
             {shown.ids.length > 0 && (
               <button className="btn small primary" disabled={!current} onClick={() => turnPhotos(shown.ids, "suggested")}>
-                Turn {shown.ids.length === 1 ? "it" : `all ${fmtNum(shown.ids.length)}`} as shown
+                Turn {shown.ids.length === 1 ? "it" : `all ${fmtNum(shown.ids.length)}`} as suggested
               </button>
             )}
           </div>
@@ -2119,7 +2119,7 @@ export default function App() {
                         setSelected(new Set());
                       }}
                     >
-                      <TurnPhotoIcon size={15} /> Turn {selected.size === 1 ? "it" : fmtNum(selected.size)} as shown
+                      <TurnPhotoIcon size={15} /> Turn {selected.size === 1 ? "it" : fmtNum(selected.size)} as suggested
                     </button>
                   </>
                 ) : (
