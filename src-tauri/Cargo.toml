@@ -3,7 +3,7 @@ name = "shoebox"
 description = "Shoebox - an offline catalog of every photo, on every disk."
 authors = ["Antoine Khater"]
 edition = "2024"
-version = "26.43.3"
+version = "26.43.4"
 rust-version = "1.98"
 default-run = "shoebox"
 # Integration tests are one program, declared below (see tests/all.rs).
