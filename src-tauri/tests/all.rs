@@ -31,6 +31,7 @@ mod namesakes;
 mod people_check;
 mod people_ignore;
 mod people_read;
+mod photo_moves;
 mod photo_folder;
 mod photoshop;
 mod private_photos;

@@ -1,4 +1,4 @@
-//! A folder rename, move or delete stopped dead at any step (Shoebox killed by
+﻿//! A folder rename, move or delete stopped dead at any step (Shoebox killed by
 //! a rebuild, the PC switched off) is settled by the next start: finished if
 //! the catalog had already taken it, undone otherwise. Never half-done, never
 //! an original removed without a checked copy, and a rescan afterwards finds
@@ -13,7 +13,8 @@
 //! Folders are written as the catalog keeps them (names joined by backslashes,
 //! on every system); `native` turns one into a path on disk.
 //!
-//! Lives here, not in src/, because it writes sample photos (promise 1).
+//! Lives here, not in src/, because it writes sample photos (promise 1). Its
+//! world (`World`) serves photo_moves.rs too.
 
 use rusqlite::params;
 use shoebox_lib::catalog::Catalog;
@@ -25,16 +26,16 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-const TRIP: &str = r"Photos\Trip";
+pub(crate) const TRIP: &str = r"Photos\Trip";
 /// Six photos and one Argentum sidecar.
 const TRIP_FILES: usize = 7;
 
 /// The path on disk of a folder as the catalog keeps it, below `base`.
-fn native(base: &Path, stored: &str) -> PathBuf {
+pub(crate) fn native(base: &Path, stored: &str) -> PathBuf {
     stored.split('\\').fold(base.to_path_buf(), |path, name| path.join(name))
 }
 
-fn jpeg(path: &Path, shade: u8) {
+pub(crate) fn jpeg(path: &Path, shade: u8) {
     image::RgbImage::from_fn(160, 120, |x, y| image::Rgb([shade.wrapping_mul(40), (x % 256) as u8, (y % 256) as u8]))
         .save(path)
         .unwrap();
@@ -42,29 +43,29 @@ fn jpeg(path: &Path, shade: u8) {
 
 /// Everything a change may touch.
 #[derive(PartialEq, Debug)]
-struct State {
+pub(crate) struct State {
     /// (disk, folder, name, state, photo fingerprint) of every file the catalog knows.
-    files: Vec<(i64, String, String, i64, Option<String>)>,
+    pub(crate) files: Vec<(i64, String, String, i64, Option<String>)>,
     folders: Vec<(i64, String)>,
     roots: Vec<(i64, String)>,
-    photos: i64,
+    pub(crate) photos: i64,
     marked: i64,
     previews: usize,
     /// Every folder ("") and file (its BLAKE3) on both disks.
-    disks: BTreeMap<String, String>,
+    pub(crate) disks: BTreeMap<String, String>,
     /// Changes not settled yet.
-    ops: i64,
+    pub(crate) ops: i64,
 }
 
 /// Disk A: Photos (a source) with Trip (4 photos, a sidecar, and Day 2 with 2
 /// more) and an empty 2026. Disk B: Archive (a source), empty.
-struct World {
-    base: PathBuf,
+pub(crate) struct World {
+    pub(crate) base: PathBuf,
     data: DataDir,
 }
 
 impl World {
-    fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         let base = std::env::temp_dir().join(format!("shoebox-kill-{name}"));
         let _ = std::fs::remove_dir_all(&base);
         for d in [r"disk-a\Photos\Trip\Day 2", r"disk-a\Photos\2026", r"disk-b\Archive"] {
@@ -93,13 +94,13 @@ impl World {
         w
     }
 
-    fn disk(&self, d: &str) -> PathBuf {
+    pub(crate) fn disk(&self, d: &str) -> PathBuf {
         self.base.join(format!("disk-{d}"))
     }
 
     /// Opens the catalog as a start does, with these disks plugged in.
     /// Returns it with the ids of disks A and B.
-    fn open(&self, plugged: &[&str]) -> (Catalog, i64, i64) {
+    pub(crate) fn open(&self, plugged: &[&str]) -> (Catalog, i64, i64) {
         let cat = Catalog::open(self.data.clone()).unwrap();
         let a = cat.plug_in_test_disk("Disk A", &self.disk("a")).unwrap();
         let b = cat.plug_in_test_disk("Disk B", &self.disk("b")).unwrap();
@@ -110,7 +111,7 @@ impl World {
         (cat, a, b)
     }
 
-    fn state(&self, cat: &Catalog) -> State {
+    pub(crate) fn state(&self, cat: &Catalog) -> State {
         let db = cat.db();
         let all = |sql: &str| -> Vec<(i64, String)> {
             db.prepare(sql)
@@ -165,7 +166,7 @@ impl World {
     }
 
     /// A rescan of every source plugged in finds nothing to change.
-    fn rescan_changes_nothing(&self, cat: &Catalog) {
+    pub(crate) fn rescan_changes_nothing(&self, cat: &Catalog) {
         let before = self.state(cat);
         for id in cat.root_ids().unwrap() {
             if cat.mount_of(cat.root(id).unwrap().volume_id).is_none() {
@@ -179,7 +180,7 @@ impl World {
     }
 
     /// No change left, nor its lock.
-    fn settled(&self, cat: &Catalog) {
+    pub(crate) fn settled(&self, cat: &Catalog) {
         assert_eq!(self.state(cat).ops, 0);
         assert!(self.data.op_lock_ids().is_empty(), "{:?}", self.data.op_lock_ids());
     }
@@ -192,7 +193,7 @@ impl Drop for World {
 }
 
 /// Runs `change` and stops it dead the `nth` time it reaches `step`.
-fn killed(step: &'static str, nth: usize, change: impl FnOnce() -> anyhow::Result<()>) {
+pub(crate) fn killed(step: &'static str, nth: usize, change: impl FnOnce() -> anyhow::Result<()>) {
     kill_at(step, nth);
     let outcome = catch_unwind(AssertUnwindSafe(change));
     assert!(outcome.is_err(), "the change should have stopped at {step} #{nth}");
@@ -207,7 +208,7 @@ fn move_folder(cat: &Catalog, m: &FolderMove) -> anyhow::Result<organize::MoveRe
 }
 
 /// How the world looks once `change` is done, uninterrupted.
-fn done_state(name: &str, change: impl FnOnce(&Catalog, i64, i64)) -> State {
+pub(crate) fn done_state(name: &str, change: impl FnOnce(&Catalog, i64, i64)) -> State {
     let w = World::new(name);
     let (cat, a, b) = w.open(&["a", "b"]);
     change(&cat, a, b);
