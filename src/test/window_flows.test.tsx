@@ -382,13 +382,14 @@ describe("moving photos", () => {
     const dialog = host.querySelector<HTMLElement>(".move-modal")!;
     expect(dialog.querySelector("h2")!.textContent).toBe("Move 2 photos to “Fast”");
     expect(dialog.querySelector(".move-summary b")!.textContent).toBe("1 photo · 1 file · 1.9 MB");
-    expect(dialog.textContent).toMatch(/1 has a file of the same name in “Fast”: IMG_102\.JPG\. Nothing is ever replaced\./);
+    expect(dialog.textContent).toMatch(/IMG_102\.JPG stays where it is: “Fast” already has a file of that name\. Nothing is ever replaced\./);
     expect(asked(be, "move_photos")).toHaveLength(1); // nothing moved yet
 
     await click(dialog.querySelector<HTMLInputElement>(".move-check input")!);
     await wait(100);
     expect(asked(be, "plan_photo_move").at(-1)).toMatchObject({ ask: { photoIds: [101, 102], numberClashes: true } });
     expect(dialog.textContent).toMatch(/1 file gets a number to keep both: IMG_102 \(2\)\.JPG/);
+    expect(dialog.querySelector<HTMLInputElement>(".move-check input")!.checked).toBe(true); // and can be unticked
     await click(byText(dialog, ".modal-foot button", "Move 2 photos"));
     await wait(100);
     expect(host.querySelector(".move-modal")).toBeNull();

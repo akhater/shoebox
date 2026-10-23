@@ -387,16 +387,18 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                     tabIndex={-1}
                     className={`tile ${state === 1 ? "is-offline" : ""} ${state === 0 ? "is-missing" : ""} ${marked ? "is-marked" : ""} ${selected.has(id) ? "is-selected" : ""} ${t.index === focusIndex ? "is-focus" : ""}`}
                     style={{ top: row.top, left: PAD + t.left, width: t.width, height: row.height }}
-                    // Tiles come and go as the grid scrolls, so the grid keeps the keyboard.
+                    // Tiles come and go as the grid scrolls, so the grid keeps the keyboard. A plain
+                    // press may start a drag, which taking the keyboard away from the tile then would
+                    // cancel: the tile has it until the click (or the drop) gives it back.
                     onMouseDown={(e) => {
-                      // A plain press may start a drag; Shift/Ctrl+click only picks.
-                      if (!p.onMove || e.shiftKey || e.ctrlKey || e.metaKey) e.preventDefault();
+                      if (p.onMove && !e.shiftKey && !e.ctrlKey && !e.metaKey) return;
+                      e.preventDefault();
                       scroller.current?.focus({ preventScroll: true });
                     }}
-                    onFocus={() => scroller.current?.focus({ preventScroll: true })}
                     // Dragged onto a folder in the sidebar: the selection when the photo is in it, else
                     // the photo alone (selected first, as a file manager does).
                     draggable={!!p.onMove && state !== 0}
+                    onDragEnd={() => scroller.current?.focus({ preventScroll: true })}
                     onDragStart={(e) => {
                       const tiles = selected.has(id) ? list.ids.filter((x) => selected.has(x)) : [id];
                       if (!selected.has(id)) moveTo(t.index);
@@ -407,7 +409,10 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                       e.dataTransfer.setDragImage(ghost, 24, 24);
                       window.setTimeout(() => ghost.remove());
                     }}
-                    onClick={(e) => moveTo(t.index, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey })}
+                    onClick={(e) => {
+                      scroller.current?.focus({ preventScroll: true });
+                      moveTo(t.index, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey });
+                    }}
                     onDoubleClick={() => p.onOpen(t.index)}
                     title={
                       marked

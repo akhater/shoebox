@@ -4,6 +4,25 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.43.4 - unreleased
 
+### Added
+
+- **Move photos to another folder, one or many.** Drag the selected photos
+  (or the one under the pointer) onto a folder in the sidebar, or press
+  "Move to..." in the selection bar (M) to pick one: find it by name, take
+  one of the last folders used, or make a new folder. A RAW takes its camera
+  JPEG, Argentum's edits and other editors' sidecars (.xmp, .pp3, .dop)
+  along. On the same drive the files are renamed at once, with Undo; to
+  another drive each file is copied, checked byte for byte, and its original
+  removed once the catalog points at the copy, with progress and Stop in the
+  status bar. A file already in the folder is never replaced: the photo stays
+  where it is, or, when asked, comes in numbered ("IMG_0001 (2).CR3").
+  Anything unusual (another drive, a name taken, photos already there or on
+  an unplugged drive) is shown before anything moves. The catalog follows in
+  the same step, so tags, faces and people stay with the photos and nothing
+  is read again; a move cut short by a crash is undone at the next start, or
+  finished if the catalog had taken it. Headless: `shoebox-cli move-photos`
+  and `move-back`.
+
 ## 26.43.3 - 2026-10-22
 
 ### Added

@@ -2146,7 +2146,7 @@ export default function App() {
               <h2>Add your first folder</h2>
               <p>
                 Shoebox lists every photo in it and keeps a copy of each one, so you can browse them even when the disk is
-                unplugged. It never changes, moves or deletes your files.
+                unplugged. It never changes your files, and moves or deletes them only when you ask.
               </p>
               <button className="btn primary" onClick={addFolder}>
                 <FolderPlus size={16} /> Add folder

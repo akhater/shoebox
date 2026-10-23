@@ -191,7 +191,11 @@ fn photos_moved_to_another_disk_stopped_at_any_step_are_finished_or_undone() {
 
         let (cat, _, b) = w.open(&["a", "b"]);
         let r = organize::resume(&cat).unwrap();
-        assert_eq!((r.finished.len(), r.undone.len(), r.waiting.len()), (taken as usize, !taken as usize, 0), "{step} #{nth}");
+        assert_eq!(
+            (r.finished.len(), r.undone.len(), r.waiting.len()),
+            (taken as usize, !taken as usize, 0),
+            "{step} #{nth}"
+        );
         assert_eq!(&w.state(&cat), if taken { &after } else { &before }, "{step} #{nth}");
         w.settled(&cat);
         w.rescan_changes_nothing(&cat);
@@ -210,8 +214,12 @@ fn photos_moved_on_their_disk_stopped_at_any_step_are_finished_or_undone() {
     });
     // (step, nth time, whether the catalog had taken the move). Once it has,
     // nothing is left to do: the same transaction ended the journal.
-    let steps =
-        [("files:journaled", 1, false), ("files:renamed", 1, false), ("files:renamed", 3, false), ("files:cataloged", 1, true)];
+    let steps = [
+        ("files:journaled", 1, false),
+        ("files:renamed", 1, false),
+        ("files:renamed", 3, false),
+        ("files:cataloged", 1, true),
+    ];
     for (i, (step, nth, taken)) in steps.into_iter().enumerate() {
         let w = World::new(&format!("photos-rename-{i}"));
         let (cat, a, _) = w.open(&["a", "b"]);
@@ -238,7 +246,9 @@ fn a_photo_move_cut_short_waits_for_its_disk() {
     let w = World::new("photos-wait");
     let (cat, a, b) = w.open(&["a", "b"]);
     let before = w.state(&cat);
-    killed("files:copied", 2, || go(&cat, &into(&cat, &["IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG"], b, "Archive")).map(drop));
+    killed("files:copied", 2, || {
+        go(&cat, &into(&cat, &["IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG"], b, "Archive")).map(drop)
+    });
     drop(cat);
 
     let (cat, ..) = w.open(&["a"]);

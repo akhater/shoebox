@@ -1039,9 +1039,7 @@ fn plan_photos(cat: &Catalog, m: &PhotoMove) -> Result<(PhotoMovePlan, Vec<FileG
     let mut gos = Vec::new();
     // Names in the folder (lower case: one name on Windows and macOS), on its disk or in the catalog.
     let mut taken: HashSet<String> = here.keys().cloned().collect();
-    taken.extend(
-        std::fs::read_dir(&to_path)?.flatten().map(|e| e.file_name().to_string_lossy().to_lowercase()),
-    );
+    taken.extend(std::fs::read_dir(&to_path)?.flatten().map(|e| e.file_name().to_string_lossy().to_lowercase()));
     let mut going = HashSet::new(); // place keys of the files planned
     let mut listings: HashMap<PathBuf, Vec<(String, u64)>> = HashMap::new();
     let mut cataloged: HashMap<(i64, String), HashMap<String, i64>> = HashMap::new();
@@ -1081,7 +1079,11 @@ fn plan_photos(cat: &Catalog, m: &PhotoMove) -> Result<(PhotoMovePlan, Vec<FileG
         }
         let entries = listings.entry(folder.clone()).or_insert_with(|| list_folder(folder));
         let mut group = vec![(f.2.clone(), f.3, "photo")];
-        group.extend(moving_with(&f.2, &kind, entries).into_iter().filter(|(n, ..)| !going.contains(&db::place_key(&folder.join(n)))));
+        group.extend(
+            moving_with(&f.2, &kind, entries)
+                .into_iter()
+                .filter(|(n, ..)| !going.contains(&db::place_key(&folder.join(n)))),
+        );
         let Some(names) = free_names(&group, &taken, m.number_clashes) else {
             plan.left.push(LeftPhoto { photo_id: pid, name: f.2.clone(), why: "taken".into() });
             continue;
@@ -1265,8 +1267,9 @@ pub fn move_back(
             failed.push(format!("{}: another file is there now", was.display()));
             continue;
         }
-        let photo_of =
-            cataloged.entry((mv.now.volume_id, mv.now.rel.clone())).or_insert_with(|| cataloged_in(cat, mv.now.volume_id, &mv.now.rel));
+        let photo_of = cataloged
+            .entry((mv.now.volume_id, mv.now.rel.clone()))
+            .or_insert_with(|| cataloged_in(cat, mv.now.volume_id, &mv.now.rel));
         gos.push(FileGo { from: mv.now.clone(), to: mv.was.clone(), size, photo: photo_of.get(&mv.now.name).copied() });
     }
     let mut r = move_files(cat, &gos, cancel, progress)?;
@@ -1297,8 +1300,10 @@ fn move_files(
     if gos.is_empty() {
         return Ok(r);
     }
-    let mut folders: Vec<(i64, &str)> =
-        gos.iter().flat_map(|g| [(g.from.volume_id, g.from.rel.as_str()), (g.to.volume_id, g.to.rel.as_str())]).collect();
+    let mut folders: Vec<(i64, &str)> = gos
+        .iter()
+        .flat_map(|g| [(g.from.volume_id, g.from.rel.as_str()), (g.to.volume_id, g.to.rel.as_str())])
+        .collect();
     folders.sort();
     folders.dedup();
     refuse_if_busy(cat, &folders)?;
@@ -1458,7 +1463,12 @@ fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
     use windows::core::PCWSTR;
-    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(std::iter::once(0)).collect() };
+    // Past MAX_PATH the API wants the long form (`\\?\D:\...`), which std uses on its own.
+    let wide = |p: &Path| -> Vec<u16> {
+        let long = p.as_os_str().len() >= 248 && p.is_absolute() && !p.to_string_lossy().starts_with(r"\\");
+        let prefix = if long { r"\\?\" } else { "" };
+        prefix.encode_utf16().chain(p.as_os_str().encode_wide()).chain(std::iter::once(0)).collect()
+    };
     let (f, t) = (wide(from), wide(to));
     // Without MOVEFILE_REPLACE_EXISTING a file already at `to` is an error, never replaced.
     unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVE_FILE_FLAGS(0)) }
@@ -1513,7 +1523,12 @@ fn rename_checked(from: &Path, to: &Path) -> std::io::Result<()> {
 /// copy is there (and, with `check`, the same: after a restart; a move that
 /// has just compared them doesn't). Returns the originals left behind, or
 /// None while a disk is missing.
-fn finish_files(cat: &Catalog, files: &[FileGo], check: bool, done_one: &mut dyn FnMut()) -> Result<Option<Vec<String>>> {
+fn finish_files(
+    cat: &Catalog,
+    files: &[FileGo],
+    check: bool,
+    done_one: &mut dyn FnMut(),
+) -> Result<Option<Vec<String>>> {
     let mut left = Vec::new();
     for g in files {
         let (Some(orig), Some(copy)) = (place_on_disk(cat, &g.from), place_on_disk(cat, &g.to)) else {
@@ -2222,6 +2237,29 @@ mod tests {
         assert_eq!(names(companions("IMG_0001.JPG", "image", &entries)), ["IMG_0001.JPG.agdata edits"]);
     }
 
+    #[test]
+    fn a_moved_file_never_lands_on_another() {
+        let dir = std::env::temp_dir().join("shoebox-rename-new");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Deep enough that the paths pass Windows' MAX_PATH.
+        let deep = (0..6).fold(dir.clone(), |p, i| p.join(format!("{i}-{}", "x".repeat(40))));
+        std::fs::create_dir_all(&deep).unwrap();
+        let (a, b, c) = (deep.join("a.jpg"), deep.join("b.jpg"), deep.join("c.jpg"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        assert!(rename_new(&a, &b).is_err());
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        rename_new(&a, &c).unwrap();
+        assert!(!a.exists());
+        assert_eq!(std::fs::read(&c).unwrap(), b"a");
+        // A copy neither, and what was there stays.
+        assert!(copy_checked(&c, &b).is_err());
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        copy_checked(&c, &a).unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), b"a");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn listed(names: &[&str]) -> Vec<(String, u64)> {
         names.iter().map(|n| (n.to_string(), 1)).collect()
     }
@@ -2267,7 +2305,10 @@ mod tests {
     #[test]
     fn a_name_taken_leaves_the_photo_or_numbers_all_its_files_alike() {
         let g = group(&["IMG_0001.CR3", "IMG_0001.JPG", "IMG_0001.CR3.agdata"]);
-        assert_eq!(free_names(&g, &taken(&["IMG_0002.CR3"]), false).unwrap(), ["IMG_0001.CR3", "IMG_0001.JPG", "IMG_0001.CR3.agdata"]);
+        assert_eq!(
+            free_names(&g, &taken(&["IMG_0002.CR3"]), false).unwrap(),
+            ["IMG_0001.CR3", "IMG_0001.JPG", "IMG_0001.CR3.agdata"]
+        );
         // Any case: one name on Windows and macOS. A twin's name counts as much as the photo's.
         assert_eq!(free_names(&g, &taken(&["img_0001.jpg"]), false), None);
         assert_eq!(
@@ -2275,6 +2316,9 @@ mod tests {
             ["IMG_0001 (3).CR3", "IMG_0001 (3).JPG", "IMG_0001 (3).CR3.agdata"]
         );
         // A name without an extension.
-        assert_eq!(free_names(&group(&["scan", "scan.xmp"]), &taken(&["scan"]), true).unwrap(), ["scan (2)", "scan (2).xmp"]);
+        assert_eq!(
+            free_names(&group(&["scan", "scan.xmp"]), &taken(&["scan"]), true).unwrap(),
+            ["scan (2)", "scan (2).xmp"]
+        );
     }
 }

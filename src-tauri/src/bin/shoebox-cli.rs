@@ -194,7 +194,8 @@
 //!       else each photo's copy on the folder's disk, or its first one. A name already in the
 //!       folder is never replaced: the photo stays ("left", with why), or --number keeps both
 //!       ("IMG_0001 (2).CR3"). --plan: only what it would do. "moved" says where each file went
-//!   shoebox-cli move-back '<"moved" of move-photos>'   those files back where they were (Undo)
+//!   shoebox-cli move-back '<what move-photos printed, or its "moved">' | -
+//!       those files back where they were (Undo); - reads it from stdin: move-photos ... | move-back -
 //!   A move, rename or delete cut short (a kill, a crash) is finished or undone by the next
 //!   start of shoebox-cli or the window, as far as the disks plugged in allow (told on stderr).
 //!
@@ -1023,8 +1024,15 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some("move-back") => {
-            let usage = || anyhow::anyhow!("move-back '<\"moved\" of move-photos, as JSON>'");
-            let moved: Vec<organize::Moved> = serde_json::from_str(args.get(1).ok_or_else(usage)?)?;
+            let usage = || anyhow::anyhow!("move-back '<what move-photos printed, or its \"moved\">' | -");
+            let text = match args.get(1).map(String::as_str).ok_or_else(usage)? {
+                "-" => std::io::read_to_string(std::io::stdin())?,
+                json => json.to_string(),
+            };
+            // Windows PowerShell's pipe starts with a byte order mark.
+            let mut given: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))?;
+            let moved: Vec<organize::Moved> =
+                serde_json::from_value(given.get_mut("moved").map(|m| m.take()).unwrap_or(given))?;
             let r = organize::move_back(&cat, &moved, &cancel, &|p| {
                 eprint!("\r  {} {}/{} files, {} MB   ", p.phase, p.files, p.total_files, p.bytes >> 20)
             })?;

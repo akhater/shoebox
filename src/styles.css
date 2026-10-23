@@ -3876,7 +3876,8 @@ button.link:hover {
 }
 .move-list {
   margin-top: 10px;
-  height: min(46vh, 380px);
+  max-height: min(46vh, 380px);
+  min-height: 120px;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);

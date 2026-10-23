@@ -75,7 +75,8 @@ function treeOf(overview: Overview | null, browse: Browse | null): Tree {
         id: v.id,
         label: v.label,
         online: v.online,
-        roots: v.roots.map((r) => ({
+        // By path, as the sidebar lists them.
+        roots: [...v.roots].sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: "base" })).map((r) => ({
           target: { volumeId: v.id, relPath: r.relPath, name: r.name, path: r.path, disk: v.label },
           count: r.photos,
           off: !v.online ? "Its disk is unplugged" : !r.found ? "Not found on its disk" : null,
@@ -86,14 +87,17 @@ function treeOf(overview: Overview | null, browse: Browse | null): Tree {
 }
 
 const LEFT_WHY: Record<LeftWhy, (n: number, to: string) => string> = {
-  here: (n, to) => `${n === 1 ? "1 is" : `${fmtNum(n)} are`} in “${to}” already.`,
+  here: (n, to) => `${n === 1 ? "1 photo is" : `${fmtNum(n)} photos are`} already in “${to}”.`,
   copyThere: (n, to) =>
-    `${n === 1 ? "1 has a copy" : `${fmtNum(n)} have copies`} in “${to}” already, under the same name: ${n === 1 ? "it stays" : "they stay"} where ${n === 1 ? "it is" : "they are"}.`,
-  unplugged: (n) => `${n === 1 ? "1 is" : `${fmtNum(n)} are`} on an unplugged disk: plug it in to move ${n === 1 ? "it" : "them"}.`,
-  notFound: (n) => `${n === 1 ? "1 isn't" : `${fmtNum(n)} aren't`} where the catalog says (file or folder not found): ${n === 1 ? "it stays" : "they stay"}.`,
-  missing: (n) => `${n === 1 ? "1 is" : `${fmtNum(n)} are`} missing from every disk: nothing to move.`,
+    `${n === 1 ? "1 photo has a copy" : `${fmtNum(n)} photos have copies`} in “${to}” already, under the same name: ${n === 1 ? "it stays" : "they stay"} where ${n === 1 ? "it is" : "they are"}.`,
+  unplugged: (n) => `${n === 1 ? "1 photo is" : `${fmtNum(n)} photos are`} on an unplugged disk: plug it in to move ${n === 1 ? "it" : "them"}.`,
+  notFound: (n) =>
+    `${n === 1 ? "1 photo isn't" : `${fmtNum(n)} photos aren't`} where the catalog says (file or folder not found): ${n === 1 ? "it stays" : "they stay"}.`,
+  missing: (n) => `${n === 1 ? "1 photo is" : `${fmtNum(n)} photos are`} missing from every disk: nothing to move.`,
   taken: () => "",
 };
+/** "IMG_1.JPG, IMG_2.JPG, IMG_3.JPG…" */
+const someNames = (names: string[]) => names.slice(0, 3).join(", ") + (names.length > 3 ? "…" : "");
 const ROLE_WORDS = { twin: ["JPEG twin of a RAW file", "JPEG twins of RAW files"], edits: ["edit file", "edit files"] } as const;
 const SHOWN_FILES = 500;
 
@@ -200,6 +204,11 @@ export function MoveDialog(p: Props) {
 
   const pickable = useMemo(() => [...recent, ...rows].filter((r) => r.folder && !r.off), [recent, rows]);
   const pickedKey = picked ? folderKey(picked.volumeId, picked.relPath) : null;
+  // A search shows only what it finds: the folder picked is one of them (its first, else none).
+  useEffect(() => {
+    if (!query.trim() || !pickedKey) return;
+    if (!pickable.some((r) => r.key === pickedKey)) setPicked(pickable[0]?.folder ?? null);
+  }, [query, pickable, pickedKey]);
   const isHere = (t: MoveTarget) => p.here?.volumeId === t.volumeId && p.here.relPath === t.relPath;
 
   const list = useRef<HTMLDivElement>(null);
@@ -375,14 +384,14 @@ export function MoveDialog(p: Props) {
             <p>Nothing to move.</p>
           )}
 
-          {taken.length > 0 && (
+          {(taken.length > 0 || renamed.length > 0 || numbering) && (
             <div className="note">
-              {taken.length === 1 ? "1 has" : `${fmtNum(taken.length)} have`} a file of the same name in “{to.name}”:{" "}
-              {taken
-                .slice(0, 3)
-                .map((l) => l.name)
-                .join(", ")}
-              {taken.length > 3 ? "…" : ""}. Nothing is ever replaced.
+              {numbering
+                ? `${renamed.length === 1 ? "1 file gets" : `${fmtNum(renamed.length)} files get`} a number to keep both: ${someNames(renamed.map((f) => f.name)).replace(/[^…]$/, "$&.")}`
+                : taken.length === 1
+                  ? `${taken[0].name} stays where it is: “${to.name}” already has a file of that name.`
+                  : `${fmtNum(taken.length)} photos stay where they are: “${to.name}” already has files of their names (${someNames(taken.map((l) => l.name))}).`}{" "}
+              Nothing is ever replaced.
               <label className="move-check">
                 <input
                   type="checkbox"
@@ -393,19 +402,11 @@ export function MoveDialog(p: Props) {
                     choose(to, e.target.checked);
                   }}
                 />
-                Keep both: the {taken.length === 1 ? "one" : "ones"} coming in get a number ({numberedExample(taken[0].name)})
+                {numbering || taken.length !== 1
+                  ? "Keep both: the photos coming in get a number"
+                  : `Keep both: the one coming in becomes ${numberedExample(taken[0].name)}`}
               </label>
             </div>
-          )}
-          {renamed.length > 0 && (
-            <p className="note">
-              {renamed.length === 1 ? "1 file gets" : `${fmtNum(renamed.length)} files get`} a number to keep both:{" "}
-              {renamed
-                .slice(0, 3)
-                .map((f) => f.name)
-                .join(", ")}
-              {renamed.length > 3 ? "…" : ""}
-            </p>
           )}
           {(["here", "copyThere", "unplugged", "notFound", "missing"] as const).map(
             (why) =>
@@ -493,9 +494,9 @@ export function MoveDialog(p: Props) {
         <div className="modal-foot">
           <button
             className="btn ghost move-new"
-            disabled={!picked || busy}
+            disabled={!picked || busy || !!query.trim()}
             onClick={() => setNaming(true)}
-            title={picked ? `A new folder in “${picked.name}”` : "Pick the folder to make it in"}
+            title={picked && !query.trim() ? `A new folder in “${picked.name}”` : "Pick the folder to make it in"}
           >
             <FolderPlus size={15} /> New folder
           </button>
