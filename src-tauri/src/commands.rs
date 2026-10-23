@@ -956,11 +956,19 @@ pub async fn move_photos_back(
     Ok(r)
 }
 
-/// Makes a new folder inside a catalog folder. Returns its path.
+/// Makes a new folder inside a catalog folder ("New folder" unless named).
+/// Returns its path.
 #[tauri::command]
-pub async fn new_folder(app: AppHandle, state: State<'_, AppState>, volume_id: i64, parent_rel: String) -> Res<String> {
+pub async fn new_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    volume_id: i64,
+    parent_rel: String,
+    name: Option<String>,
+) -> Res<String> {
     let cat = state.cat.clone();
-    let rel = in_order(move || organize::create_folder(&cat, volume_id, &parent_rel, "New folder")).await?;
+    let name = name.unwrap_or_else(|| "New folder".into());
+    let rel = in_order(move || organize::create_folder(&cat, volume_id, &parent_rel, &name)).await?;
     let _ = app.emit("catalog-changed", ());
     Ok(rel)
 }

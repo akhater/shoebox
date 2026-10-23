@@ -416,17 +416,93 @@ export interface MoveResult {
   leftBehind: string[];
 }
 
-/** Progress of a folder going to another disk. */
+type MovePhase = {
+  phase: "copying" | "checking" | "removing";
+  files: number;
+  totalFiles: number;
+  bytes: number;
+  totalBytes: number;
+};
+
+/** Progress of a folder going to another disk (or of photos: then `photos` is set). */
 export interface FolderMoveEvent {
   name: string;
-  progress: {
-    phase: "copying" | "checking" | "removing";
-    files: number;
-    totalFiles: number;
-    bytes: number;
-    totalBytes: number;
-  } | null;
+  /** Photos, not a folder: the status bar says "Moving 12 photos to “name”"; Stop keeps those moved so far. */
+  photos?: number;
+  progress: MovePhase | null;
   result: MoveResult | null;
+  error: string | null;
+  finished: boolean;
+}
+
+/** What photos dragged from the grid carry: their ids, as JSON. */
+export const PHOTOS_DRAG = "application/x-shoebox-photos";
+
+/** A file's place in the catalog: its disk, its folder on that disk, its name. */
+export interface FilePlace {
+  volumeId: number;
+  rel: string;
+  name: string;
+}
+
+/** Photos going into a folder. `from`: the folder they are seen in (its sub-folders too): their copies there move. */
+export interface PhotoMoveAsk {
+  photoIds: number[];
+  fromVolumeId: number | null;
+  fromRel: string | null;
+  toVolumeId: number;
+  toRel: string;
+  /** A name taken in the folder: keep both, the one coming in numbered ("IMG_0001 (2).CR3"). */
+  numberClashes: boolean;
+}
+
+/** Why a photo stays where it is. */
+export type LeftWhy = "here" | "unplugged" | "notFound" | "missing" | "taken" | "copyThere";
+
+/** What moving photos into a folder would do. */
+export interface PhotoMovePlan {
+  /** The folder, as the system writes it. */
+  to: string;
+  photos: number;
+  files: {
+    photoId: number | null;
+    from: string;
+    /** Its name in the folder (numbered when keeping both). */
+    name: string;
+    size: number;
+    role: "photo" | "twin" | "edits";
+    /** To another disk: copied, checked, then the original removed. */
+    copied: boolean;
+  }[];
+  bytes: number;
+  copyBytes: number;
+  numbered: number;
+  /** Photos moving that keep another copy elsewhere. */
+  copiesStay: number;
+  left: { photoId: number; name: string; why: LeftWhy }[];
+  token: string;
+}
+
+export interface PhotoMoveResult {
+  photos: number;
+  files: number;
+  bytes: number;
+  copied: number;
+  numbered: number;
+  left: PhotoMovePlan["left"];
+  /** Files that couldn't be moved, with why: they are where they were. */
+  failed: string[];
+  /** Originals still on the old disk after a checked copy. */
+  leftBehind: string[];
+  stopped: boolean;
+  /** Each file moved, for Undo. */
+  moved: { now: FilePlace; was: FilePlace }[];
+}
+
+/** Progress, then the end, of photos going to another disk. */
+export interface PhotoMoveEvent {
+  progress: MovePhase | null;
+  result: PhotoMoveResult | null;
   error: string | null;
   finished: boolean;
 }
@@ -461,13 +537,20 @@ export const api = {
   /** Renames a folder on its disk and in the catalog; returns its new path on the disk. */
   renameFolder: (volumeId: number, relPath: string, name: string) =>
     invoke<string>("rename_folder", { volumeId, relPath, name }),
-  /** Makes "New folder" inside a folder; returns its path on the disk. */
-  newFolder: (volumeId: number, parentRel: string) => invoke<string>("new_folder", { volumeId, parentRel }),
+  /** Makes "New folder" (or `name`) inside a folder; returns its path on the disk. */
+  newFolder: (volumeId: number, parentRel: string, name?: string) =>
+    invoke<string>("new_folder", { volumeId, parentRel, name: name ?? null }),
   showFolder: (volumeId: number, relPath: string) => invoke<void>("show_folder", { volumeId, relPath }),
   /** Moves a folder into another one. Same disk: done, result back. Other disk: null, `folder-move` events follow. */
   moveFolder: (volumeId: number, relPath: string, toVolumeId: number, toParentRel: string) =>
     invoke<MoveResult | null>("move_folder", { volumeId, relPath, toVolumeId, toParentRel }),
   cancelFolderMove: () => invoke<void>("cancel_folder_move"),
+  /** What moving these photos into a folder would do. Reads only. */
+  planPhotoMove: (ask: PhotoMoveAsk) => invoke<PhotoMovePlan>("plan_photo_move", { ask }),
+  /** Moves photos as the plan quoted said. All on one disk: done, result back. Else null, `photo-move` events follow. */
+  movePhotos: (ask: PhotoMoveAsk, token: string) => invoke<PhotoMoveResult | null>("move_photos", { ask, token }),
+  /** Undo of a move on one disk: the files back where they were. */
+  movePhotosBack: (moved: PhotoMoveResult["moved"]) => invoke<PhotoMoveResult>("move_photos_back", { moved }),
   checkCatalogFolder: (path: string) => invoke<FolderCheck>("check_catalog_folder", { path }),
   /** Consistent copies of the databases in backup\ inside the catalog folder (for Kopia). */
   backup: () => invoke<{ folder: string; files: string[]; bytes: number; at: number; ms: number }>("backup_catalog"),

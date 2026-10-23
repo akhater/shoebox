@@ -81,6 +81,33 @@ export async function doubleClick(el: Element) {
   });
 }
 
+/** Drags `from` and drops it on `to`, as the browser does (jsdom has no DataTransfer: a plain one stands in). */
+export async function dragAndDrop(from: Element, to: Element) {
+  const data = new Map<string, string>();
+  const dataTransfer = {
+    get types() {
+      return [...data.keys()];
+    },
+    setData: (k: string, v: string) => data.set(k, v),
+    getData: (k: string) => data.get(k) ?? "",
+    setDragImage: () => {},
+    effectAllowed: "all",
+    dropEffect: "none",
+  };
+  const fire = (el: Element, type: string) => {
+    const e = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(e, "dataTransfer", { value: dataTransfer });
+    el.dispatchEvent(e);
+  };
+  await act(async () => {
+    fire(from, "dragstart");
+    fire(to, "dragenter");
+    fire(to, "dragover");
+    fire(to, "drop");
+    fire(from, "dragend");
+  });
+}
+
 export async function key(el: Element, k: string, init: KeyboardEventInit = {}) {
   await act(async () => {
     el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...init }));

@@ -1,6 +1,17 @@
 import { Focus, ImageOff, Layers, LockKeyhole, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { BIN, cull, fmtDeleted, fmtNum, problemsOf, thumbUrl, withFrames, type MissingPhoto, type PhotoList } from "../api";
+import {
+  BIN,
+  cull,
+  fmtDeleted,
+  fmtNum,
+  PHOTOS_DRAG,
+  problemsOf,
+  thumbUrl,
+  withFrames,
+  type MissingPhoto,
+  type PhotoList,
+} from "../api";
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
 import { TimelineRail } from "./TimelineRail";
 import { turnedStyle } from "./TurnControl";
@@ -34,6 +45,8 @@ interface Props {
   onMark: (ids: number[], marked: boolean) => void;
   /** T: tag these photos. */
   onTag: (ids: number[]) => void;
+  /** M: move these photos to another folder. Set where photos can move: they can also be dragged onto a folder. */
+  onMove?: (ids: number[]) => void;
   /** R / Shift+R: turn these photos a quarter turn clockwise (1) or counter-clockwise (-1). */
   onTurn?: (ids: number[], by: number) => void;
   /** Drawn turned by this many quarter turns clockwise (the turns suggested, to look them over);
@@ -59,6 +72,25 @@ interface Props {
 
 type PhotosRow = Extract<Row, { kind: "photos" }>;
 const centre = (t: Tile) => t.left + t.width / 2;
+
+/** What follows the pointer while photos are dragged: up to three of them fanned out, and how many. */
+function dragPicture(list: PhotoList, ids: number[], count: number) {
+  const ghost = document.createElement("div");
+  ghost.className = "drag-ghost";
+  const pos = new Map(list.ids.map((id, i) => [id, i]));
+  for (const id of ids.slice(0, 3)) {
+    const i = pos.get(id);
+    if (i == null || list.preview[i] !== 1) continue;
+    const img = document.createElement("img");
+    img.src = thumbUrl(id, list.rev[i]);
+    ghost.append(img);
+  }
+  const label = document.createElement("span");
+  label.textContent = count === 1 ? "1 photo" : `${fmtNum(count)} photos`;
+  ghost.append(label);
+  document.body.append(ghost);
+  return ghost;
+}
 
 
 /** Drawn again only when what it shows changes (not for every update of the window). */
@@ -248,6 +280,15 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
         p.onTag(withFrames(list, ids));
         break;
       }
+      case "m":
+      case "M": {
+        if (ctrl || e.altKey || !p.onMove) return;
+        const ids = list.ids.filter((id) => selected.has(id));
+        if (!ids.length && cur >= 0) ids.push(list.ids[cur]);
+        if (!ids.length) return;
+        p.onMove(withFrames(list, ids));
+        break;
+      }
       case "r":
       case "R": {
         if (ctrl || e.altKey || !p.onTurn) return;
@@ -348,8 +389,23 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                     style={{ top: row.top, left: PAD + t.left, width: t.width, height: row.height }}
                     // Tiles come and go as the grid scrolls, so the grid keeps the keyboard.
                     onMouseDown={(e) => {
-                      e.preventDefault();
+                      // A plain press may start a drag; Shift/Ctrl+click only picks.
+                      if (!p.onMove || e.shiftKey || e.ctrlKey || e.metaKey) e.preventDefault();
                       scroller.current?.focus({ preventScroll: true });
+                    }}
+                    onFocus={() => scroller.current?.focus({ preventScroll: true })}
+                    // Dragged onto a folder in the sidebar: the selection when the photo is in it, else
+                    // the photo alone (selected first, as a file manager does).
+                    draggable={!!p.onMove && state !== 0}
+                    onDragStart={(e) => {
+                      const tiles = selected.has(id) ? list.ids.filter((x) => selected.has(x)) : [id];
+                      if (!selected.has(id)) moveTo(t.index);
+                      const ids = withFrames(list, tiles);
+                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.setData(PHOTOS_DRAG, JSON.stringify(ids));
+                      const ghost = dragPicture(list, tiles, ids.length);
+                      e.dataTransfer.setDragImage(ghost, 24, 24);
+                      window.setTimeout(() => ghost.remove());
                     }}
                     onClick={(e) => moveTo(t.index, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey })}
                     onDoubleClick={() => p.onOpen(t.index)}

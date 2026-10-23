@@ -12,6 +12,7 @@ import {
   FileType,
   Focus,
   Pencil,
+  FolderInput,
   FolderPlus,
   FolderSync,
   FolderX,
@@ -61,6 +62,10 @@ import {
   type Moved,
   type Person,
   type PhotoList,
+  type PhotoMoveAsk,
+  type PhotoMoveEvent,
+  type PhotoMovePlan,
+  type PhotoMoveResult,
   PRIVATE_SHORTCUT,
   privateApi,
   privateTitle,
@@ -88,6 +93,7 @@ import { DatesCheckDialog, movedText } from "./components/DatesCheckDialog";
 import { FixDatesDialog } from "./components/FixDatesDialog";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
+import { MoveDialog, movesAtOnce, rememberMoveTarget, type MoveTarget } from "./components/MoveDialog";
 import { RepointDialog } from "./components/RepointDialog";
 import { StraysDialog } from "./components/StraysDialog";
 import { FindMoreDialog } from "./components/FindMoreDialog";
@@ -334,6 +340,12 @@ export default function App() {
   // A folder on its way to another disk, and where it came from.
   const [folderMove, setFolderMove] = useState<FolderMoveEvent | null>(null);
   const movingFrom = useRef<FolderTarget | null>(null);
+  // Photos being moved: picking where to ("Move to…", M) or confirming a drop. Then, while they go
+  // to another disk, where to and how many.
+  const [movingPhotos, setMovingPhotos] = useState<{ ids: number[]; start: { to: MoveTarget; plan: PhotoMovePlan } | null } | null>(
+    null,
+  );
+  const photosGoing = useRef<{ to: MoveTarget; photos: number } | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   const settingsOpen = settingsTab !== null;
   // Private photos: locked at every start, and while locked nothing shows they exist.
@@ -635,6 +647,18 @@ export default function App() {
             warn: left > 0,
           });
         }
+      }),
+      listen<PhotoMoveEvent>("photo-move", (e) => {
+        const ev = e.payload;
+        const going = photosGoing.current;
+        if (!ev.finished) {
+          if (going) setFolderMove({ name: going.to.name, photos: going.photos, progress: ev.progress, result: null, error: null, finished: false });
+          return;
+        }
+        setFolderMove(null);
+        photosGoing.current = null;
+        if (ev.error) setMessage({ text: `Moving photos: ${ev.error}`, warn: true });
+        else if (ev.result && going) photosMoved(ev.result, going.to, going.photos);
       }),
       listen<Report>("scan-done", (e) => {
         setProgress(null);
@@ -1039,7 +1063,8 @@ export default function App() {
 
   // Escape closes the calendar first.
   useEffect(() => {
-    if (!calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning || datesOpen) return;
+    if (!calendar || viewerId != null || deleteOpen || settingsOpen || straysFor || tagging || reassigning || datesOpen || movingPhotos)
+      return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (e.key !== "Escape" || (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"))) return;
@@ -1048,7 +1073,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning, datesOpen]);
+  }, [calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning, datesOpen, movingPhotos]);
 
   // (Cull has its own Escape: Done.)
   useEffect(() => {
@@ -1062,7 +1087,8 @@ export default function App() {
       straysFor ||
       tagging ||
       reassigning ||
-      datesOpen
+      datesOpen ||
+      movingPhotos
     )
       return;
     const onKey = (e: KeyboardEvent) => {
@@ -1073,7 +1099,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [trail, view, calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning, goBack]);
+  }, [trail, view, calendar, viewerId, deleteOpen, settingsOpen, straysFor, tagging, reassigning, movingPhotos, goBack]);
 
   // Drag and drop of a folder. Same disk: done at once, with Undo. Another
   // disk: asked first, then copied, checked and the original removed in the
@@ -1118,6 +1144,92 @@ export default function App() {
       setMessage({ text: String(e), warn: true });
     }
   };
+
+  // The folder shown, when it is one: the photos' copies there are the ones that move.
+  const folderShown = useMemo(() => {
+    if (scope.kind === "folder") return { volumeId: scope.volumeId, relPath: scope.relPath };
+    if (scope.kind !== "root") return null;
+    const v = overview?.volumes.find((x) => x.roots.some((r) => r.id === scope.id));
+    const r = v?.roots.find((x) => x.id === scope.id);
+    return v && r ? { volumeId: v.id, relPath: r.relPath } : null;
+  }, [scope, overview]);
+  const askMove = (ids: number[], to: MoveTarget, numberClashes: boolean): PhotoMoveAsk => ({
+    photoIds: ids,
+    fromVolumeId: folderShown?.volumeId ?? null,
+    fromRel: folderShown?.relPath ?? null,
+    toVolumeId: to.volumeId,
+    toRel: to.relPath,
+    numberClashes,
+  });
+
+  // Photos dropped on a folder in the sidebar. A plain move is done at once, with Undo; one that
+  // copies to another disk, leaves photos where they are or meets a name taken is shown first.
+  const dropPhotos = async (ids: number[], t: FolderTarget) => {
+    const to: MoveTarget = { volumeId: t.v.id, relPath: t.relPath, name: t.relPath ? t.name : t.v.label, path: t.path, disk: t.v.label };
+    try {
+      const plan = await api.planPhotoMove(askMove(ids, to, false));
+      if (movesAtOnce(plan, folderShown != null)) return movePhotos(ids, to, plan, false);
+      setMovingPhotos({ ids, start: { to, plan } });
+    } catch (e) {
+      setMessage({ text: String(e), warn: true });
+    }
+  };
+
+  const movePhotos = async (ids: number[], to: MoveTarget, plan: PhotoMovePlan, numberClashes: boolean) => {
+    setMovingPhotos(null);
+    setGridFocus((n) => n + 1);
+    rememberMoveTarget(to);
+    try {
+      const r = await api.movePhotos(askMove(ids, to, numberClashes), plan.token);
+      if (r) return photosMoved(r, to, plan.photos);
+      photosGoing.current = { to, photos: plan.photos }; // another disk: progress follows
+    } catch (e) {
+      setMessage({ text: String(e), warn: true });
+    }
+  };
+
+  /** What a move did, with Undo when it stayed on its disk. */
+  const photosMoved = useLatest((r: PhotoMoveResult, to: MoveTarget, asked: number) => {
+    setSelected(new Set());
+    refresh();
+    const n = (k: number, one: string, many: string) => (k === 1 ? `1 ${one}` : `${fmtNum(k)} ${many}`);
+    const photos = n(r.photos, "photo", "photos");
+    const said = [
+      r.stopped
+        ? `Stopped: ${photos} of ${fmtNum(asked)} moved to “${to.name}”, the others stayed where they were.`
+        : r.copied
+          ? `Moved ${photos} to “${to.name}” on ${to.disk}: ${n(r.files, "file", "files")} (${fmtBytes(r.bytes)}) copied, checked byte for byte, originals removed.`
+          : r.files
+            ? `Moved ${photos} to “${to.name}”.`
+            : `Nothing was moved to “${to.name}”.`,
+    ];
+    if (r.numbered) said.push(`${n(r.numbered, "file was", "files were")} numbered to keep both.`);
+    if (r.left.length) said.push(`${n(r.left.length, "photo", "photos")} stayed where ${r.left.length === 1 ? "it was" : "they were"}.`);
+    if (r.failed.length) said.push(`${n(r.failed.length, "file", "files")} couldn't be moved: ${r.failed[0]}${r.failed.length > 1 ? " …" : ""}`);
+    if (r.leftBehind.length)
+      said.push(
+        `${n(r.leftBehind.length, "original", "originals")} couldn't be removed (locked or read-only) and ${r.leftBehind.length === 1 ? "is" : "are"} still on the old disk.`,
+      );
+    const undo = async () => {
+      try {
+        const back = await api.movePhotosBack(r.moved);
+        setMessage(
+          back.failed.length
+            ? { text: `Not all came back: ${back.failed[0]}`, warn: true }
+            : { text: `${r.photos === 1 ? "The photo is" : `The ${fmtNum(r.photos)} photos are`} back where ${r.photos === 1 ? "it was" : "they were"}.` },
+        );
+        refresh();
+      } catch (e) {
+        setMessage({ text: String(e), warn: true });
+      }
+    };
+    setMessage({
+      text: said.join(" "),
+      warn: r.failed.length > 0 || r.leftBehind.length > 0,
+      action: r.files > 0 && r.copied === 0 ? { label: "Undo", run: undo } : undefined,
+    });
+  });
+  const startMove = useLatest((ids: number[]) => setMovingPhotos({ ids, start: null }));
 
   // Gear: one name per camera or lens. A view or filter on the old name follows it.
   const followGear = (kind: GearKind, from: string, to: string[]) => {
@@ -1619,6 +1731,7 @@ export default function App() {
         }}
         onShowFolder={(vid, rel) => run(api.showFolder(vid, rel))}
         onMoveFolder={moveFolder}
+        onDropPhotos={dropPhotos}
         onSettings={() => setSettingsTab("general")}
         onGearRename={renameGear}
         onGearSplit={splitGear}
@@ -2053,6 +2166,7 @@ export default function App() {
               onSelect={selectPhotos}
               onMark={setMarked}
               onTag={setTagging}
+              onMove={startMove}
               onTurn={sidewaysView ? undefined : turnPhotos}
               turned={turnedShown}
               previewTurn={turnPreview}
@@ -2069,7 +2183,8 @@ export default function App() {
                 !straysFor &&
                 !tagging &&
                 !reassigning &&
-                !datesOpen
+                !datesOpen &&
+                !movingPhotos
               }
               focusRequest={gridFocus}
               focusIndex={focusIndex}
@@ -2101,6 +2216,13 @@ export default function App() {
                   title="Tag the selected photos (T)"
                 >
                   <TagIcon size={15} /> Tag…
+                </button>
+                <button
+                  className="btn ghost"
+                  onClick={() => startMove(withFrames(shown, shown.ids.filter((id) => selected.has(id))))}
+                  title="Move the selected photos to another folder (M) - or drag them onto a folder in the sidebar"
+                >
+                  <FolderInput size={15} /> Move to…
                 </button>
                 <button
                   className="btn ghost"
@@ -2338,6 +2460,31 @@ export default function App() {
           onShow={showDates}
           onClose={() => {
             setDatesCheck(null);
+            setGridFocus((n) => n + 1);
+          }}
+        />
+      )}
+      {movingPhotos && (
+        <MoveDialog
+          count={movingPhotos.ids.length}
+          overview={overview}
+          browse={sidebarBrowse}
+          here={folderShown}
+          start={movingPhotos.start}
+          plan={(to, number) => api.planPhotoMove(askMove(movingPhotos.ids, to, number))}
+          onMove={(to, plan, number) => movePhotos(movingPhotos.ids, to, plan, number)}
+          onNewFolder={async (vid, parentRel, name) => {
+            try {
+              const rel = await api.newFolder(vid, parentRel, name);
+              refresh();
+              return rel;
+            } catch (e) {
+              setMessage({ text: String(e), warn: true });
+              return null;
+            }
+          }}
+          onClose={() => {
+            setMovingPhotos(null);
             setGridFocus((n) => n + 1);
           }}
         />
