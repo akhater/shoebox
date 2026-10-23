@@ -821,9 +821,139 @@ pub async fn move_folder(
     Ok(None)
 }
 
+/// Stops the folder or photos going to another disk.
 #[tauri::command]
 pub fn cancel_folder_move(state: State<'_, AppState>) {
     state.move_cancel.store(true, Ordering::Relaxed);
+}
+
+/// Photos going into a folder; `from`: the folder they are seen in.
+#[derive(serde::Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoMoveAsk {
+    photo_ids: Vec<i64>,
+    from_volume_id: Option<i64>,
+    from_rel: Option<String>,
+    to_volume_id: i64,
+    to_rel: String,
+    #[serde(default)]
+    number_clashes: bool,
+}
+
+impl PhotoMoveAsk {
+    fn photo_move(&self) -> organize::PhotoMove {
+        organize::PhotoMove {
+            photo_ids: self.photo_ids.clone(),
+            from: self.from_volume_id.zip(self.from_rel.clone()),
+            to: self.to_volume_id,
+            to_rel: self.to_rel.clone(),
+            number_clashes: self.number_clashes,
+        }
+    }
+}
+
+/// What moving these photos into a folder would do, right now. Reads only.
+#[tauri::command]
+pub async fn plan_photo_move(state: State<'_, AppState>, ask: PhotoMoveAsk) -> Res<organize::PhotoMovePlan> {
+    let cat = state.cat.clone();
+    blocking(move || organize::plan_photo_move(&cat, &ask.photo_move())).await
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhotoMoveEvent {
+    progress: Option<organize::MoveProgress>,
+    result: Option<organize::PhotoMoveResult>,
+    error: Option<String>,
+    finished: bool,
+}
+
+/// Drag and drop (or Move to…): moves photos into a folder as the plan the
+/// user was shown (`token`) says. All on their own disk: done at once and the
+/// result comes back. With files going to another disk it runs in the
+/// background (copy, check every byte, then remove the original) with
+/// `photo-move` events, and this returns None.
+#[tauri::command]
+pub async fn move_photos(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ask: PhotoMoveAsk,
+    token: String,
+) -> Res<Option<organize::PhotoMoveResult>> {
+    if state.scans.current.lock().unwrap().is_some() {
+        return Err("A scan is running. Let it finish (or stop it), then move.".into());
+    }
+    let busy = || "Something is being moved to another disk. Wait for it to finish.".to_string();
+    if state.moving.load(Ordering::Relaxed) {
+        return Err(busy());
+    }
+    let cat = state.cat.clone();
+    let plan = {
+        let (cat, m) = (cat.clone(), ask.photo_move());
+        blocking(move || organize::plan_photo_move(&cat, &m)).await?
+    };
+    if plan.token != token {
+        return Err("The photos or the folder changed since you looked. Nothing was moved - please look again.".into());
+    }
+    if !plan.files.iter().any(|f| f.copied) {
+        let r = in_order(move || {
+            organize::move_photos(&cat, &ask.photo_move(), Some(&token), &AtomicBool::new(false), &|_| {})
+        })
+        .await?;
+        let _ = app.emit("catalog-changed", ());
+        return Ok(Some(r));
+    }
+    let (scans, moving, cancel) = (state.scans.clone(), state.moving.clone(), state.move_cancel.clone());
+    // Taken now: two moves asked at once don't both start.
+    if moving.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        return Err(busy());
+    }
+    cancel.store(false, Ordering::Relaxed);
+    scans.paused.store(true, Ordering::Relaxed); // nothing scans while files move
+    std::thread::spawn(move || {
+        let emit = |e: PhotoMoveEvent| {
+            let _ = app.emit("photo-move", e);
+        };
+        let last = std::sync::Mutex::new(std::time::Instant::now() - Duration::from_secs(1));
+        let result = organize::move_photos(&cat, &ask.photo_move(), Some(&token), &cancel, &|p| {
+            let mut l = last.lock().unwrap();
+            if l.elapsed() > Duration::from_millis(150) || p.files == p.total_files {
+                *l = std::time::Instant::now();
+                emit(PhotoMoveEvent { progress: Some(p.clone()), result: None, error: None, finished: false });
+            }
+        });
+        scans.paused.store(false, Ordering::Relaxed);
+        moving.store(false, Ordering::Relaxed);
+        let (result, error) = match result {
+            Ok(r) => (Some(r), None),
+            Err(e) => {
+                log::warn!("moving photos: {e:#}");
+                (None, Some(format!("{e:#}")))
+            }
+        };
+        emit(PhotoMoveEvent { progress: None, result, error, finished: true });
+        let _ = app.emit("catalog-changed", ());
+    });
+    Ok(None)
+}
+
+/// Undo of a photo move on one disk: the files back where they were.
+#[tauri::command]
+pub async fn move_photos_back(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    moved: Vec<organize::Moved>,
+) -> Res<organize::PhotoMoveResult> {
+    if state.scans.current.lock().unwrap().is_some() {
+        return Err("A scan is running. Let it finish (or stop it), then undo.".into());
+    }
+    if moved.iter().any(|m| m.now.volume_id != m.was.volume_id) {
+        return Err("Photos copied to another disk can't be undone here: move them back.".into());
+    }
+    let cat = state.cat.clone();
+    let r = in_order(move || organize::move_back(&cat, &moved, &AtomicBool::new(false), &|_| {})).await?;
+    let _ = app.emit("catalog-changed", ());
+    Ok(r)
 }
 
 /// Makes a new folder inside a catalog folder. Returns its path.

@@ -603,11 +603,12 @@ pub struct MoveResult {
 
 /// Whether the folder `rel` on disk `volume_id` is in one of the catalog's sources.
 fn in_a_source(cat: &Catalog, volume_id: i64, rel: &str) -> Result<bool> {
-    Ok(cat
-        .root_ids()?
-        .into_iter()
-        .filter_map(|id| cat.root(id).ok())
-        .any(|r| r.volume_id == volume_id && db::is_under(rel, &r.rel_path)))
+    let roots: Vec<String> = cat
+        .read()?
+        .prepare("SELECT rel_path FROM roots WHERE volume_id = ?1")?
+        .query_map([volume_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(roots.iter().any(|root| db::is_under(rel, root)))
 }
 
 /// Everything that must hold before a folder moves. Returns (from, to, new path on its disk).
@@ -969,7 +970,7 @@ pub struct Moved {
     pub was: Place,
 }
 
-#[derive(Serialize, Default, Debug)]
+#[derive(Serialize, Default, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PhotoMoveResult {
     pub photos: usize,
