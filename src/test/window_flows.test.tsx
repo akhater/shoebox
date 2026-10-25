@@ -175,17 +175,17 @@ describe("turning photos", () => {
     const answer = (text: string) => byText(host, ".turn-decision button", text);
     const film = () => [...host.querySelectorAll<HTMLImageElement>(".filmstrip .film img")].map((i) => i.style.transform);
     const photo = () => host.querySelector<HTMLElement>(".viewer-turn")!.style.transform;
-    expect(shownAs()).toBe("As Shoebox would turn it");
+    expect(shownAs()).toBe("Turned");
     expect(film()).toEqual(["translate(-50%, -50%) rotate(90deg)", "translate(-50%, -50%) rotate(270deg)"]);
     // V: as they are, then back; the grid follows.
     await key(document.body, "v");
     await wait(20);
-    expect(shownAs()).toBe("As it is");
+    expect(shownAs()).toBe("Unturned");
     expect(film()).toEqual(["", ""]);
     expect(photo()).toBe("");
     await key(document.body, "v");
     await wait(20);
-    expect(shownAs()).toBe("As Shoebox would turn it");
+    expect(shownAs()).toBe("Turned");
     await click(answer("Turn it right"));
     await wait(100);
     expect(turnsAsked(be, "sideways_accept")).toEqual([{ ids: [102] }]);
@@ -1198,6 +1198,27 @@ describe("missing photos", () => {
     await wait(100);
     expect(be.calls.filter((c) => c.cmd === "forget_missing").map((c) => c.args.ids)).toEqual([[102]]);
     expect(gridIds(host)).not.toContain(102);
+  });
+
+  test("a photo deleted outside Shoebox since the last scan: the viewer says so and can remove it", async () => {
+    const be = fakeBackend();
+    be.goneNow.add(102);
+    const host = await renderApp();
+    // Still listed as on its disk: nothing in the grid tells.
+    expect(tile(host, 102).querySelector(".badge.missing")).toBeNull();
+    await doubleClick(tile(host, 102));
+    await wait(100);
+    const note = () => host.querySelector(".gone-note");
+    expect(note()?.textContent).toMatch(/Not found where it was/);
+    expect(host.querySelector(".locations .pill")?.textContent).toBe("Missing");
+    await click(byText(note()!, "button", /Remove from catalog/));
+    await wait(100);
+    expect(be.calls.filter((c) => c.cmd === "forget_missing").map((c) => c.args.ids)).toEqual([[102]]);
+    expect(gridIds(host)).not.toContain(102);
+    // A photo still on its disk offers nothing of the sort.
+    await doubleClick(tile(host, 101));
+    await wait(100);
+    expect(note()).toBeNull();
   });
 });
 

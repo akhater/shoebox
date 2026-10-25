@@ -1972,16 +1972,18 @@ export default function App() {
             <span>
               These photos look sideways or upside down. Only Shoebox's copies turn, never your files.
             </span>
+            {/* Only how the grid draws them: worded unlike "Leave them as they are", the decision. */}
             <div className="view-switch in-banner" role="group" aria-label="Show">
+              <span className="view-switch-label">Show</span>
               <button className={asTurned ? "" : "on"} onClick={() => setAsTurned(false)} title="Show them as they are now (V)">
-                As they are
+                Unturned
               </button>
               <button
                 className={asTurned ? "on" : ""}
                 onClick={() => setAsTurned(true)}
                 title="Show them as Shoebox would turn them; nothing is turned until you say so (V)"
               >
-                As Shoebox would turn them
+                Turned
               </button>
             </div>
             <span className="grow" />

@@ -245,6 +245,14 @@ pub fn file_path(mount: &str, rel: &str, name: &str) -> String {
     if cfg!(windows) { file_path_windows(mount, rel, name) } else { file_path_unix(mount, rel, name) }
 }
 
+/// Whether the file `name`, listed in the catalog folder `rel` on the volume mounted at `mount`, is gone from it:
+/// the folder can be read and holds nothing of that name. Deleted or moved outside Shoebox since the last scan. A
+/// folder that can't be read proves nothing.
+pub fn gone_from(mount: &str, rel: &str, name: &str) -> bool {
+    std::fs::read_dir(join(mount, rel)).is_ok()
+        && matches!(std::fs::symlink_metadata(file_path(mount, rel, name)), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// The catalog form of the native path `p` under `mount`: [`SEP`]-separated, no leading or trailing separator,
 /// empty for the mount point itself.
 pub fn rel_of(mount: &str, p: &Path) -> String {
