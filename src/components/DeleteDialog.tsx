@@ -144,8 +144,8 @@ export function DeleteDialog({ onDone, onClose }: Props) {
 
         {plan && gone > 0 && (
           <p className="note">
-            {fmtNum(gone)} marked {gone === 1 ? "photo is" : "photos are"} already gone from {gone === 1 ? "its disk" : "their disks"}{" "}
-            (missing): {gone === 1 ? "it leaves" : "they leave"} the catalog, no file to delete.
+            {fmtNum(gone)} marked {gone === 1 ? "photo is" : "photos are"} already gone from {gone === 1 ? "its disk" : "their disks"}:{" "}
+            {gone === 1 ? "it leaves" : "they leave"} the catalog, no file to delete.
           </p>
         )}
 

@@ -4,6 +4,20 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.43.4 - unreleased
 
+### Fixed
+
+- **A photo deleted outside Shoebox since the last scan can be removed.**
+  Its file was still listed as on its disk, so "Delete marked files" said it
+  waited for an unplugged disk and nothing offered "Remove from catalog".
+  A listed file now counts as gone when its disk is plugged in, its folder
+  can be read and the file isn't in it: "Delete marked files" takes such a
+  photo out of the catalog, and the viewer marks it missing with "Remove
+  from catalog". A folder that can't be read still proves nothing.
+  Headless: `shoebox-cli marked`, `missing` and `forget-missing` do the same.
+- **Sideways: the display switch no longer reads like a decision.** It says
+  "Show: Unturned | Turned" (it was "As they are", the words of "Leave them
+  as they are"), in the banner and in the viewer.
+
 ## 26.43.3 - 2026-10-22
 
 ### Added

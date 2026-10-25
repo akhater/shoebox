@@ -64,6 +64,8 @@ export function fakeBackend() {
   const marked = new Set<number>();
   /** Photos missing everywhere (a test sets them), and those of them in the bin. */
   const missing = new Set<number>();
+  // Listed as on a disk, but gone from its folder (deleted outside Shoebox since the last scan).
+  const goneNow = new Set<number>();
   const inBin = new Set<number>();
   /** Photos the upright model would turn (a test sets them): quarter turns clockwise. */
   const sideways = new Map<number, number>();
@@ -470,11 +472,11 @@ export function fakeBackend() {
           bin: "Trash",
           binRead: true,
           photos: (a.ids as number[])
-            .filter((id) => missing.has(id) && photos.some((p) => p.id === id))
+            .filter((id) => (missing.has(id) || goneNow.has(id)) && photos.some((p) => p.id === id))
             .map((id) => ({ id, paths: [`D:\Gone\IMG_${id}.jpg`], inBin: inBin.has(id), deletedAt: 0 })),
         };
       case "forget_missing": {
-        const gone = (a.ids as number[]).filter((id) => missing.has(id) && photos.some((p) => p.id === id));
+        const gone = (a.ids as number[]).filter((id) => (missing.has(id) || goneNow.has(id)) && photos.some((p) => p.id === id));
         for (const id of gone) photos.splice(photos.findIndex((p) => p.id === id), 1);
         return { photos: gone.length, files: gone.length };
       }
@@ -676,6 +678,7 @@ export function fakeBackend() {
     delay: (cmd: string, ms: number) => cmdDelays.set(cmd, ms),
     marked,
     missing,
+    goneNow,
     elsewhere,
     inBin,
     sideways,

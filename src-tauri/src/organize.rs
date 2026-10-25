@@ -93,8 +93,9 @@ pub struct DeletePlan {
     pub photos: usize,
     /// Marked photos on unplugged disks (or folders not found): they wait.
     pub waiting: usize,
-    /// Marked photos already gone: missing, no copy left on any disk. The
-    /// delete only takes them out of the catalog.
+    /// Marked photos already gone: missing, or deleted outside Shoebox since
+    /// the last scan; no copy left on any disk. The delete only takes them out
+    /// of the catalog.
     pub gone: Vec<i64>,
     pub disks: Vec<PlanDisk>,
     pub files: Vec<PlanFile>,
@@ -139,15 +140,22 @@ pub fn plan(cat: &Catalog) -> Result<DeletePlan> {
     let mut plan = DeletePlan { marked, ..Default::default() };
     let mut seen = BTreeSet::new();
     let mut here = BTreeSet::new();
+    // Files still listed that are gone from their folder (deleted outside
+    // Shoebox since the last scan), and those that can't be checked now.
+    let (mut absent, mut unsure) = (BTreeSet::new(), BTreeSet::new());
     let mut on_disk = BTreeSet::new();
     let mut disks: BTreeMap<i64, PlanDisk> = BTreeMap::new();
     // Each folder is listed once, however many marked photos it holds.
     let mut listings: HashMap<PathBuf, Vec<(String, u64)>> = HashMap::new();
     for (pid, kind, vid, rel, name, size) in rows {
-        let Some(mount) = cat.mount_of(vid) else { continue };
+        let Some(mount) = cat.mount_of(vid) else {
+            unsure.insert(pid);
+            continue;
+        };
         let folder = PathBuf::from(volumes::join(&mount, &rel));
         let path = folder.join(&name);
         if !path.is_file() {
+            (if volumes::gone_from(&mount, &rel, &name) { &mut absent } else { &mut unsure }).insert(pid);
             continue;
         }
         here.insert(pid);
@@ -177,6 +185,10 @@ pub fn plan(cat: &Catalog) -> Result<DeletePlan> {
         }
     }
     plan.files.sort_by(|a, b| (a.volume_id, &a.path).cmp(&(b.volume_id, &b.path)));
+    // Every file it still lists gone from its folder: already gone too.
+    let mut gone = gone;
+    gone.extend(absent.into_iter().filter(|p| !here.contains(p) && !unsure.contains(p)));
+    gone.sort_unstable();
     plan.photos = here.len();
     plan.waiting = marked.saturating_sub(here.len() + gone.len());
     plan.disks = disks.into_values().collect();

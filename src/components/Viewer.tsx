@@ -134,11 +134,14 @@ export function Viewer({
   const rev = list.rev[index];
   const marked = list.marked[index] === 1;
   const isPrivate = list.private?.[index] === 1;
-  const missing = list.state[index] === 0;
-  // A missing photo: is its file in the system's bin (deleted, not moved)?
+  const listedMissing = list.state[index] === 0;
+  const online = list.state[index] === 2;
+  // A missing photo: is its file in the system's bin (deleted, not moved)? One
+  // listed on a plugged-in disk is asked about too: its file may have been
+  // deleted outside Shoebox since the last scan.
   const [gone, setGone] = useState<{ id: number; photo: MissingPhoto | null } | null>(null);
   useEffect(() => {
-    if (!missing) return;
+    if (!listedMissing && !online) return;
     let left = false;
     api
       .missingPhotos([id])
@@ -147,7 +150,8 @@ export function Viewer({
     return () => {
       left = true;
     };
-  }, [id, missing]);
+  }, [id, listedMissing, online]);
+  const missing = listedMissing || (gone?.id === id && gone.photo != null);
   const binned = gone?.id === id && gone.photo?.inBin ? gone.photo : null;
   const [detail, setDetail] = useState<PhotoDetail | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -557,15 +561,16 @@ export function Viewer({
         )}
         {proposal !== 0 && onShowTurned && !zoom && (
           <div className="view-switch" role="group" aria-label="Show" onClick={(e) => e.stopPropagation()}>
+            <span className="view-switch-label">Show</span>
             <button className={showTurned ? "" : "on"} onClick={() => onShowTurned(false)} title="Show it as it is now (V)">
-              As it is
+              Unturned
             </button>
             <button
               className={showTurned ? "on" : ""}
               onClick={() => onShowTurned(true)}
               title="Show it as Shoebox would turn it; nothing is turned until you say so (V)"
             >
-              As Shoebox would turn it
+              Turned
             </button>
           </div>
         )}
@@ -787,7 +792,10 @@ export function Viewer({
 
             <h3>{d.files.length > 1 ? `${d.files.length} copies` : "Location"}</h3>
             <ul className="locations">
-              {d.files.map((f) => (
+              {d.files.map((listed) => {
+                // Gone from every disk: a copy still listed as plugged in is gone from its folder.
+                const f = missing && listed.state === "online" ? { ...listed, state: "missing" as const } : listed;
+                return (
                 <li key={f.id}>
                   <div className="loc-head">
                     <span className={`pill ${f.state}`}>{STATE_LABEL[f.state]}</span>
@@ -825,7 +833,8 @@ export function Viewer({
                     )}
                   </div>
                 </li>
-              ))}
+                );
+              })}
             </ul>
             {missing && (
               <div className="gone-note">
