@@ -365,7 +365,9 @@ impl Catalog {
 
     /// Which of `photo_ids` are missing - no copy left on any disk, plugged in
     /// or not - where their files were, and which of them sit in the system's
-    /// bin (deleted, not moved). Looked up photo by photo: costs what it asks.
+    /// bin (deleted, not moved). A file still listed is missing once its
+    /// plugged-in disk's folder no longer holds it (deleted outside Shoebox
+    /// since the last scan). Looked up photo by photo: costs what it asks.
     pub fn missing(&self, photo_ids: &[i64]) -> Result<MissingReport> {
         let photo_ids = &self.shown_ids(photo_ids)?[..];
         let started = std::time::Instant::now();
@@ -382,7 +384,10 @@ impl Catalog {
                 let files: Vec<(i64, String, i64, String, i64, Option<String>)> = stmt
                     .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
                     .collect::<rusqlite::Result<_>>()?;
-                if files.is_empty() || files.iter().any(|f| f.0 == FILE_PRESENT) {
+                let here = |(state, name, _, rel, vid, _): &(i64, String, i64, String, i64, Option<String>)| {
+                    *state == FILE_PRESENT && !online.get(vid).is_some_and(|m| volumes::gone_from(m, rel, name))
+                };
+                if files.is_empty() || files.iter().any(here) {
                     continue;
                 }
                 let files = files
@@ -413,7 +418,9 @@ impl Catalog {
         mounts.dedup();
         let looked = started.elapsed();
         let bin = if mounts.is_empty() { None } else { crate::trash_bin::read(&mounts) };
-        log::info!(
+        // The viewer asks for every photo it shows: only a find is worth a line.
+        log::log!(
+            if photos.is_empty() { log::Level::Debug } else { log::Level::Info },
             "missing: {} of {} photos looked up in {} ms, {} read in {} ms",
             photos.len(),
             photo_ids.len(),
@@ -443,36 +450,68 @@ impl Catalog {
 
     /// Takes the missing photos among `photo_ids` out of the catalog: those
     /// with no copy left on any disk, plugged in or not. **No file is
-    /// touched**, and a photo with a copy anywhere stays. They leave with their
+    /// touched**, and a photo with a copy anywhere stays. A file still listed
+    /// counts as gone only once its plugged-in disk's folder no longer holds it
+    /// (deleted outside Shoebox since the last scan). They leave with their
     /// previews, faces and tags; people left without a face go too.
     pub fn forget_missing(&self, photo_ids: &[i64]) -> Result<ForgetReport> {
         let photo_ids = &self.shown_ids(photo_ids)?[..];
+        let listed_but_gone = self.listed_but_gone(photo_ids)?;
         let mut report = ForgetReport::default();
         let mut gone = Vec::new();
         {
             let mut db = self.db();
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let mut present =
+                tx.prepare(&format!("SELECT id FROM files WHERE photo_id = ?1 AND state = {FILE_PRESENT}"))?;
             for &id in photo_ids {
-                let (exists, here): (bool, bool) = tx.query_row(
-                    &format!(
-                        "SELECT EXISTS (SELECT 1 FROM photos WHERE id = ?1),
-                                EXISTS (SELECT 1 FROM files WHERE photo_id = ?1 AND state = {FILE_PRESENT})"
-                    ),
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
+                let exists: bool =
+                    tx.query_row("SELECT EXISTS (SELECT 1 FROM photos WHERE id = ?1)", [id], |r| r.get(0))?;
+                let here = present
+                    .query_map([id], |r| r.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .iter()
+                    .any(|f| !listed_but_gone.contains(f));
                 if !exists || here || gone.contains(&id) {
                     continue;
                 }
                 report.files += tx.execute("DELETE FROM files WHERE photo_id = ?1", [id])?;
                 gone.push(id);
             }
+            drop(present);
             forget_photos(&tx, &gone)?;
             tx.commit()?;
         }
         self.drop_previews(&gone)?;
         report.photos = gone.len();
         Ok(report)
+    }
+
+    /// The files of `photo_ids` listed as present that are gone from their
+    /// folder on a plugged-in disk ([`volumes::gone_from`]). Looked up on disk
+    /// file by file, while nothing holds the catalog.
+    fn listed_but_gone(&self, photo_ids: &[i64]) -> Result<HashSet<i64>> {
+        let online = self.online.read().unwrap().clone();
+        let listed: Vec<(i64, String, String, i64)> = {
+            let db = self.read()?;
+            let mut stmt = db.prepare(&format!(
+                "SELECT f.id, f.name, fo.rel_path, fo.volume_id FROM files f JOIN folders fo ON fo.id = f.folder_id
+                  WHERE f.photo_id = ?1 AND f.state = {FILE_PRESENT}"
+            ))?;
+            let mut all = Vec::new();
+            for &id in photo_ids {
+                all.extend(
+                    stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?,
+                );
+            }
+            all
+        };
+        Ok(listed
+            .into_iter()
+            .filter(|(_, name, rel, vid)| online.get(vid).is_some_and(|m| volumes::gone_from(m, rel, name)))
+            .map(|(fid, ..)| fid)
+            .collect())
     }
 
     /// Previews and thumbnails of photos that left the catalog. A photo id taken

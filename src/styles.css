@@ -1510,6 +1510,16 @@ button {
 .view-switch button:hover {
   color: var(--text);
 }
+/* "Show": the switch only changes how they are drawn. */
+.view-switch-label {
+  align-self: center;
+  padding: 0 6px 0 7px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.8;
+}
 .view-switch button.on {
   background: var(--accent-soft);
   color: var(--accent);
