@@ -20,8 +20,10 @@ fn questions_are_answered_while_the_catalog_is_written() {
     data.ensure().unwrap();
     let cat = Catalog::open(data).unwrap();
     let disk = cat.plug_in_test_disk("Disk", &base).unwrap();
+    std::fs::create_dir_all(base.join("Pictures").join("Picked")).unwrap();
     let (photo, file, person, face) = {
         let db = cat.db();
+        db.execute("INSERT INTO roots (volume_id, rel_path, added_at) VALUES (?1, 'Pictures', 0)", [disk]).unwrap();
         db.execute("INSERT INTO folders (volume_id, rel_path) VALUES (?1, 'Pictures')", [disk]).unwrap();
         let folder = db.last_insert_rowid();
         db.execute(
@@ -93,6 +95,15 @@ fn questions_are_answered_while_the_catalog_is_written() {
         f.more_of(&c, person).unwrap();
         shoebox_lib::tags::all(&c).unwrap();
         shoebox_lib::tags::on(&c, &[photo]).unwrap();
+        // What a drop on a folder would do, before the window asks to do it.
+        let to = shoebox_lib::organize::PhotoMove {
+            photo_ids: vec![photo],
+            from: None,
+            to: disk,
+            to_rel: r"Pictures\Picked".into(),
+            number_clashes: false,
+        };
+        shoebox_lib::organize::plan_photo_move(&c, &to).unwrap();
         let _ = done.send(());
     });
     let in_time = answered.recv_timeout(Duration::from_secs(20)).is_ok();

@@ -3808,3 +3808,190 @@ button.link:hover {
   background: var(--accent);
   color: #fff;
 }
+
+/* Moving photos: what follows the pointer, and "Move to…" */
+.drag-ghost {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  display: flex;
+  align-items: flex-end;
+  padding: 6px 10px 6px 6px;
+  border-radius: 10px;
+  background: rgba(20, 21, 24, 0.92);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font: 600 12px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  pointer-events: none;
+}
+.drag-ghost img {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 5px;
+  border: 2px solid var(--panel);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+.drag-ghost img + img {
+  margin-left: -26px;
+}
+.drag-ghost span {
+  margin-left: 8px;
+  padding-bottom: 2px;
+  white-space: nowrap;
+}
+.move-modal {
+  width: 560px;
+  display: flex;
+  flex-direction: column;
+}
+.move-modal .modal-head h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.move-modal .modal-foot {
+  margin-top: 16px;
+  align-items: center;
+}
+.move-to-path {
+  margin: 4px 0 0;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+.move-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 0 10px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+}
+.move-search:focus-within {
+  border-color: var(--accent);
+}
+.move-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+.move-list {
+  margin-top: 10px;
+  max-height: min(46vh, 380px);
+  min-height: 120px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 4px;
+  outline: 0;
+}
+.move-heading {
+  padding: 8px 8px 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.move-disk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.move-disk.off {
+  opacity: 0.6;
+}
+.move-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.move-row:hover {
+  background: var(--hover);
+}
+.move-row.picked {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.move-row.off {
+  opacity: 0.5;
+  cursor: default;
+}
+.move-row.off:hover {
+  background: transparent;
+}
+.move-row > svg {
+  flex: none;
+  color: var(--muted);
+}
+.move-row.picked > svg {
+  color: var(--accent);
+}
+.move-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.move-row .count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.move-row.naming input {
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  outline: 0;
+}
+.move-summary {
+  display: flex;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+.move-summary > svg {
+  flex: none;
+  color: var(--accent);
+  margin-top: 1px;
+}
+.move-summary .grow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  line-height: 1.45;
+}
+.move-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  cursor: pointer;
+  color: var(--text);
+}
+.move-check input {
+  accent-color: var(--accent);
+}

@@ -187,6 +187,15 @@
 //!   shoebox-cli new-folder <volume-id> <parent folder> [name]
 //!   shoebox-cli move-folder <volume-id> <folder> <to-volume-id> <into folder>
 //!       same disk: moved at once; another disk: copied, checked byte for byte, original removed
+//!   shoebox-cli move-photos <to-volume-id> <into folder> <photo-id>... [--from <volume-id> <folder>]
+//!                           [--number] [--plan]
+//!       photos into a folder, the same way, each with its RAW's JPEG twin and its edits
+//!       (Argentum's, .xmp, .pp3, .dop). --from: their copies in that folder (and below) move;
+//!       else each photo's copy on the folder's disk, or its first one. A name already in the
+//!       folder is never replaced: the photo stays ("left", with why), or --number keeps both
+//!       ("IMG_0001 (2).CR3"). --plan: only what it would do. "moved" says where each file went
+//!   shoebox-cli move-back '<what move-photos printed, or its "moved">' | -
+//!       those files back where they were (Undo); - reads it from stdin: move-photos ... | move-back -
 //!   A move, rename or delete cut short (a kill, a crash) is finished or undone by the next
 //!   start of shoebox-cli or the window, as far as the disks plugged in allow (told on stderr).
 //!
@@ -978,6 +987,57 @@ fn main() -> anyhow::Result<()> {
             let parent = stored_rel(args.get(2).ok_or_else(usage)?);
             let name = args.get(3).map(String::as_str).unwrap_or("New folder");
             println!("{}", serde_json::json!({ "created": organize::create_folder(&cat, vid, &parent, name)? }));
+        }
+        Some("move-photos") => {
+            let usage = || {
+                anyhow::anyhow!(
+                    "move-photos <to-volume-id> <into folder> <photo-id>... [--from <volume-id> <folder>] [--number] [--plan]"
+                )
+            };
+            let to: i64 = args.get(1).ok_or_else(usage)?.parse()?;
+            let to_rel = stored_rel(args.get(2).ok_or_else(usage)?);
+            let (mut photo_ids, mut from, mut number, mut only_plan) = (Vec::new(), None, false, false);
+            let mut rest = args.iter().skip(3);
+            while let Some(a) = rest.next() {
+                match a.as_str() {
+                    "--from" => {
+                        let vid: i64 = rest.next().ok_or_else(usage)?.parse()?;
+                        from = Some((vid, stored_rel(rest.next().ok_or_else(usage)?)));
+                    }
+                    "--number" => number = true,
+                    "--plan" => only_plan = true,
+                    id => photo_ids.push(id.parse::<i64>().map_err(|_| usage())?),
+                }
+            }
+            if photo_ids.is_empty() {
+                return Err(usage());
+            }
+            let m = organize::PhotoMove { photo_ids, from, to, to_rel, number_clashes: number };
+            if only_plan {
+                println!("{}", serde_json::to_string_pretty(&organize::plan_photo_move(&cat, &m)?)?);
+            } else {
+                let r = organize::move_photos(&cat, &m, None, &cancel, &|p| {
+                    eprint!("\r  {} {}/{} files, {} MB   ", p.phase, p.files, p.total_files, p.bytes >> 20)
+                })?;
+                eprintln!();
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            }
+        }
+        Some("move-back") => {
+            let usage = || anyhow::anyhow!("move-back '<what move-photos printed, or its \"moved\">' | -");
+            let text = match args.get(1).map(String::as_str).ok_or_else(usage)? {
+                "-" => std::io::read_to_string(std::io::stdin())?,
+                json => json.to_string(),
+            };
+            // Windows PowerShell's pipe starts with a byte order mark.
+            let mut given: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))?;
+            let moved: Vec<organize::Moved> =
+                serde_json::from_value(given.get_mut("moved").map(|m| m.take()).unwrap_or(given))?;
+            let r = organize::move_back(&cat, &moved, &cancel, &|p| {
+                eprint!("\r  {} {}/{} files, {} MB   ", p.phase, p.files, p.total_files, p.bytes >> 20)
+            })?;
+            eprintln!();
+            println!("{}", serde_json::to_string_pretty(&r)?);
         }
         Some("marked") => println!("{}", serde_json::to_string_pretty(&organize::plan(&cat)?)?),
         Some("quality") => {

@@ -32,6 +32,7 @@ import {
 import {
   fmtAgo,
   fmtNum,
+  PHOTOS_DRAG,
   PRIVATE_NAME_CHARS,
   PRIVATE_SHORTCUT,
   privateTitle,
@@ -95,6 +96,8 @@ interface Props {
   onShowFolder: (volumeId: number, relPath: string) => void;
   /** Drag and drop: `folder` goes inside `into`. */
   onMoveFolder: (folder: FolderTarget, into: FolderTarget) => void;
+  /** Photos dragged from the grid, dropped on a folder. */
+  onDropPhotos: (photoIds: number[], into: FolderTarget) => void;
   onSettings: () => void;
   /** Folded to a rail of icons (Ctrl+B). */
   folded: boolean;
@@ -157,6 +160,9 @@ function canDrop(folder: FolderTarget, into: FolderTarget) {
   const inside = into.relPath === folder.relPath || into.relPath.startsWith(folder.relPath + "\\");
   return !inside && parentOf(folder.relPath) !== into.relPath;
 }
+
+/** Can photos be dropped into `into`? Any folder that is there now. */
+const takesPhotos = (into: FolderTarget) => into.v.online && (!into.root || into.root.found);
 
 /** Opens the folder menu from the keyboard (Menu key, Shift+F10) or starts a rename (F2). */
 function folderKeys(e: ReactKeyboardEvent<HTMLElement>, t: FolderTarget, f: FolderUi) {
@@ -286,7 +292,9 @@ export function Sidebar(p: Props) {
     },
     onDragOver: (e) => {
       const src = dragged.current;
-      if (!src || !canDrop(src, t)) return; // not a place it can go: no drop
+      // A folder from the sidebar, or photos from the grid. Not a place it can go: no drop.
+      const fits = src ? canDrop(src, t) : e.dataTransfer.types.includes(PHOTOS_DRAG) && takesPhotos(t);
+      if (!fits) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
       setDropOn(folderId(t.v.id, t.relPath));
@@ -306,7 +314,12 @@ export function Sidebar(p: Props) {
       dragged.current = null;
       setDropOn(null);
       stopOpening();
-      if (src && canDrop(src, t)) p.onMoveFolder(src, t);
+      if (src) {
+        if (canDrop(src, t)) p.onMoveFolder(src, t);
+        return;
+      }
+      const photos = e.dataTransfer.getData(PHOTOS_DRAG);
+      if (photos && takesPhotos(t)) p.onDropPhotos(JSON.parse(photos) as number[], t);
     },
   });
 

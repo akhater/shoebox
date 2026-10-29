@@ -55,8 +55,11 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   photos an AI model finds sideways or upside down (an old camera without an
   orientation sensor, a camera pointed up or down), shown turned the way it
   suggests: turn them all, or leave the ones it got wrong.
-- **Organize folders.** Rename, create and move folders by drag and drop. The
-  catalog updates in the same step, with no rescan.
+- **Organize folders and photos.** Rename, create and move folders by drag and
+  drop. Move photos, one or many, by dragging them onto a folder or with
+  "Move to..." (M); a RAW takes its JPEG and its edit files along, and a file
+  already in the folder is never replaced. The catalog updates in the same
+  step, with no rescan.
 - **Full-screen viewer**, sharp from the original when its drive is connected,
   with 100% zoom and a filmstrip.
 - **Focus points.** Press F in the viewer to see where the camera focused, as
@@ -77,8 +80,8 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
 ## Your photos are safe
 
 - **Shoebox never writes to a photo file.** Photos are opened read-only. The
-  only file operations are the ones you ask for (moving a folder, deleting
-  photos you marked), and they go through a dedicated module with its own
+  only file operations are the ones you ask for (moving a folder or photos,
+  deleting photos you marked), and they go through a dedicated module with its own
   checks: a move to another drive is copied, verified byte for byte, and only
   then is the original removed.
 - **Nothing is left half-done.** A move, rename or delete interrupted by a

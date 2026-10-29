@@ -1020,8 +1020,8 @@ mod tests {
 
     /// "Shoebox never writes to a photo file" (README), enforced: file-writing
     /// code may only appear in this file, and photo-file changes only in
-    /// `organize.rs` (deleting what the user marked and confirmed; moves later),
-    /// which has its own rules. Looking into the system's bin (`trash_bin.rs`)
+    /// `organize.rs` (deleting what the user marked and confirmed, moving
+    /// folders and photos), which has its own rules. Looking into the system's bin (`trash_bin.rs`)
     /// is reading; sending to it, emptying it or restoring from it is not.
     #[test]
     fn no_other_file_writes_anywhere() {
@@ -1030,6 +1030,9 @@ mod tests {
             "File::create",
             "OpenOptions",
             "fs::rename",
+            "MoveFileEx",
+            "renameat2",
+            "renamex_np",
             "fs::copy",
             "remove_file",
             "remove_dir",

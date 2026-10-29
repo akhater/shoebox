@@ -19,6 +19,8 @@ interface Props {
 }
 
 const MOVE_PHASE = { copying: "copying", checking: "checking every byte", removing: "removing the original" } as const;
+/** Photos are copied and checked one by one, then their originals removed. */
+const PHOTOS_PHASE = { copying: "copying and checking", checking: "checking every byte", removing: "removing the originals" } as const;
 
 export function StatusBar({ photo, selected, overview, progress, aiProgress, queued, message, onCancel, move, onStopMove }: Props) {
   if (move?.progress) {
@@ -28,7 +30,14 @@ export function StatusBar({ photo, selected, overview, progress, aiProgress, que
       <footer className="statusbar busy">
         <LoaderCircle size={14} className="spinning" />
         <span>
-          <b>Moving “{move.name}”</b> · {MOVE_PHASE[m.phase]} · {fmtNum(m.files)} of {fmtNum(m.totalFiles)} files
+          {move.photos ? (
+            <b>
+              Moving {move.photos === 1 ? "1 photo" : `${fmtNum(move.photos)} photos`} to “{move.name}”
+            </b>
+          ) : (
+            <b>Moving “{move.name}”</b>
+          )}{" "}
+          · {(move.photos ? PHOTOS_PHASE : MOVE_PHASE)[m.phase]} · {fmtNum(m.files)} of {fmtNum(m.totalFiles)} files
           {m.phase !== "removing" && <span className="muted"> · {fmtBytes(m.bytes)} of {fmtBytes(m.totalBytes)}</span>}
         </span>
         <span className="grow" />
@@ -36,7 +45,15 @@ export function StatusBar({ photo, selected, overview, progress, aiProgress, que
           <span style={{ width: `${pct}%` }} />
         </span>
         {m.phase !== "removing" && (
-          <button className="btn small ghost" onClick={onStopMove} title="Stop: the copy is removed, the original stays">
+          <button
+            className="btn small ghost"
+            onClick={onStopMove}
+            title={
+              move.photos
+                ? "Stop after this file: the photos moved so far stay moved, the others stay where they are"
+                : "Stop: the copy is removed, the original stays"
+            }
+          >
             <X size={14} /> Stop
           </button>
         )}

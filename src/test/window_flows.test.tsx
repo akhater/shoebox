@@ -11,6 +11,7 @@ import {
   choose,
   click,
   doubleClick,
+  dragAndDrop,
   gridIds,
   gridStack,
   key,
@@ -307,12 +308,94 @@ describe("selection bar", () => {
     const bar = host.querySelector(".selection-bar")!;
     expect(bar.querySelector(".selection-count")!.textContent).toBe("2 selected");
     const names = [...bar.querySelectorAll("button")].map((b) => b.getAttribute("aria-label") ?? b.textContent?.trim());
-    expect(names).toEqual(["Clear selection", "Tag…", "Fix dates…", "Turn left", "Turn right", "Not Ana…"]);
+    expect(names).toEqual(["Clear selection", "Tag…", "Move to…", "Fix dates…", "Turn left", "Turn right", "Not Ana…"]);
 
     await click(bar.querySelector('[aria-label="Clear selection"]')!);
     expect(host.querySelector(".selection-bar")).toBeNull();
     expect(tile(host, 101).classList).not.toContain("is-selected");
     expect(above()).toBe(before);
+  });
+});
+
+describe("moving photos", () => {
+  const asked = (be: FakeBackend, cmd: string) => be.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
+  const status = (host: HTMLElement) => host.querySelector(".statusbar .status-left")?.textContent;
+  const source = (host: HTMLElement, name: string) => byText(host, ".sidebar-scroll [data-nav]", new RegExp(`^${name}`));
+
+  test("Move to… picks a folder and moves the selected photos at once; Undo puts them back", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(sidebarItem(host, "Slow"));
+    await wait(100);
+    await click(tile(host, 101));
+    await click(tile(host, 102), { ctrlKey: true });
+    await click(byText(host, ".selection-bar button", "Move to…"));
+    const dialog = host.querySelector<HTMLElement>(".move-modal")!;
+    expect(dialog.querySelector("h2")!.textContent).toBe("Move 2 photos");
+    // The folder they are shown from is there, but they can't go to it.
+    expect(byText(dialog, ".move-row", /^Slow/).classList).toContain("off");
+
+    await click(byText(dialog, ".move-row", /^Fast/));
+    await click(byText(dialog, ".modal-foot button", "Move here"));
+    await wait(100);
+    expect(host.querySelector(".move-modal")).toBeNull();
+    const ask = { photoIds: [101, 102], fromVolumeId: 1, fromRel: "Slow", toVolumeId: 1, toRel: "Fast", numberClashes: false };
+    expect(asked(be, "plan_photo_move")).toEqual([{ ask }]);
+    expect(asked(be, "move_photos")).toEqual([{ ask, token: JSON.stringify(ask) }]);
+    expect(gridIds(host)).toEqual([103, 104]);
+    expect(status(host)).toBe("Moved 2 photos to “Fast”.");
+
+    await click(byText(host, ".statusbar button", "Undo"));
+    await wait(100);
+    expect(asked(be, "move_photos_back")).toHaveLength(1);
+    expect([be.rootOf(101), be.rootOf(102)]).toEqual([10, 10]);
+    expect(gridIds(host)).toEqual(photosOf(10));
+    expect(status(host)).toBe("The 2 photos are back where they were.");
+
+    // M does the same for the photo under the cursor; the folder chosen last comes first.
+    await click(tile(host, 103));
+    await key(scroller(host), "m");
+    const again = host.querySelector<HTMLElement>(".move-modal")!;
+    expect(again.querySelector("h2")!.textContent).toBe("Move 1 photo");
+    expect(again.querySelector(".move-heading")!.textContent).toBe("Recent");
+    expect(again.querySelector(".move-row")!.textContent).toMatch(/^Fast/);
+  });
+
+  test("photos dropped on a folder move at once; a name taken there is asked about first, and nothing is replaced", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(sidebarItem(host, "Slow"));
+    await wait(100);
+    await dragAndDrop(tile(host, 104), source(host, "Trip"));
+    await wait(100);
+    expect(host.querySelector(".move-modal")).toBeNull();
+    expect(asked(be, "move_photos").map((a) => (a.ask as { photoIds: number[] }).photoIds)).toEqual([[104]]);
+    expect(be.rootOf(104)).toBe(30);
+    expect(gridIds(host)).toEqual([101, 102, 103]);
+
+    // The selection goes along when one of it is dragged; IMG_102 meets a file of its name in Fast.
+    be.nameTakenIn.set("Fast", new Set([102]));
+    await click(tile(host, 101));
+    await click(tile(host, 102), { ctrlKey: true });
+    await dragAndDrop(tile(host, 102), source(host, "Fast"));
+    await wait(100);
+    const dialog = host.querySelector<HTMLElement>(".move-modal")!;
+    expect(dialog.querySelector("h2")!.textContent).toBe("Move 2 photos to “Fast”");
+    expect(dialog.querySelector(".move-summary b")!.textContent).toBe("1 photo · 1 file · 1.9 MB");
+    expect(dialog.textContent).toMatch(/IMG_102\.JPG stays where it is: “Fast” already has a file of that name\. Nothing is ever replaced\./);
+    expect(asked(be, "move_photos")).toHaveLength(1); // nothing moved yet
+
+    await click(dialog.querySelector<HTMLInputElement>(".move-check input")!);
+    await wait(100);
+    expect(asked(be, "plan_photo_move").at(-1)).toMatchObject({ ask: { photoIds: [101, 102], numberClashes: true } });
+    expect(dialog.textContent).toMatch(/1 file gets a number to keep both: IMG_102 \(2\)\.JPG/);
+    expect(dialog.querySelector<HTMLInputElement>(".move-check input")!.checked).toBe(true); // and can be unticked
+    await click(byText(dialog, ".modal-foot button", "Move 2 photos"));
+    await wait(100);
+    expect(host.querySelector(".move-modal")).toBeNull();
+    expect(asked(be, "move_photos").at(-1)).toMatchObject({ ask: { photoIds: [101, 102], toRel: "Fast", numberClashes: true } });
+    expect(status(host)).toBe("Moved 2 photos to “Fast”. 1 file was numbered to keep both.");
+    expect(gridIds(host)).toEqual([103]);
   });
 });
 

@@ -1,6 +1,6 @@
 //! The only code in Shoebox allowed to change photo files on disk: deleting what
-//! the user marked and then confirmed, renaming and creating folders (and, next,
-//! drag-and-drop moves). File contents are never touched. Everything
+//! the user marked and then confirmed, renaming, creating and moving folders,
+//! and moving photos into another folder. File contents are never touched. Everything
 //! else in Shoebox only ever reads photos; a test enforces that this file and
 //! `paths.rs` are the only ones with file-changing code.
 //!
@@ -18,6 +18,9 @@
 //!   Argentum's edits (`<file>.agdata`, `<file>.<id>.agdata`) with it.
 //! - Files on unplugged disks stay marked until their disk is plugged in.
 //! - The catalog forgets a file only once it is really gone from its folder.
+//! - A photo moved takes the same files along, plus other editors' sidecars
+//!   (`.xmp`, `.pp3`, `.dop`), and never lands on a file already there: it is
+//!   left where it is, or numbered ("IMG_0001 (2).CR3") when the user asks.
 //!
 //! Shoebox can be stopped at any moment (killed, crashed). Every
 //! rename, move and delete is written down first (the `ops` table) and its
@@ -35,7 +38,7 @@ use crate::volumes;
 use anyhow::{Result, anyhow, bail};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -610,6 +613,16 @@ pub struct MoveResult {
     pub left_behind: Vec<String>,
 }
 
+/// Whether the folder `rel` on disk `volume_id` is in one of the catalog's sources.
+fn in_a_source(cat: &Catalog, volume_id: i64, rel: &str) -> Result<bool> {
+    let roots: Vec<String> = cat
+        .read()?
+        .prepare("SELECT rel_path FROM roots WHERE volume_id = ?1")?
+        .query_map([volume_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(roots.iter().any(|root| db::is_under(rel, root)))
+}
+
 /// Everything that must hold before a folder moves. Returns (from, to, new path on its disk).
 pub fn check_move(cat: &Catalog, m: &FolderMove) -> Result<(PathBuf, PathBuf, String)> {
     if m.rel.is_empty() {
@@ -626,12 +639,7 @@ pub fn check_move(cat: &Catalog, m: &FolderMove) -> Result<(PathBuf, PathBuf, St
     }
     let from = PathBuf::from(cat.folder_path(m.from, &m.rel)?);
     let to_parent = PathBuf::from(cat.folder_path(m.to, &m.to_parent)?);
-    let in_source = cat
-        .root_ids()?
-        .into_iter()
-        .filter_map(|id| cat.root(id).ok())
-        .any(|r| r.volume_id == m.to && db::is_under(&m.to_parent, &r.rel_path));
-    if !in_source {
+    if !in_a_source(cat, m.to, &m.to_parent)? {
         bail!("{} isn't in one of Shoebox's sources.", to_parent.display());
     }
     let to = to_parent.join(name);
@@ -891,11 +899,700 @@ pub fn create_folder(cat: &Catalog, volume_id: i64, parent_rel: &str, name: &str
     Ok(rel)
 }
 
+/// A file's place: its disk, its folder on that disk (as the catalog keeps
+/// it), its name.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Place {
+    pub volume_id: i64,
+    pub rel: String,
+    pub name: String,
+}
+
+/// Photos, one or many, going into the folder `to_rel` on disk `to`.
+pub struct PhotoMove {
+    pub photo_ids: Vec<i64>,
+    /// The folder they are seen in (disk, folder), its sub-folders included:
+    /// their copies there move. None: each photo's copy on the destination's
+    /// disk if it has one, else its first copy.
+    pub from: Option<(i64, String)>,
+    pub to: i64,
+    pub to_rel: String,
+    /// A name already taken in the folder: keep both, the photo coming in
+    /// numbered ("IMG_0001 (2).CR3", and its twin and edits alike), or leave it
+    /// where it is (false).
+    pub number_clashes: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedFile {
+    /// The photo it is a file of, when the catalog knows it (a sidecar isn't).
+    pub photo_id: Option<i64>,
+    /// Where it is now.
+    pub from: String,
+    /// Its name in the folder it goes to.
+    pub name: String,
+    pub size: u64,
+    /// "photo", "twin" (the RAW's camera JPEG) or "edits" (a sidecar).
+    pub role: String,
+    /// Copied to another disk (checked, then the original removed), else
+    /// moved on its own disk.
+    pub copied: bool,
+}
+
+/// A photo that stays where it is, and why.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LeftPhoto {
+    pub photo_id: i64,
+    pub name: String,
+    /// "here" (already in that folder), "unplugged" (its disk), "notFound"
+    /// (not where the catalog says), "missing" (from every disk), "taken" (a
+    /// file of that name is in the folder) or "copyThere" (a copy of it is,
+    /// under the same name).
+    pub why: String,
+}
+
+#[derive(Serialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoMovePlan {
+    /// The folder they go to, as the system writes it.
+    pub to: String,
+    /// Photos that move (a RAW's JPEG twin counts as one).
+    pub photos: usize,
+    pub files: Vec<PlannedFile>,
+    pub bytes: u64,
+    /// The part of `bytes` copied to another disk.
+    pub copy_bytes: u64,
+    /// Files numbered to keep both.
+    pub numbered: usize,
+    /// Photos that move with another copy elsewhere, which stays.
+    pub copies_stay: usize,
+    pub left: Vec<LeftPhoto>,
+    /// Identifies this exact plan; a move from the window must quote it.
+    pub token: String,
+}
+
+/// A file moved: where it is now, where it was.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Moved {
+    pub now: Place,
+    pub was: Place,
+}
+
+#[derive(Serialize, Default, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoMoveResult {
+    pub photos: usize,
+    pub files: usize,
+    pub bytes: u64,
+    /// Of the files, those copied to another disk (checked, original removed).
+    pub copied: usize,
+    /// Of the files, those numbered to keep both.
+    pub numbered: usize,
+    /// Photos left where they are, as the plan said.
+    pub left: Vec<LeftPhoto>,
+    /// Files that couldn't be moved (in use by another app, no permission...),
+    /// with why. They are where they were.
+    pub failed: Vec<String>,
+    /// Originals still on the old disk after a checked copy (locked or
+    /// read-only). Nothing is lost; they're reported.
+    pub left_behind: Vec<String>,
+    /// Stopped before the end: the files moved stay moved, the rest where they were.
+    pub stopped: bool,
+    /// Each file moved, for [`move_back`].
+    pub moved: Vec<Moved>,
+}
+
+/// What moving these photos would do, right now. Reads only.
+pub fn plan_photo_move(cat: &Catalog, m: &PhotoMove) -> Result<PhotoMovePlan> {
+    Ok(plan_photos(cat, m)?.0)
+}
+
+type FileRow = (i64, String, String, u64, i64);
+
+/// The plan, and each file's move.
+fn plan_photos(cat: &Catalog, m: &PhotoMove) -> Result<(PhotoMovePlan, Vec<FileGo>)> {
+    let to_path = PathBuf::from(cat.folder_path(m.to, &m.to_rel)?);
+    if !in_a_source(cat, m.to, &m.to_rel)? {
+        bail!("{} isn't in one of Shoebox's sources.", to_path.display());
+    }
+    // Private photos hidden right now are left out, as from every view.
+    let ids: BTreeSet<i64> = cat.shown_ids(&m.photo_ids)?.into_iter().collect();
+    let (photos, here) = {
+        let db = cat.read()?;
+        let mut photos: BTreeMap<i64, (String, Vec<FileRow>)> = BTreeMap::new();
+        let mut stmt = db.prepare(
+            "SELECT p.id, p.kind, fo.volume_id, fo.rel_path, f.name, f.size, f.state FROM photos p
+               JOIN files f ON f.photo_id = p.id JOIN folders fo ON fo.id = f.folder_id
+              WHERE p.id IN (SELECT value FROM json_each(?1))
+              ORDER BY p.id, fo.volume_id, fo.rel_path, f.name",
+        )?;
+        let mut rows = stmt.query([serde_json::to_string(&ids)?])?;
+        while let Some(r) = rows.next()? {
+            let entry = photos.entry(r.get(0)?).or_insert_with(|| (String::new(), Vec::new()));
+            entry.0 = r.get(1)?;
+            entry.1.push((r.get(2)?, r.get(3)?, r.get(4)?, r.get::<_, i64>(5)? as u64, r.get(6)?));
+        }
+        // The catalog's files in the folder already: name (lower case) -> photo.
+        let here: HashMap<String, Option<i64>> = db
+            .prepare(
+                "SELECT f.name, f.photo_id FROM files f JOIN folders fo ON fo.id = f.folder_id
+                  WHERE fo.volume_id = ?1 AND fo.rel_path = ?2",
+            )?
+            .query_map(params![m.to, m.to_rel], |r| Ok((r.get::<_, String>(0)?.to_lowercase(), r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        (photos, here)
+    };
+
+    let mut plan = PhotoMovePlan { to: to_path.to_string_lossy().into_owned(), ..Default::default() };
+    let mut gos = Vec::new();
+    // Names in the folder (lower case: one name on Windows and macOS), on its disk or in the catalog.
+    let mut taken: HashSet<String> = here.keys().cloned().collect();
+    taken.extend(std::fs::read_dir(&to_path)?.flatten().map(|e| e.file_name().to_string_lossy().to_lowercase()));
+    let mut going = HashSet::new(); // place keys of the files planned
+    let mut listings: HashMap<PathBuf, Vec<(String, u64)>> = HashMap::new();
+    let mut cataloged: HashMap<(i64, String), HashMap<String, i64>> = HashMap::new();
+    for (pid, (kind, files)) in photos {
+        let present: Vec<&FileRow> = files.iter().filter(|f| f.4 == FILE_PRESENT).collect();
+        let shown_name = present.first().or(files.first().as_ref()).map(|f| f.2.clone()).unwrap_or_default();
+        let left = |why: &str| LeftPhoto { photo_id: pid, name: shown_name.clone(), why: why.into() };
+        if present.is_empty() {
+            plan.left.push(left("missing"));
+            continue;
+        }
+        let candidates: Vec<&FileRow> = present
+            .iter()
+            .copied()
+            .filter(|f| m.from.as_ref().is_none_or(|(v, rel)| f.0 == *v && db::is_under(&f.1, rel)))
+            .collect();
+        if candidates.iter().any(|f| f.0 == m.to && f.1 == m.to_rel) {
+            plan.left.push(left("here"));
+            continue;
+        }
+        let reachable: Vec<(&FileRow, PathBuf)> = candidates
+            .iter()
+            .filter_map(|f| Some((*f, PathBuf::from(volumes::join(&cat.mount_of(f.0)?, &f.1)))))
+            .filter(|(f, folder)| folder.join(&f.2).is_file())
+            .collect();
+        let Some((f, folder)) = reachable.iter().find(|(f, _)| f.0 == m.to).or(reachable.first()) else {
+            let unplugged = !candidates.is_empty() && candidates.iter().all(|f| cat.mount_of(f.0).is_none());
+            plan.left.push(left(if unplugged { "unplugged" } else { "notFound" }));
+            continue;
+        };
+        if going.contains(&db::place_key(&folder.join(&f.2))) {
+            continue; // already going, with the RAW it is the JPEG twin of
+        }
+        if here.get(&f.2.to_lowercase()) == Some(&Some(pid)) {
+            plan.left.push(left("copyThere"));
+            continue;
+        }
+        let entries = listings.entry(folder.clone()).or_insert_with(|| list_folder(folder));
+        let mut group = vec![(f.2.clone(), f.3, "photo")];
+        group.extend(
+            moving_with(&f.2, &kind, entries)
+                .into_iter()
+                .filter(|(n, ..)| !going.contains(&db::place_key(&folder.join(n)))),
+        );
+        let Some(names) = free_names(&group, &taken, m.number_clashes) else {
+            plan.left.push(LeftPhoto { photo_id: pid, name: f.2.clone(), why: "taken".into() });
+            continue;
+        };
+        let photo_of = cataloged.entry((f.0, f.1.clone())).or_insert_with(|| cataloged_in(cat, f.0, &f.1));
+        let copied = f.0 != m.to;
+        for ((name, size, role), new_name) in group.into_iter().zip(names) {
+            going.insert(db::place_key(&folder.join(&name)));
+            taken.insert(new_name.to_lowercase());
+            plan.bytes += size;
+            if copied {
+                plan.copy_bytes += size;
+            }
+            if new_name != name {
+                plan.numbered += 1;
+            }
+            let photo = if role == "photo" { Some(pid) } else { photo_of.get(&name).copied() };
+            plan.files.push(PlannedFile {
+                photo_id: photo,
+                from: folder.join(&name).to_string_lossy().into_owned(),
+                name: new_name.clone(),
+                size,
+                role: role.into(),
+                copied,
+            });
+            gos.push(FileGo {
+                from: Place { volume_id: f.0, rel: f.1.clone(), name },
+                to: Place { volume_id: m.to, rel: m.to_rel.clone(), name: new_name },
+                size,
+                photo,
+            });
+        }
+        if present.len() > 1 {
+            plan.copies_stay += 1;
+        }
+    }
+    plan.photos = plan.files.iter().filter_map(|f| f.photo_id).collect::<BTreeSet<_>>().len();
+    if plan.copy_bytes > 0
+        && let Some(free) = volumes::free_bytes(&to_path)
+        && free < plan.copy_bytes + (256 << 20)
+    {
+        bail!(
+            "There isn't enough room on the disk of {} for these photos ({} MB). Nothing was moved.",
+            to_path.display(),
+            plan.copy_bytes >> 20
+        );
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(plan.to.as_bytes());
+    for g in &gos {
+        h.update(serde_json::to_string(g)?.as_bytes());
+    }
+    for l in &plan.left {
+        h.update(&l.photo_id.to_le_bytes());
+        h.update(l.why.as_bytes());
+    }
+    plan.token = h.finalize().to_hex()[..16].to_string();
+    Ok((plan, gos))
+}
+
+/// Editors' sidecars named after a file: darktable's `.xmp`, RawTherapee's
+/// `.pp3`, DxO's `.dop` (`IMG_0001.CR3.xmp`).
+const SIDECARS: [&str; 3] = [".xmp", ".pp3", ".dop"];
+
+/// Files that move with `name` (a photo of `kind`) among its folder's
+/// `entries`: what a delete takes ([`companions`]), the editors' [`SIDECARS`]
+/// of each, and Lightroom's `<name without extension>.xmp` once no file of
+/// that name stays behind (a RAW moving without its JPEG keeps it).
+fn moving_with(name: &str, kind: &str, entries: &[(String, u64)]) -> Vec<(String, u64, &'static str)> {
+    let mut out = companions(name, kind, entries);
+    let mut going = vec![name.to_lowercase()];
+    going.extend(out.iter().filter(|c| c.2 == "twin").map(|c| c.0.to_lowercase()));
+    let stem = |n: &str| n.rsplit_once('.').map_or(n.to_string(), |(s, _)| s.to_string());
+    let sidecar = |n: &str| n.ends_with(".agdata") || SIDECARS.iter().any(|ext| n.ends_with(ext));
+    let own_stem = stem(&going[0]);
+    let all_go = entries
+        .iter()
+        .map(|(n, _)| n.to_lowercase())
+        .filter(|n| !sidecar(n) && stem(n) == own_stem)
+        .all(|n| going.contains(&n));
+    for (n, size) in entries {
+        let nl = n.to_lowercase();
+        let of_one = going.iter().any(|f| SIDECARS.iter().any(|ext| nl == format!("{f}{ext}")));
+        let lightroom = all_go && nl == format!("{own_stem}.xmp");
+        if (of_one || lightroom) && !out.iter().any(|c| &c.0 == n) {
+            out.push((n.clone(), *size, "edits"));
+        }
+    }
+    out
+}
+
+/// The names a photo's files (`group`, the photo first) get in a folder where
+/// the names `taken` are (lower case): their own, or, if one is taken and
+/// `number` is set, all numbered alike ("IMG_0001 (2).CR3", "IMG_0001
+/// (2).JPG", "IMG_0001 (2).CR3.agdata"). None: a name is taken.
+fn free_names(group: &[(String, u64, &str)], taken: &HashSet<String>, number: bool) -> Option<Vec<String>> {
+    let free = |names: &[String]| names.iter().all(|n| !taken.contains(&n.to_lowercase()));
+    let own: Vec<String> = group.iter().map(|g| g.0.clone()).collect();
+    if free(&own) {
+        return Some(own);
+    }
+    if !number {
+        return None;
+    }
+    // Every file going with a photo starts with the photo's name without its extension.
+    let stem = group[0].0.rfind('.').unwrap_or(group[0].0.len());
+    (2..).map(|n| group.iter().map(|g| numbered(&g.0, stem, n)).collect::<Vec<_>>()).find(|names| free(names))
+}
+
+/// `name` with " (n)" after its first `stem` bytes.
+fn numbered(name: &str, stem: usize, n: usize) -> String {
+    let at = if name.is_char_boundary(stem) { stem } else { name.len() };
+    format!("{} ({n}){}", &name[..at], &name[at..])
+}
+
+/// The photo of each file the catalog knows in a folder, by name.
+fn cataloged_in(cat: &Catalog, volume_id: i64, rel: &str) -> HashMap<String, i64> {
+    let read = || -> Result<HashMap<String, i64>> {
+        Ok(cat
+            .read()?
+            .prepare(
+                "SELECT f.name, f.photo_id FROM files f JOIN folders fo ON fo.id = f.folder_id
+                  WHERE fo.volume_id = ?1 AND fo.rel_path = ?2 AND f.photo_id IS NOT NULL",
+            )?
+            .query_map(params![volume_id, rel], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    read().unwrap_or_default()
+}
+
+/// Moves photos into a folder as [`plan_photo_move`] shows them, on the disk
+/// and in the catalog in one step; nothing is read again.
+/// - Same disk: each file renamed into the folder, never over another file.
+/// - Another disk: each file copied (never over another file), flushed to the
+///   disk and compared byte for byte; once the catalog points at the copies,
+///   the originals are removed.
+///
+/// `token`: the plan the user was shown (the window); refused if the plan
+/// changed since. None: as planned now (`shoebox-cli`). `cancel` stops after
+/// the file being moved: those moved stay moved, the rest stay where they
+/// were. Written down first, so a stop at any point is settled at the next
+/// start ([`resume`]).
+pub fn move_photos(
+    cat: &Catalog,
+    m: &PhotoMove,
+    token: Option<&str>,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(&MoveProgress),
+) -> Result<PhotoMoveResult> {
+    let (plan, gos) = plan_photos(cat, m)?;
+    if token.is_some_and(|t| t != plan.token) {
+        bail!("The photos or the folder changed since you looked. Nothing was moved - please look again.");
+    }
+    let mut r = move_files(cat, &gos, cancel, progress)?;
+    r.left = plan.left;
+    if r.files > 0 {
+        log::info!("moved {} photos ({} files) into {}", r.photos, r.files, plan.to);
+    }
+    Ok(r)
+}
+
+/// Takes files moved by [`move_photos`] back where they were: the window's
+/// Undo. A file no longer where the move put it, or whose old place is
+/// taken, stays (listed in `failed`).
+pub fn move_back(
+    cat: &Catalog,
+    moved: &[Moved],
+    cancel: &AtomicBool,
+    progress: &dyn Fn(&MoveProgress),
+) -> Result<PhotoMoveResult> {
+    let mut gos = Vec::new();
+    let mut failed = Vec::new();
+    let mut cataloged: HashMap<(i64, String), HashMap<String, i64>> = HashMap::new();
+    for mv in moved {
+        let (now, was) = (place_path(cat, &mv.now)?, place_path(cat, &mv.was)?);
+        let Some(size) = std::fs::metadata(&now).ok().filter(|m| m.is_file()).map(|m| m.len()) else {
+            failed.push(format!("{}: not there any more", now.display()));
+            continue;
+        };
+        if was.symlink_metadata().is_ok() {
+            failed.push(format!("{}: another file is there now", was.display()));
+            continue;
+        }
+        let photo_of = cataloged
+            .entry((mv.now.volume_id, mv.now.rel.clone()))
+            .or_insert_with(|| cataloged_in(cat, mv.now.volume_id, &mv.now.rel));
+        gos.push(FileGo { from: mv.now.clone(), to: mv.was.clone(), size, photo: photo_of.get(&mv.now.name).copied() });
+    }
+    let mut r = move_files(cat, &gos, cancel, progress)?;
+    failed.append(&mut r.failed);
+    r.failed = failed;
+    Ok(r)
+}
+
+/// A catalog place's path on its disk, when its folder is there now.
+fn place_path(cat: &Catalog, p: &Place) -> Result<PathBuf> {
+    Ok(PathBuf::from(cat.folder_path(p.volume_id, &p.rel)?).join(&p.name))
+}
+
+/// A catalog place's path on its disk, while its disk is plugged in.
+fn place_on_disk(cat: &Catalog, p: &Place) -> Option<PathBuf> {
+    Some(PathBuf::from(volumes::file_path(&cat.mount_of(p.volume_id)?, &p.rel, &p.name)))
+}
+
+/// Moves files each to its own new place; see [`move_photos`]. Renames on
+/// a disk come first, then the copies to another disk.
+fn move_files(
+    cat: &Catalog,
+    gos: &[FileGo],
+    cancel: &AtomicBool,
+    progress: &dyn Fn(&MoveProgress),
+) -> Result<PhotoMoveResult> {
+    let mut r = PhotoMoveResult::default();
+    if gos.is_empty() {
+        return Ok(r);
+    }
+    let mut folders: Vec<(i64, &str)> = gos
+        .iter()
+        .flat_map(|g| [(g.from.volume_id, g.from.rel.as_str()), (g.to.volume_id, g.to.rel.as_str())])
+        .collect();
+    folders.sort();
+    folders.dedup();
+    refuse_if_busy(cat, &folders)?;
+    let paths: Vec<(PathBuf, PathBuf)> =
+        gos.iter().map(|g| Ok((place_path(cat, &g.from)?, place_path(cat, &g.to)?))).collect::<Result<_>>()?;
+    let mut order: Vec<usize> = (0..gos.len()).collect();
+    order.sort_by_key(|&i| gos[i].copied());
+    let copies = gos.iter().filter(|g| g.copied()).count();
+    let total_bytes: u64 = gos.iter().filter(|g| g.copied()).map(|g| g.size).sum();
+
+    let journal = Journal::begin(cat, &Op::Files(FilesOp { files: gos.to_vec() }), MOVING)?;
+    kill_point("files:journaled");
+    let mut p = MoveProgress { phase: "copying".into(), total_files: copies, total_bytes, ..Default::default() };
+    let mut done = Vec::new();
+    for &i in &order {
+        if cancel.load(Ordering::Relaxed) {
+            r.stopped = true;
+            break;
+        }
+        let (g, (src, dst)) = (&gos[i], &paths[i]);
+        if !g.copied() {
+            match rename_new(src, dst) {
+                Ok(()) => done.push(i),
+                Err(e) => r.failed.push(format!("{}: {e}", src.display())),
+            }
+            kill_point("files:renamed");
+            continue;
+        }
+        if p.files == 0 {
+            progress(&p);
+        }
+        match copy_checked(src, dst) {
+            Ok(()) => done.push(i),
+            Err(e) => r.failed.push(format!("{}: {e:#}", src.display())),
+        }
+        kill_point("files:copied");
+        p.files += 1;
+        p.bytes += g.size;
+        progress(&p);
+    }
+
+    // The catalog: each file moved is at its new place, in one transaction
+    // that moves the journal on to the copies' originals (or ends it).
+    let moved: Vec<&FileGo> = done.iter().map(|&i| &gos[i]).collect();
+    let copied: Vec<FileGo> = moved.iter().filter(|g| g.copied()).map(|g| (*g).clone()).collect();
+    let next = (!copied.is_empty()).then(|| Op::Files(FilesOp { files: copied.clone() }));
+    if let Err(e) = record_moves(cat, &moved, &journal, next.as_ref()) {
+        // Keep disk and catalog in step: everything back (failing that, the
+        // next start sets the catalog to where the files are).
+        let back = done.iter().all(|&i| {
+            let (src, dst) = &paths[i];
+            if gos[i].copied() { remove_original(dst).is_ok() } else { rename_new(dst, src).is_ok() }
+        });
+        if back {
+            journal.end(cat);
+        }
+        return Err(e);
+    }
+    kill_point("files:cataloged");
+
+    // The catalog points at the checked copies; the originals can go.
+    if !copied.is_empty() {
+        p = MoveProgress { phase: "removing".into(), total_files: copied.len(), total_bytes, ..Default::default() };
+        progress(&p);
+        match finish_files(cat, &copied, false, &mut || {
+            p.files += 1;
+            progress(&p);
+        })? {
+            Some(left) => r.left_behind = left,
+            // The journal stays: the next start (or the disk coming back) finishes it.
+            None => {
+                log::warn!("move: a disk went away while the originals were being removed");
+                return Ok(finish_result(r, &moved));
+            }
+        }
+    }
+    journal.end(cat);
+    Ok(finish_result(r, &moved))
+}
+
+fn finish_result(mut r: PhotoMoveResult, moved: &[&FileGo]) -> PhotoMoveResult {
+    r.photos = moved.iter().filter_map(|g| g.photo).collect::<BTreeSet<_>>().len();
+    r.files = moved.len();
+    r.bytes = moved.iter().map(|g| g.size).sum();
+    r.copied = moved.iter().filter(|g| g.copied()).count();
+    r.numbered = moved.iter().filter(|g| g.from.name != g.to.name).count();
+    r.moved = moved.iter().map(|g| Moved { now: g.to.clone(), was: g.from.clone() }).collect();
+    r
+}
+
+/// Points the catalog's files at their new places, and moves the journal on
+/// to `next` (the copies' originals to remove) or ends it, in one transaction.
+fn record_moves(cat: &Catalog, moved: &[&FileGo], journal: &Journal, next: Option<&Op>) -> Result<()> {
+    flushed(cat, |conn| {
+        let tx = conn.transaction()?;
+        for g in moved {
+            tx.execute(
+                "INSERT OR IGNORE INTO folders (volume_id, rel_path) VALUES (?1, ?2)",
+                params![g.to.volume_id, g.to.rel],
+            )?;
+            tx.execute(
+                "UPDATE files SET folder_id = (SELECT id FROM folders WHERE volume_id = ?1 AND rel_path = ?2), name = ?3
+                  WHERE folder_id = (SELECT id FROM folders WHERE volume_id = ?4 AND rel_path = ?5) AND name = ?6",
+                params![g.to.volume_id, g.to.rel, g.to.name, g.from.volume_id, g.from.rel, g.from.name],
+            )?;
+        }
+        match next {
+            Some(op) => journal.set_step(&tx, REMOVING, Some(op))?,
+            None => journal.remove(&tx)?,
+        }
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+/// Copies a file to another disk, never over another file, keeping its
+/// modification time (scans then see it unchanged), flushed to the disk and
+/// compared byte for byte. A copy that fails or comes out different is taken back.
+fn copy_checked(src: &Path, dst: &Path) -> Result<()> {
+    use std::io::{Read, Write};
+    let mut from = std::fs::File::open(src)?;
+    let meta = from.metadata()?;
+    // Fails if anything is there: only a file this made is ever taken back.
+    let to = std::fs::OpenOptions::new().write(true).create_new(true).open(dst)?;
+    let copied = (move || -> Result<()> {
+        let mut to = to;
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = from.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            to.write_all(&buf[..n])?;
+        }
+        to.set_modified(meta.modified()?)?;
+        to.sync_all()?;
+        drop(to);
+        if meta.permissions().readonly() {
+            std::fs::set_permissions(dst, meta.permissions())?;
+        }
+        if !same_bytes(src, dst)? {
+            bail!("the copy came out different");
+        }
+        Ok(())
+    })();
+    if copied.is_err()
+        && let Err(e) = remove_original(dst)
+    {
+        log::warn!("move: couldn't take back the copy {}: {e}", dst.display());
+    }
+    copied
+}
+
+/// Renames a file on its disk, never over another one: an error if `to` exists.
+#[cfg(windows)]
+fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
+    use windows::core::PCWSTR;
+    // Past MAX_PATH the API wants the long form (`\\?\D:\...`), which std uses on its own.
+    let wide = |p: &Path| -> Vec<u16> {
+        let long = p.as_os_str().len() >= 248 && p.is_absolute() && !p.to_string_lossy().starts_with(r"\\");
+        let prefix = if long { r"\\?\" } else { "" };
+        prefix.encode_utf16().chain(p.as_os_str().encode_wide()).chain(std::iter::once(0)).collect()
+    };
+    let (f, t) = (wide(from), wide(to));
+    // Without MOVEFILE_REPLACE_EXISTING a file already at `to` is an error, never replaced.
+    unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVE_FILE_FLAGS(0)) }
+        .map_err(|e| std::io::Error::other(e.message()))
+}
+
+/// Renames a file on its disk, never over another one: an error if `to` exists.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::ffi::{CString, c_char, c_int, c_uint};
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        #[cfg(target_os = "linux")]
+        fn renameat2(olddirfd: c_int, old: *const c_char, newdirfd: c_int, new: *const c_char, flags: c_uint) -> c_int;
+        #[cfg(target_os = "macos")]
+        fn renamex_np(old: *const c_char, new: *const c_char, flags: c_uint) -> c_int;
+    }
+    let c = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(std::io::Error::other);
+    let (f, t) = (c(from)?, c(to)?);
+    // RENAME_NOREPLACE (Linux) and RENAME_EXCL (macOS): an existing `to` is an error.
+    #[cfg(target_os = "linux")]
+    let done = unsafe { renameat2(-100, f.as_ptr(), -100, t.as_ptr(), 1) }; // AT_FDCWD
+    #[cfg(target_os = "macos")]
+    let done = unsafe { renamex_np(f.as_ptr(), t.as_ptr(), 4) };
+    if done == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    match e.kind() {
+        // A file system that can't promise it (FAT, exFAT on some systems): checked just before instead.
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput => rename_checked(from, to),
+        _ => Err(e),
+    }
+}
+
+/// Renames a file on its disk, never over another one: an error if `to` exists.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    rename_checked(from, to)
+}
+
+/// A rename that looks first whether `to` is free.
+#[cfg(not(windows))]
+fn rename_checked(from: &Path, to: &Path) -> std::io::Result<()> {
+    if to.symlink_metadata().is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    std::fs::rename(from, to)
+}
+
+/// The catalog points at copies on another disk: each original goes once its
+/// copy is there (and, with `check`, the same: after a restart; a move that
+/// has just compared them doesn't). Returns the originals left behind, or
+/// None while a disk is missing.
+fn finish_files(
+    cat: &Catalog,
+    files: &[FileGo],
+    check: bool,
+    done_one: &mut dyn FnMut(),
+) -> Result<Option<Vec<String>>> {
+    let mut left = Vec::new();
+    for g in files {
+        let (Some(orig), Some(copy)) = (place_on_disk(cat, &g.from), place_on_disk(cat, &g.to)) else {
+            return Ok(None);
+        };
+        if orig.symlink_metadata().is_ok() {
+            let copied = copy.is_file() && (!check || same_bytes(&orig, &copy).unwrap_or(false));
+            if !copied {
+                log::warn!("move: kept {}: its copy {} isn't the same", orig.display(), copy.display());
+                left.push(orig.to_string_lossy().into_owned());
+            } else if let Err(e) = remove_original(&orig) {
+                log::warn!("move: couldn't remove {}: {e}", orig.display());
+                left.push(orig.to_string_lossy().into_owned());
+            } else {
+                kill_point("files:removed");
+            }
+        }
+        done_one();
+    }
+    let plugged_all = files.iter().all(|g| plugged(cat, g.from.volume_id) && plugged(cat, g.to.volume_id));
+    Ok(plugged_all.then_some(left))
+}
+
+/// Whether `copy` holds `original`'s bytes, all of them or the first part (a
+/// copy cut short): only such a file is taken back for an original.
+fn holds_start_of(copy: &Path, original: &Path) -> Result<bool> {
+    use std::io::Read;
+    let (mut fc, mut fo) = (std::fs::File::open(copy)?, std::fs::File::open(original)?);
+    let len = fc.metadata()?.len();
+    if len > fo.metadata()?.len() {
+        return Ok(false);
+    }
+    let (mut bc, mut bo) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    let mut left = len;
+    while left > 0 {
+        let n = (left as usize).min(bc.len());
+        fc.read_exact(&mut bc[..n])?;
+        fo.read_exact(&mut bo[..n])?;
+        if bc[..n] != bo[..n] {
+            return Ok(false);
+        }
+        left -= n as u64;
+    }
+    Ok(true)
+}
+
 // The journal: every rename, move and delete is written down before a disk
 // changes, so one cut short (a kill, a crash) is settled at the next start.
 
 const RENAMING: &str = "renaming";
 const COPYING: &str = "copying";
+const MOVING: &str = "moving";
 const REMOVING: &str = "removing";
 const DELETING: &str = "deleting";
 const FORGOTTEN: &str = "forgotten";
@@ -909,6 +1606,7 @@ enum Op {
     Rename(RenameOp),
     Copy(CopyOp),
     Delete(DeleteOp),
+    Files(FilesOp),
 }
 
 /// A folder renamed, or moved on its own disk: one rename on the disk.
@@ -946,6 +1644,35 @@ struct DeleteOp {
     files: Vec<(i64, String, String)>,
     #[serde(default)]
     photos: Vec<i64>,
+}
+
+/// Photos' files moved into other folders. Steps: moving (the catalog points
+/// at every original; each file renamed on its own disk, or copied to another
+/// and checked), then removing (the catalog points at the files moved; the
+/// copies alone are listed, and their originals go).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct FilesOp {
+    files: Vec<FileGo>,
+}
+
+/// One file of a [`FilesOp`].
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct FileGo {
+    from: Place,
+    to: Place,
+    size: u64,
+    /// The photo it is a file of, when the catalog knows it.
+    #[serde(default)]
+    photo: Option<i64>,
+}
+
+impl FileGo {
+    /// Goes to another disk: copied, checked, then its original removed.
+    fn copied(&self) -> bool {
+        self.from.volume_id != self.to.volume_id
+    }
 }
 
 /// A change's row in `ops`, and its lock, held until it is done.
@@ -1127,6 +1854,15 @@ fn settle(cat: &Catalog, journal: Journal, step: &str, op: &Op) -> Result<Settle
             journal.end(cat);
             Settled::Finished
         }
+        (Op::Files(f), MOVING) => settle_moving(cat, journal, f)?,
+        (Op::Files(f), REMOVING) => {
+            let Some(left) = finish_files(cat, &f.files, true, &mut || {})? else { return Ok(Settled::Waiting) };
+            if !left.is_empty() {
+                log::warn!("move: {} original(s) left behind: {}", left.len(), left.join(", "));
+            }
+            journal.end(cat);
+            Settled::Finished
+        }
         (_, other) => bail!("unknown step {other:?}"),
     })
 }
@@ -1275,12 +2011,48 @@ fn settle_delete(cat: &Catalog, journal: Journal, d: &DeleteOp) -> Result<Settle
     Ok(if gone.is_empty() { Settled::Undone } else { Settled::Finished })
 }
 
+/// Photos being moved, cut short before the catalog took them: undone. A file
+/// renamed on its own disk is renamed back (a rename is whole: the file is in
+/// one place or the other; one that can't go back stays, and the catalog
+/// follows it), a copy to another disk is taken back while its original is
+/// there. Waits for every disk.
+fn settle_moving(cat: &Catalog, journal: Journal, f: &FilesOp) -> Result<Settled> {
+    if f.files.iter().any(|g| !plugged(cat, g.from.volume_id) || !plugged(cat, g.to.volume_id)) {
+        return Ok(Settled::Waiting);
+    }
+    let mut followed = Vec::new();
+    for g in &f.files {
+        let (Some(orig), Some(there)) = (place_on_disk(cat, &g.from), place_on_disk(cat, &g.to)) else {
+            return Ok(Settled::Waiting);
+        };
+        if !g.copied() {
+            if orig.symlink_metadata().is_err()
+                && there.is_file()
+                && let Err(e) = rename_new(&there, &orig)
+            {
+                log::warn!("move: couldn't put {} back: {e}; the catalog follows it", there.display());
+                followed.push(g);
+            }
+        } else if orig.is_file() && there.is_file() && holds_start_of(&there, &orig).unwrap_or(false) {
+            remove_original(&there).map_err(|e| anyhow!("couldn't take back the copy {}: {e}", there.display()))?;
+        }
+    }
+    record_moves(cat, &followed, &journal, None)?;
+    Ok(if followed.is_empty() { Settled::Undone } else { Settled::Finished })
+}
+
 impl Op {
     fn describe(&self, cat: &Catalog) -> String {
         match self {
             Op::Rename(r) => format!("rename of {} to {}", place(cat, r.volume_id, &r.rel), shown(&r.new_rel)),
             Op::Copy(c) => format!("move of {} to {}", place(cat, c.from, &c.rel), place(cat, c.to, &c.new_rel)),
             Op::Delete(d) => format!("delete of {} file(s)", d.files.len()),
+            Op::Files(f) => match f.files.first() {
+                Some(g) if f.files.iter().all(|o| o.to.volume_id == g.to.volume_id && o.to.rel == g.to.rel) => {
+                    format!("move of {} file(s) to {}", f.files.len(), place(cat, g.to.volume_id, &g.to.rel))
+                }
+                _ => format!("move of {} file(s)", f.files.len()),
+            },
         }
     }
 
@@ -1290,6 +2062,11 @@ impl Op {
             Op::Rename(r) => vec![(r.volume_id, r.rel.clone()), (r.volume_id, r.new_rel.clone())],
             Op::Copy(c) => vec![(c.from, c.rel.clone()), (c.to, c.new_rel.clone())],
             Op::Delete(d) => d.files.iter().map(|(v, rel, _)| (*v, rel.clone())).collect(),
+            Op::Files(f) => f
+                .files
+                .iter()
+                .flat_map(|g| [(g.from.volume_id, g.from.rel.clone()), (g.to.volume_id, g.to.rel.clone())])
+                .collect(),
         }
     }
 }
@@ -1470,5 +2247,90 @@ mod tests {
                 .map(|n| (n.to_string(), 1))
                 .collect();
         assert_eq!(names(companions("IMG_0001.JPG", "image", &entries)), ["IMG_0001.JPG.agdata edits"]);
+    }
+
+    #[test]
+    fn a_moved_file_never_lands_on_another() {
+        let dir = std::env::temp_dir().join("shoebox-rename-new");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Deep enough that the paths pass Windows' MAX_PATH.
+        let deep = (0..6).fold(dir.clone(), |p, i| p.join(format!("{i}-{}", "x".repeat(40))));
+        std::fs::create_dir_all(&deep).unwrap();
+        let (a, b, c) = (deep.join("a.jpg"), deep.join("b.jpg"), deep.join("c.jpg"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        assert!(rename_new(&a, &b).is_err());
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        rename_new(&a, &c).unwrap();
+        assert!(!a.exists());
+        assert_eq!(std::fs::read(&c).unwrap(), b"a");
+        // A copy neither, and what was there stays.
+        assert!(copy_checked(&c, &b).is_err());
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        copy_checked(&c, &a).unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), b"a");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn listed(names: &[&str]) -> Vec<(String, u64)> {
+        names.iter().map(|n| (n.to_string(), 1)).collect()
+    }
+
+    #[test]
+    fn a_moved_photo_takes_every_editors_sidecar() {
+        let entries = listed(&[
+            "IMG_0001.CR3",
+            "IMG_0001.JPG",
+            "IMG_0001.CR3.agdata",
+            "IMG_0001.CR3.xmp",
+            "IMG_0001.JPG.pp3",
+            "IMG_0001.CR3.dop",
+            "IMG_0001.xmp",
+            "IMG_0002.xmp",
+        ]);
+        assert_eq!(
+            names(moving_with("IMG_0001.CR3", "raw", &entries)),
+            [
+                "IMG_0001.CR3.agdata edits",
+                "IMG_0001.CR3.dop edits",
+                "IMG_0001.CR3.xmp edits",
+                "IMG_0001.JPG twin",
+                "IMG_0001.JPG.pp3 edits",
+                "IMG_0001.xmp edits",
+            ]
+        );
+        // The JPEG alone: Lightroom's IMG_0001.xmp is the RAW's, which stays.
+        assert_eq!(names(moving_with("IMG_0001.JPG", "image", &entries)), ["IMG_0001.JPG.pp3 edits"]);
+        // A JPEG with nothing else of its name takes it.
+        let alone = listed(&["IMG_0003.JPG", "img_0003.XMP", "IMG_0004.JPG"]);
+        assert_eq!(names(moving_with("IMG_0003.JPG", "image", &alone)), ["img_0003.XMP edits"]);
+    }
+
+    fn group(names: &[&str]) -> Vec<(String, u64, &'static str)> {
+        names.iter().map(|n| (n.to_string(), 1, "photo")).collect()
+    }
+
+    fn taken(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|n| n.to_lowercase()).collect()
+    }
+
+    #[test]
+    fn a_name_taken_leaves_the_photo_or_numbers_all_its_files_alike() {
+        let g = group(&["IMG_0001.CR3", "IMG_0001.JPG", "IMG_0001.CR3.agdata"]);
+        assert_eq!(
+            free_names(&g, &taken(&["IMG_0002.CR3"]), false).unwrap(),
+            ["IMG_0001.CR3", "IMG_0001.JPG", "IMG_0001.CR3.agdata"]
+        );
+        // Any case: one name on Windows and macOS. A twin's name counts as much as the photo's.
+        assert_eq!(free_names(&g, &taken(&["img_0001.jpg"]), false), None);
+        assert_eq!(
+            free_names(&g, &taken(&["img_0001.jpg", "IMG_0001 (2).CR3"]), true).unwrap(),
+            ["IMG_0001 (3).CR3", "IMG_0001 (3).JPG", "IMG_0001 (3).CR3.agdata"]
+        );
+        // A name without an extension.
+        assert_eq!(
+            free_names(&group(&["scan", "scan.xmp"]), &taken(&["scan"]), true).unwrap(),
+            ["scan (2)", "scan (2).xmp"]
+        );
     }
 }

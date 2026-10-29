@@ -17,6 +17,9 @@ import type {
   Person,
   PhotoDetail,
   PhotoList,
+  PhotoMoveAsk,
+  PhotoMovePlan,
+  PhotoMoveResult,
   Placement,
   Problem,
   Repoint,
@@ -432,6 +435,49 @@ export function fakeBackend() {
     };
   };
 
+  /** Moving photos into another source's folder (a folder is a source's name; one disk, so
+   *  nothing is copied). A test says which photos meet a file of their name there. */
+  const nameTakenIn = new Map<string, Set<number>>();
+  const fileName = (id: number) => `IMG_${id}.JPG`;
+  const rootNamed = (name: string) => ROOTS.find((r) => r.name === name)!;
+  const movePlan = (a: PhotoMoveAsk): PhotoMovePlan => {
+    const files: PhotoMovePlan["files"] = [];
+    const left: PhotoMovePlan["left"] = [];
+    for (const id of a.photoIds) {
+      const p = photos.find((x) => x.id === id)!;
+      const taken = nameTakenIn.get(a.toRel)?.has(id) ?? false;
+      if (p.root === rootNamed(a.toRel).id) left.push({ photoId: id, name: fileName(id), why: "here" });
+      else if (taken && !a.numberClashes) left.push({ photoId: id, name: fileName(id), why: "taken" });
+      else {
+        const from = `D:\\${ROOTS.find((r) => r.id === p.root)!.name}\\${fileName(id)}`;
+        files.push({ photoId: id, from, name: taken ? `IMG_${id} (2).JPG` : fileName(id), size: 2_000_000, role: "photo", copied: false });
+      }
+    }
+    return {
+      to: `D:\\${a.toRel}`,
+      photos: files.length,
+      files,
+      bytes: files.length * 2_000_000,
+      copyBytes: 0,
+      numbered: files.filter((f) => !f.from.endsWith(f.name)).length,
+      copiesStay: 0,
+      left,
+      token: JSON.stringify(a),
+    };
+  };
+  const moveResult = (moved: PhotoMoveResult["moved"], plan?: PhotoMovePlan): PhotoMoveResult => ({
+    photos: moved.length,
+    files: moved.length,
+    bytes: moved.length * 2_000_000,
+    copied: 0,
+    numbered: plan?.numbered ?? 0,
+    left: plan?.left ?? [],
+    failed: [],
+    leftBehind: [],
+    stopped: false,
+    moved,
+  });
+
   /** A face of the unnamed person (8) in this photo, as "Find more" offers it. */
   const face = (photoId: number, similarity: number) => ({
     faceId: 1000 + photoId,
@@ -640,6 +686,25 @@ export function fakeBackend() {
       }
       case "scan_status":
         return { current: null, queued: [] };
+      case "plan_photo_move":
+        return movePlan(a.ask as PhotoMoveAsk);
+      case "move_photos": {
+        const ask = a.ask as PhotoMoveAsk;
+        const plan = movePlan(ask);
+        if (a.token !== plan.token) throw new Error("The photos or the folder changed since you looked.");
+        const moved = plan.files.map((f) => {
+          const p = photos.find((x) => x.id === f.photoId)!;
+          const was = { volumeId: 1, rel: ROOTS.find((r) => r.id === p.root)!.name, name: fileName(p.id) };
+          p.root = rootNamed(ask.toRel).id;
+          return { now: { volumeId: 1, rel: ask.toRel, name: f.name }, was };
+        });
+        return moveResult(moved, plan);
+      }
+      case "move_photos_back": {
+        const moved = a.moved as PhotoMoveResult["moved"];
+        for (const m of moved) photos.find((p) => fileName(p.id) === m.was.name)!.root = rootNamed(m.was.rel).id;
+        return moveResult(moved);
+      }
       case "update_status":
         return null;
       case "plugin:app|version":
@@ -678,6 +743,10 @@ export function fakeBackend() {
     delay: (cmd: string, ms: number) => cmdDelays.set(cmd, ms),
     marked,
     missing,
+    /** Photos meeting a file of their name in a folder (a source's name) when moved there. */
+    nameTakenIn,
+    /** The source a photo is in now. */
+    rootOf: (id: number) => photos.find((p) => p.id === id)!.root,
     goneNow,
     elsewhere,
     inBin,
