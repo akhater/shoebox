@@ -189,8 +189,9 @@
 //!       same disk: moved at once; another disk: copied, checked byte for byte, original removed
 //!   shoebox-cli move-photos <to-volume-id> <into folder> <photo-id>... [--from <volume-id> <folder>]
 //!                           [--number] [--plan]
-//!       photos into a folder, the same way, each with its RAW's JPEG twin and its edits
-//!       (Argentum's, .xmp, .pp3, .dop). --from: their copies in that folder (and below) move;
+//!       photos into a folder, the same way, each with its RAW's JPEG twin, its edits
+//!       (Argentum's, .xmp, .pp3, .dop) and its look files. --from: their copies in that
+//!       folder (and below) move;
 //!       else each photo's copy on the folder's disk, or its first one. A name already in the
 //!       folder is never replaced: the photo stays ("left", with why), or --number keeps both
 //!       ("IMG_0001 (2).CR3"). --plan: only what it would do. "moved" says where each file went

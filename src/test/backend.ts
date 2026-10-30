@@ -5,6 +5,7 @@ import type {
   CullStack,
   DateChange,
   DateCheck,
+  DeletePlan,
   FaceTarget,
   Facets,
   Filters,
@@ -438,6 +439,10 @@ export function fakeBackend() {
   /** Moving photos into another source's folder (a folder is a source's name; one disk, so
    *  nothing is copied). A test says which photos meet a file of their name there. */
   const nameTakenIn = new Map<string, Set<number>>();
+  /** Look files beside a photo, which a move takes along. */
+  const looksOf = new Map<number, number>();
+  /** What "Delete marked files…" lists: a test says which files, with what role. */
+  let deleteFiles: DeletePlan["files"] = [];
   const fileName = (id: number) => `IMG_${id}.JPG`;
   const rootNamed = (name: string) => ROOTS.find((r) => r.name === name)!;
   const movePlan = (a: PhotoMoveAsk): PhotoMovePlan => {
@@ -451,11 +456,15 @@ export function fakeBackend() {
       else {
         const from = `D:\\${ROOTS.find((r) => r.id === p.root)!.name}\\${fileName(id)}`;
         files.push({ photoId: id, from, name: taken ? `IMG_${id} (2).JPG` : fileName(id), size: 2_000_000, role: "photo", copied: false });
+        for (let n = 0; n < (looksOf.get(id) ?? 0); n++) {
+          const name = `${fileName(id)}.${n}.lut.png`;
+          files.push({ photoId: null, from: `${from}.${n}.lut.png`, name, size: 2_000_000, role: "look", copied: false });
+        }
       }
     }
     return {
       to: `D:\\${a.toRel}`,
-      photos: files.length,
+      photos: files.filter((f) => f.photoId !== null).length,
       files,
       bytes: files.length * 2_000_000,
       copyBytes: 0,
@@ -686,13 +695,18 @@ export function fakeBackend() {
       }
       case "scan_status":
         return { current: null, queued: [] };
+      case "delete_plan": {
+        const bytes = deleteFiles.reduce((n, f) => n + f.size, 0);
+        const disk = { volumeId: 1, label: "Disk", mount: "D:\\", recycle: true, photos: marked.size, files: deleteFiles.length, bytes };
+        return { marked: marked.size, photos: marked.size, waiting: 0, gone: [], disks: [disk], files: deleteFiles, bytes, token: "plan" } satisfies DeletePlan;
+      }
       case "plan_photo_move":
         return movePlan(a.ask as PhotoMoveAsk);
       case "move_photos": {
         const ask = a.ask as PhotoMoveAsk;
         const plan = movePlan(ask);
         if (a.token !== plan.token) throw new Error("The photos or the folder changed since you looked.");
-        const moved = plan.files.map((f) => {
+        const moved = plan.files.filter((f) => f.photoId !== null).map((f) => {
           const p = photos.find((x) => x.id === f.photoId)!;
           const was = { volumeId: 1, rel: ROOTS.find((r) => r.id === p.root)!.name, name: fileName(p.id) };
           p.root = rootNamed(ask.toRel).id;
@@ -745,6 +759,12 @@ export function fakeBackend() {
     missing,
     /** Photos meeting a file of their name in a folder (a source's name) when moved there. */
     nameTakenIn,
+    /** How many look files stand beside a photo. */
+    looksOf,
+    /** The files "Delete marked files…" lists. */
+    filesToDelete: (files: [path: string, role: DeletePlan["files"][number]["role"]][]) => {
+      deleteFiles = files.map(([path, role]) => ({ path, size: 2_000_000, role, volumeId: 1 }));
+    },
     /** The source a photo is in now. */
     rootOf: (id: number) => photos.find((p) => p.id === id)!.root,
     goneNow,
