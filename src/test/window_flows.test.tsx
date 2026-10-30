@@ -397,6 +397,22 @@ describe("moving photos", () => {
     expect(status(host)).toBe("Moved 2 photos to “Fast”. 1 file was numbered to keep both.");
     expect(gridIds(host)).toEqual([103]);
   });
+
+  test("a photo's look files are said to go along, and are no photos", async () => {
+    const be = fakeBackend();
+    be.nameTakenIn.set("Fast", new Set([102]));
+    be.looksOf.set(101, 2);
+    const host = await renderApp();
+    await click(sidebarItem(host, "Slow"));
+    await wait(100);
+    await click(tile(host, 101));
+    await click(tile(host, 102), { ctrlKey: true });
+    await dragAndDrop(tile(host, 102), source(host, "Fast"));
+    await wait(100);
+    const dialog = host.querySelector<HTMLElement>(".move-modal")!;
+    expect(dialog.querySelector(".move-summary b")!.textContent).toBe("1 photo · 3 files · 5.7 MB");
+    expect(dialog.textContent).toMatch(/With 2 look files, which go along\./);
+  });
 });
 
 describe("fixing dates", () => {
@@ -494,6 +510,26 @@ describe("marking for deletion", () => {
       ["get_overview", {}],
     ]);
     expect(be.marked.size).toBe(0);
+  });
+
+  test("Delete marked files lists a photo's look files as look files, not as its edits", async () => {
+    const be = fakeBackend();
+    be.marked.add(201);
+    be.filesToDelete([
+      ["D:\\Fast\\IMG_201.JPG", "photo"],
+      ["D:\\Fast\\IMG_201.JPG.agdata", "edits"],
+      ["D:\\Fast\\IMG_201.JPG.warm.lut.png", "look"],
+      ["D:\\Fast\\IMG_201.JPG.cool.lut.png", "look"],
+    ]);
+    const host = await renderApp();
+    await click(sidebarItem(host, "Marked for deletion"));
+    await wait(100);
+    await click(byText(host, ".banner button", /Delete marked files/));
+    await wait(100);
+    const dialog = host.querySelector<HTMLElement>(".delete-modal")!;
+    expect(dialog.querySelector(".note")!.textContent).toBe("Includes 1 Argentum edit file and 2 look files.");
+    const rows = [...dialog.querySelectorAll(".del-files li > .muted")].map((r) => r.textContent);
+    expect(rows).toEqual(["1.9 MB", "Argentum edits · 1.9 MB", "Look file · 1.9 MB", "Look file · 1.9 MB"]);
   });
 });
 

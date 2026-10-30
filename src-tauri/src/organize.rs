@@ -14,8 +14,9 @@
 //! - Fixed disks: files go to the Recycle Bin. Removable media (SD cards, USB
 //!   sticks) have none: those are deleted permanently and the plan says so
 //!   before the user confirms.
-//! - A marked RAW takes its camera JPEG twin (same folder, same name) and
-//!   Argentum's edits (`<file>.agdata`, `<file>.<id>.agdata`) with it.
+//! - A marked RAW takes its camera JPEG twin (same folder, same name),
+//!   Argentum's edits (`<file>.agdata`, `<file>.<id>.agdata`) and look files
+//!   (`<file>.<name>.lut.png`) with it.
 //! - Files on unplugged disks stay marked until their disk is plugged in.
 //! - The catalog forgets a file only once it is really gone from its folder.
 //! - A photo moved takes the same files along, plus other editors' sidecars
@@ -68,7 +69,8 @@ pub fn unmark_all(cat: &Catalog) -> Result<usize> {
 pub struct PlanFile {
     pub path: String,
     pub size: u64,
-    /// "photo", "twin" (the RAW's camera JPEG) or "edits" (Argentum sidecar)
+    /// "photo", "twin" (the RAW's camera JPEG), "edits" (Argentum sidecar) or
+    /// "look" (a look file)
     pub role: String,
     pub volume_id: i64,
 }
@@ -217,23 +219,29 @@ fn list_folder(folder: &Path) -> Vec<(String, u64)> {
 }
 
 /// Files that leave with `name` (a photo of `kind`), among its folder's
-/// `entries`: Argentum's edits of it and, for a RAW, its camera JPEG twin and
-/// the twin's edits.
+/// `entries`: Argentum's edits of it and its look files and, for a RAW, its
+/// camera JPEG twin and the twin's.
 fn companions(name: &str, kind: &str, entries: &[(String, u64)]) -> Vec<(String, u64, &'static str)> {
     let lower = name.to_lowercase();
     let stem = lower.rsplit_once('.').map_or(lower.as_str(), |(s, _)| s);
-    let edits_of = |file: &str| -> Vec<(String, u64, &'static str)> {
+    let sidecars_of = |file: &str| -> Vec<(String, u64, &'static str)> {
         let prefix = format!("{file}.");
         entries
             .iter()
-            .filter(|(n, _)| {
-                let n = n.to_lowercase();
-                n.starts_with(&prefix) && n.ends_with(".agdata")
+            .filter_map(|(n, s)| {
+                let nl = n.to_lowercase();
+                let role = if nl.ends_with(".agdata") {
+                    "edits"
+                } else if formats::is_look(&nl) {
+                    "look"
+                } else {
+                    return None;
+                };
+                nl.starts_with(&prefix).then(|| (n.clone(), *s, role))
             })
-            .map(|(n, s)| (n.clone(), *s, "edits"))
             .collect()
     };
-    let mut out = edits_of(&lower);
+    let mut out = sidecars_of(&lower);
     if kind == Kind::Raw.as_str() {
         for (n, s) in entries {
             let nl = n.to_lowercase();
@@ -242,7 +250,7 @@ fn companions(name: &str, kind: &str, entries: &[(String, u64)]) -> Vec<(String,
                 && formats::kind_of(n) == Some(Kind::Image)
             {
                 out.push((n.clone(), *s, "twin"));
-                out.extend(edits_of(&nl));
+                out.extend(sidecars_of(&nl));
             }
         }
     }
@@ -934,7 +942,8 @@ pub struct PlannedFile {
     /// Its name in the folder it goes to.
     pub name: String,
     pub size: u64,
-    /// "photo", "twin" (the RAW's camera JPEG) or "edits" (a sidecar).
+    /// "photo", "twin" (the RAW's camera JPEG), "edits" (a sidecar) or "look"
+    /// (a look file).
     pub role: String,
     /// Copied to another disk (checked, then the original removed), else
     /// moved on its own disk.
@@ -1169,7 +1178,8 @@ fn moving_with(name: &str, kind: &str, entries: &[(String, u64)]) -> Vec<(String
     let mut going = vec![name.to_lowercase()];
     going.extend(out.iter().filter(|c| c.2 == "twin").map(|c| c.0.to_lowercase()));
     let stem = |n: &str| n.rsplit_once('.').map_or(n.to_string(), |(s, _)| s.to_string());
-    let sidecar = |n: &str| n.ends_with(".agdata") || SIDECARS.iter().any(|ext| n.ends_with(ext));
+    let sidecar =
+        |n: &str| n.ends_with(".agdata") || formats::is_look(n) || SIDECARS.iter().any(|ext| n.ends_with(ext));
     let own_stem = stem(&going[0]);
     let all_go = entries
         .iter()
@@ -2214,6 +2224,31 @@ mod tests {
     }
 
     #[test]
+    fn a_photo_takes_its_look_files_and_no_one_elses() {
+        let entries = listed(&[
+            "IMG_0001.CR3",
+            "IMG_0001.JPG",
+            "IMG_0001.CR3.warm.lut.png",
+            "IMG_0001.CR3.cool.LUT.PNG",
+            "IMG_0001.JPG.warm.lut.png",
+            "IMG_0001.warm.lut.png",
+            "IMG_00011.CR3.warm.lut.png",
+            "IMG_0010.CR3.warm.lut.png",
+        ]);
+        assert_eq!(
+            names(companions("IMG_0001.CR3", "raw", &entries)),
+            [
+                "IMG_0001.CR3.cool.LUT.PNG look",
+                "IMG_0001.CR3.warm.lut.png look",
+                "IMG_0001.JPG twin",
+                "IMG_0001.JPG.warm.lut.png look",
+            ]
+        );
+        // A JPEG on its own takes its own, not its RAW's.
+        assert_eq!(names(companions("IMG_0001.JPG", "image", &entries)), ["IMG_0001.JPG.warm.lut.png look"]);
+    }
+
+    #[test]
     fn folders_are_joined_and_noted_with_the_catalogs_separator() {
         assert_eq!(child_rel("", "Trip"), "Trip");
         assert_eq!(child_rel("Photos", "Trip"), "Photos\\Trip");
@@ -2306,6 +2341,35 @@ mod tests {
         assert_eq!(names(moving_with("IMG_0003.JPG", "image", &alone)), ["img_0003.XMP edits"]);
     }
 
+    #[test]
+    fn a_moved_photo_takes_its_look_files() {
+        let entries = listed(&[
+            "IMG_0001.CR3",
+            "IMG_0001.JPG",
+            "IMG_0001.CR3.warm.lut.png",
+            "IMG_0001.JPG.cool.lut.png",
+            "IMG_0001.xmp",
+            "IMG_0002.CR3.warm.lut.png",
+        ]);
+        assert_eq!(
+            names(moving_with("IMG_0001.CR3", "raw", &entries)),
+            [
+                "IMG_0001.CR3.warm.lut.png look",
+                "IMG_0001.JPG twin",
+                "IMG_0001.JPG.cool.lut.png look",
+                "IMG_0001.xmp edits",
+            ]
+        );
+    }
+
+    /// Named like the photo up to its last dot, a look file is no file of the
+    /// photo's name staying behind.
+    #[test]
+    fn a_look_file_keeps_no_sidecar_behind() {
+        let alone = listed(&["IMG_0005.lut.JPG", "IMG_0005.lut.png", "IMG_0005.lut.xmp"]);
+        assert_eq!(names(moving_with("IMG_0005.lut.JPG", "image", &alone)), ["IMG_0005.lut.xmp edits"]);
+    }
+
     fn group(names: &[&str]) -> Vec<(String, u64, &'static str)> {
         names.iter().map(|n| (n.to_string(), 1, "photo")).collect()
     }
@@ -2331,6 +2395,16 @@ mod tests {
         assert_eq!(
             free_names(&group(&["scan", "scan.xmp"]), &taken(&["scan"]), true).unwrap(),
             ["scan (2)", "scan (2).xmp"]
+        );
+    }
+
+    #[test]
+    fn a_look_files_name_counts_and_it_is_numbered_with_its_photo() {
+        let g = group(&["IMG_0001.CR3", "IMG_0001.CR3.warm.lut.png"]);
+        assert_eq!(free_names(&g, &taken(&["IMG_0001.CR3.WARM.lut.png"]), false), None);
+        assert_eq!(
+            free_names(&g, &taken(&["IMG_0001.CR3.warm.lut.png"]), true).unwrap(),
+            ["IMG_0001 (2).CR3", "IMG_0001 (2).CR3.warm.lut.png"]
         );
     }
 }

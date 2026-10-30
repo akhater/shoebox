@@ -28,10 +28,22 @@ const IMAGE_EXT: &[&str] = &[
     "psd", "psb",
 ];
 
+/// How a look file's name ends (`IMG_0001.CR3.<name>.lut.png`).
+pub const LOOK_END: &str = ".lut.png";
+
+/// A look file: generated beside a photo and going where it goes (organize.rs),
+/// never a photo itself.
+pub fn is_look(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(LOOK_END)
+}
+
 pub fn kind_of(name: &str) -> Option<Kind> {
     // A Mac's note about a file (`._IMG_0001.CR2`), left beside it on a disk that
     // can't keep it itself (FAT, exFAT, a network share): not a photo.
     if cfg!(not(windows)) && name.starts_with("._") {
+        return None;
+    }
+    if is_look(name) {
         return None;
     }
     let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
@@ -70,6 +82,17 @@ mod tests {
         assert_eq!(kind_of("holiday.2026.JPG"), Some(Kind::Image));
         assert_eq!(kind_of("notes.txt"), None);
         assert_eq!(kind_of("README"), None);
+    }
+
+    #[test]
+    fn a_look_file_beside_a_photo_is_not_a_photo() {
+        for name in ["IMG_1.CR3.warm.lut.png", "IMG_1.CR3.warm.LUT.PNG", "scan.lut.png"] {
+            assert_eq!(kind_of(name), None, "{name}");
+        }
+        // Only the whole ending counts.
+        assert_eq!(kind_of("salut.png"), Some(Kind::Image));
+        assert_eq!(kind_of("IMG_1.lut.jpg"), Some(Kind::Image));
+        assert_eq!(kind_of("IMG_1.lut.CR3"), Some(Kind::Raw));
     }
 
     /// Off Windows, where a disk may carry a Mac's notes beside the photos.

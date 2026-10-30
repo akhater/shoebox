@@ -144,6 +144,70 @@ fn a_name_taken_is_never_overwritten() {
 }
 
 #[test]
+fn a_photos_look_files_go_with_it_and_come_back() {
+    let w = World::new("photos-looks");
+    let (cat, _, b) = w.open(&["a", "b"]);
+    let looks = ["IMG_0001.JPG.warm.lut.png", "IMG_0001.JPG.cool.lut.png"];
+    let trip = native(&w.disk("a"), TRIP);
+    for look in looks {
+        std::fs::write(trip.join(look), look).unwrap();
+    }
+    std::fs::write(trip.join("IMG_0002.JPG.warm.lut.png"), b"another photo's").unwrap();
+    let before = w.state(&cat);
+
+    // To another disk: copied and checked like the photo.
+    let m = into(&cat, &["IMG_0001.JPG"], b, "Archive");
+    let plan = organize::plan_photo_move(&cat, &m).unwrap();
+    assert_eq!((plan.photos, plan.files.len()), (1, 3));
+    assert_eq!(plan.files.iter().filter(|f| f.role == "look").count(), 2);
+    let r = go(&cat, &m).unwrap();
+    assert_eq!((r.photos, r.files, r.copied, r.failed.len()), (1, 3, 3, 0));
+
+    let now = w.state(&cat);
+    for look in looks {
+        assert!(now.disks.contains_key(&format!(r"disk-b\Archive\{look}")), "{look}");
+        assert!(!now.disks.contains_key(&format!(r"disk-a\Photos\Trip\{look}")), "{look}");
+    }
+    assert!(now.disks.contains_key(r"disk-a\Photos\Trip\IMG_0002.JPG.warm.lut.png"));
+    // The catalog followed the photo and still knows no look file.
+    assert_eq!(now.photos, before.photos);
+    assert!(!now.files.iter().any(|f| f.2.ends_with(".lut.png")), "{:?}", now.files);
+    w.settled(&cat);
+    w.rescan_changes_nothing(&cat);
+
+    let undone = back(&cat, &r);
+    assert_eq!((undone.files, undone.failed.len()), (3, 0));
+    let now = w.state(&cat);
+    assert_eq!((&now.files, &now.disks, now.photos), (&before.files, &before.disks, before.photos));
+}
+
+#[test]
+fn a_look_files_name_taken_is_never_overwritten() {
+    let w = World::new("photos-look-taken");
+    let (cat, a, _) = w.open(&["a", "b"]);
+    let trip = native(&w.disk("a"), TRIP);
+    std::fs::write(trip.join("IMG_0001.JPG.warm.lut.png"), b"its own").unwrap();
+    let theirs = native(&w.disk("a"), r"Photos\2026\IMG_0001.JPG.warm.lut.png");
+    std::fs::write(&theirs, b"another photo's").unwrap();
+
+    // Only the look file's name is taken: that is enough to leave the photo.
+    let m = into(&cat, &["IMG_0001.JPG"], a, Y2026);
+    let plan = organize::plan_photo_move(&cat, &m).unwrap();
+    assert_eq!((plan.files.len(), plan.left[0].why.as_str()), (0, "taken"));
+
+    // Keep both: the look file is numbered with its photo.
+    let r = go(&cat, &PhotoMove { number_clashes: true, ..m }).unwrap();
+    assert_eq!((r.photos, r.files, r.numbered), (1, 2, 2));
+    let now = w.state(&cat);
+    for f in ["IMG_0001 (2).JPG", "IMG_0001 (2).JPG.warm.lut.png"] {
+        assert!(now.disks.contains_key(&format!(r"disk-a\Photos\2026\{f}")), "{f}");
+    }
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"another photo's");
+    w.settled(&cat);
+    w.rescan_changes_nothing(&cat);
+}
+
+#[test]
 fn a_copy_already_there_leaves_the_photo() {
     let w = World::new("photos-copy-there");
     let (cat, a, _) = w.open(&["a", "b"]);

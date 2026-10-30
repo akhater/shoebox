@@ -7,7 +7,7 @@ interface Props {
   onClose: () => void;
 }
 
-const ROLE = { photo: "", twin: "JPEG twin", edits: "Argentum edits" } as const;
+const ROLE = { photo: "", twin: "JPEG twin", edits: "Argentum edits", look: "Look file" } as const;
 const SHOWN_FILES = 500;
 
 /** "Delete marked files…": what would go, disk by disk, then a confirmed delete. */
@@ -43,6 +43,7 @@ export function DeleteDialog({ onDone, onClose }: Props) {
   const bytes = chosen.reduce((n, d) => n + d.bytes, 0);
   const twins = chosenFiles.filter((f) => f.role === "twin").length;
   const edits = chosenFiles.filter((f) => f.role === "edits").length;
+  const looks = chosenFiles.filter((f) => f.role === "look").length;
   const toggle = (id: number) => setTicked((t) => (t.includes(id) ? t.filter((x) => x !== id) : [...t, id]));
 
   const confirm = async () => {
@@ -108,10 +109,14 @@ export function DeleteDialog({ onDone, onClose }: Props) {
                 </li>
               ))}
             </ul>
-            {(twins > 0 || edits > 0) && (
+            {(twins > 0 || edits > 0 || looks > 0) && (
               <p className="note">
                 Includes{" "}
-                {[twins && `${fmtNum(twins)} JPEG twin${twins === 1 ? "" : "s"} of RAW files`, edits && `${fmtNum(edits)} Argentum edit file${edits === 1 ? "" : "s"}`]
+                {[
+                  twins && `${fmtNum(twins)} JPEG twin${twins === 1 ? "" : "s"} of RAW files`,
+                  edits && `${fmtNum(edits)} Argentum edit file${edits === 1 ? "" : "s"}`,
+                  looks && `${fmtNum(looks)} look file${looks === 1 ? "" : "s"}`,
+                ]
                   .filter(Boolean)
                   .join(" and ")}
                 .

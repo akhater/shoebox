@@ -470,7 +470,7 @@ export interface PhotoMovePlan {
     /** Its name in the folder (numbered when keeping both). */
     name: string;
     size: number;
-    role: "photo" | "twin" | "edits";
+    role: "photo" | "twin" | "edits" | "look";
     /** To another disk: copied, checked, then the original removed. */
     copied: boolean;
   }[];
@@ -562,8 +562,8 @@ export const api = {
 export interface PlanFile {
   path: string;
   size: number;
-  /** "photo", "twin" (the RAW's camera JPEG) or "edits" (Argentum sidecar) */
-  role: "photo" | "twin" | "edits";
+  /** "photo", "twin" (the RAW's camera JPEG), "edits" (Argentum sidecar) or "look" (a look file) */
+  role: "photo" | "twin" | "edits" | "look";
   volumeId: number;
 }
 

@@ -76,6 +76,9 @@ impl Catalog {
         };
         cat.refresh_volumes()?;
         cat.refresh_roots()?;
+        if let Err(e) = cat.forget_look_files() {
+            log::warn!("taking look files out of the catalog: {e:#}");
+        }
         Ok(cat)
     }
 
@@ -485,6 +488,44 @@ impl Catalog {
         self.drop_previews(&gone)?;
         report.photos = gone.len();
         Ok(report)
+    }
+
+    /// Takes look files ([`crate::formats::is_look`]) out of the catalog, at
+    /// each start: a Shoebox that took them for photos may have listed them,
+    /// and an older one can still run on this catalog. They were never photos
+    /// and no scan sees them now, so left there they would turn missing. Told
+    /// by name, on unplugged disks too. **No file is touched**. A photo left
+    /// with no file goes with its preview, faces and tags; one with another
+    /// copy stays.
+    fn forget_look_files(&self) -> Result<()> {
+        let looks: Vec<(i64, Option<i64>)> = self
+            .read()?
+            .prepare("SELECT id, photo_id FROM files WHERE name LIKE ?1")?
+            .query_map([format!("%{}", crate::formats::LOOK_END)], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        if looks.is_empty() {
+            return Ok(());
+        }
+        let mut gone = Vec::new();
+        {
+            let mut db = self.db();
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            for (file, _) in &looks {
+                tx.execute("DELETE FROM files WHERE id = ?1", [file])?;
+            }
+            for pid in looks.iter().filter_map(|l| l.1) {
+                let left: bool =
+                    tx.query_row("SELECT EXISTS (SELECT 1 FROM files WHERE photo_id = ?1)", [pid], |r| r.get(0))?;
+                if !left && !gone.contains(&pid) {
+                    gone.push(pid);
+                }
+            }
+            forget_photos(&tx, &gone)?;
+            tx.commit()?;
+        }
+        self.drop_previews(&gone)?;
+        log::info!("{} look files taken out of the catalog", looks.len());
+        Ok(())
     }
 
     /// The files of `photo_ids` listed as present that are gone from their

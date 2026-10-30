@@ -26,6 +26,7 @@ mod grouping_replay;
 mod half_read;
 mod kill_safe_organize;
 mod look_alikes_join;
+mod look_files;
 mod more_faces;
 mod namesakes;
 mod people_check;

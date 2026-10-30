@@ -98,7 +98,11 @@ const LEFT_WHY: Record<LeftWhy, (n: number, to: string) => string> = {
 };
 /** "IMG_1.JPG, IMG_2.JPG, IMG_3.JPG…" */
 const someNames = (names: string[]) => names.slice(0, 3).join(", ") + (names.length > 3 ? "…" : "");
-const ROLE_WORDS = { twin: ["JPEG twin of a RAW file", "JPEG twins of RAW files"], edits: ["edit file", "edit files"] } as const;
+const ROLE_WORDS = {
+  twin: ["JPEG twin of a RAW file", "JPEG twins of RAW files"],
+  edits: ["edit file", "edit files"],
+  look: ["look file", "look files"],
+} as const;
 const SHOWN_FILES = 500;
 
 interface Props {
@@ -335,7 +339,7 @@ export function MoveDialog(p: Props) {
     plan.left.forEach((l) => byWhy.set(l.why, (byWhy.get(l.why) ?? 0) + 1));
     const taken = plan.left.filter((l) => l.why === "taken");
     const renamed = plan.files.filter((f) => f.name !== f.from.slice(Math.max(f.from.lastIndexOf("\\"), f.from.lastIndexOf("/")) + 1));
-    const roles = (["twin", "edits"] as const)
+    const roles = (["twin", "edits", "look"] as const)
       .map((role) => [role, plan.files.filter((f) => f.role === role).length] as const)
       .filter(([, n]) => n > 0)
       .map(([role, n]) => `${fmtNum(n)} ${ROLE_WORDS[role][n === 1 ? 0 : 1]}`);
