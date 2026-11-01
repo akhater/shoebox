@@ -140,11 +140,14 @@ jobs:
       - name: Test the window
         run: npm test
 
+      # The cached build holds the image's Xcode path and the automatic key
+      # doesn't name the macOS version, so a new image needs a new key here.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt, clippy
           rustflags: ''
           cache-workspaces: src-tauri
+          cache-key: macos-15
 
       - name: cargo clippy
         working-directory: src-tauri
