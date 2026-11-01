@@ -121,7 +121,7 @@ jobs:
   # view and TLS, so nothing to install.
   macos:
     name: macos
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
