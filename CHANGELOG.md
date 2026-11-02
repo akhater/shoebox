@@ -49,6 +49,19 @@ Newest first. Same format and versioning as Argentum.
   "Show: Unturned | Turned" (it was "As they are", the words of "Leave them
   as they are"), in the banner and in the viewer.
 
+### Changed
+
+- **The RAW reader is updated to the one Argentum uses.** It now decodes Nikon
+  High Efficiency and High Efficiency* NEFs and Canon EOS R8 Mark II files,
+  and corrects the colour data of the Canon 1000D, Nikon Z 9 and Z fc, Olympus
+  E-M1X and Pentax K-S2, and how dark, noisy shadows are developed at high
+  ISO. Shoebox shows a RAW from the camera's own JPEG, so these files looked
+  the same here before; the new decoding matters when a photo has to be
+  developed from the RAW itself, and for an R8 Mark II's details, which the
+  reader can now open. Scanning 6,526 files (5,434 Canon 5D Mark II and R6
+  Mark III RAWs) before and after gave identical photos, details, focus
+  points, previews and thumbnails.
+
 ## 26.43.3 - 2026-10-22
 
 ### Added

@@ -9,7 +9,7 @@ name: CI
 # and the tests on those systems, as separate jobs so one failing doesn't
 # hide the others: recognising a disk, reading an image and building a path
 # differ on each system, and a release build is too late to find out. Only
-# `check` is a required status check; the other two report on their own.
+# `check` is a required status check; the other jobs report on their own.
 on:
   pull_request:
   push:
@@ -156,3 +156,32 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test --lib --test '*'
+
+  # Shoebox and Argentum read RAW files through the same rawler revision, so a
+  # photo reads the same in both. This warns when the two differ; it never
+  # fails, and it isn't required: a revision moves in one app a pull request
+  # before the other.
+  rawler-rev:
+    name: rawler rev
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare with Argentum's rawler revision
+        run: |
+          # The 40-character revision on a Cargo.toml's `rawler = ...` line.
+          rev_of() {
+            sed -nE 's/^rawler[[:space:]]*=.*rev[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' | head -n 1
+          }
+          mine=$(rev_of < src-tauri/Cargo.toml || true)
+          other=$(curl -fsSL --max-time 20 https://raw.githubusercontent.com/akhater/Argentum/main/src-tauri/Cargo.toml || true)
+          theirs=$(printf '%s\n' "$other" | rev_of || true)
+          if [ -z "$mine" ] || [ -z "$theirs" ]; then
+            echo "::warning title=rawler rev::Could not compare rawler revisions (Shoebox: ${mine:-not found}, Argentum: ${theirs:-not found})."
+          elif [ "$mine" != "$theirs" ]; then
+            echo "::warning title=rawler rev::Shoebox reads RAW files with rawler ${mine:0:9} and Argentum with ${theirs:0:9}. Both apps should move to the same revision together."
+          else
+            echo "Shoebox and Argentum both use rawler ${mine:0:9}."
+          fi
+          exit 0
