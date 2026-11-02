@@ -1758,10 +1758,10 @@ describe("editing in Argentum", () => {
     const host = await renderApp();
     await doubleClick(tile(host, 201));
     await wait(100);
-    await click(viewer(host).querySelector(".edit-pill")!);
+    await click(viewer(host)!.querySelector(".edit-pill")!);
     await wait(30);
     expect(asked(be)).toEqual([201]);
-    expect(viewer(host).querySelector(".viewer-hint")!.textContent).toBe("Opening IMG_201.CR3 in Argentum…");
+    expect(viewer(host)!.querySelector(".viewer-hint")!.textContent).toBe("Opening IMG_201.CR3 in Argentum…");
     expect(viewer(host)).toBeTruthy();
 
     await key(window as unknown as Element, "ArrowRight");
@@ -1769,7 +1769,7 @@ describe("editing in Argentum", () => {
     await key(window as unknown as Element, "e");
     await wait(30);
     expect(asked(be)).toEqual([201, 202]);
-    expect(viewer(host).querySelector(".viewer-hint")!.textContent).toBe("Plug in Trips 2 to edit this photo.");
+    expect(viewer(host)!.querySelector(".viewer-hint")!.textContent).toBe("Plug in Trips 2 to edit this photo.");
   });
 
   test("not on this computer: Shoebox asks, remembers where it is and opens the photo", async () => {
@@ -1804,7 +1804,7 @@ describe("editing in Argentum", () => {
     const saved = be.calls.filter((c) => c.cmd === "save_settings").map((c) => (c.args.settings as { argentumPath: string }).argentumPath);
     expect(saved).toEqual(["E:\Portable\Argentum.exe"]);
     expect(asked(be)).toEqual([201, 201, 201]);
-    expect(viewer(host).querySelector(".viewer-hint")!.textContent).toBe("Opening IMG_201.CR3 in Argentum…");
+    expect(viewer(host)!.querySelector(".viewer-hint")!.textContent).toBe("Opening IMG_201.CR3 in Argentum…");
   });
 
   test("Get Argentum opens its page, and nothing else", async () => {
