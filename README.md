@@ -74,6 +74,10 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   search and script until that password opens them again, and Shoebox's own
   copies of them are sealed on disk. The photo files are never touched.
   Give a space a name and it shows next to Private while it is open.
+- **Edit in Argentum.** Press E to open a photo in
+  [Argentum](https://github.com/akhater/argentum/releases/latest), the RAW
+  editor, on Windows, macOS and Linux. If the photo's drive is unplugged,
+  Shoebox says which drive to connect.
 - **Scriptable.** Everything the window does is also available from
   `shoebox-cli`, with JSON output, for scripts and AI agents.
 
@@ -208,6 +212,7 @@ shoebox-cli people               # everyone found, with their names
 shoebox-cli people-check         # likely mix-ups among named people
 shoebox-cli turn right 42        # a quarter turn clockwise, in Shoebox only
 shoebox-cli sideways             # photos that look sideways or upside down
+shoebox-cli argentum 42          # open a photo in Argentum
 shoebox-cli focus "D:\Photos\IMG_0001.CR3"   # where the camera focused, as Shoebox reads it
 shoebox-cli cull '{}' '{"kind":"root","id":1}'   # a folder as Cull shows it: bursts, problems, suggestions
 shoebox-cli models               # which AI models are installed

@@ -8,6 +8,7 @@ import {
   ImageOff,
   Layers,
   LockKeyhole,
+  SlidersHorizontal,
   Trash2,
   Undo2,
   UserX,
@@ -65,6 +66,10 @@ interface Props {
   onClose: (picked?: number[]) => void;
   /** Marks the photo for deletion, or unmarks it. */
   onToggleMark: () => void;
+  /** Hands a photo to Argentum; `say` tells what came of it. */
+  onEdit: (id: number, say: (text: string) => void) => void;
+  /** A dialog over the viewer: keys are its. */
+  paused: boolean;
   /** A missing photo: takes it out of the catalog (asks first). */
   onForget: () => void;
   /** Show a person's photos. */
@@ -115,6 +120,8 @@ export function Viewer({
   onIndex,
   onClose,
   onToggleMark,
+  onEdit,
+  paused,
   onForget,
   onPerson,
   onFolder,
@@ -375,7 +382,7 @@ export function Viewer({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (who) return; // "Who is this?" is open
+      if (who || paused) return; // "Who is this?" or a dialog is open
       if (e.key === "Escape") {
         if (zoom) setZoom(null);
         else if (many) setPicked(new Set([id])); // first the selection, then the viewer
@@ -392,6 +399,8 @@ export function Viewer({
         turnNow(e.shiftKey ? -1 : 1);
       } else if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey) {
         toggleFocus();
+      } else if ((e.key === "e" || e.key === "E") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (!missing) onEdit(id, setHint);
       } else if (e.key === "ArrowLeft") go(index - 1, e.shiftKey ? "range" : "only");
       else if (e.key === "ArrowRight") go(index + 1, e.shiftKey ? "range" : "only");
       else if (e.key === "Delete") {
@@ -535,6 +544,20 @@ export function Viewer({
               onPreview={previewTurn}
             />
           )
+        )}
+        {/* Not `disabled`: pressed offline it says which disk, and a press on it must not reach the stage. */}
+        {!missing && (
+          <button
+            className="edit-pill"
+            aria-disabled={!reachable}
+            onClick={(e) => {
+              e.stopPropagation();
+              onEdit(id, setHint);
+            }}
+            title={reachable ? "Edit this photo in Argentum (E)" : "Its disk isn't plugged in"}
+          >
+            <SlidersHorizontal size={16} /> Edit in Argentum
+          </button>
         )}
         {list.preview[index] === 1 && (
           <button

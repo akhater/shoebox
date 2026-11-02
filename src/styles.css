@@ -1227,7 +1227,8 @@ button {
 /* The switch for them: on the photo, bottom right, shown with the mouse over
    the photo like the other controls on it; kept while zoomed in (100% is
    where focus is checked). On: the accent colour. */
-.focus-toggle {
+.focus-toggle,
+.edit-pill {
   position: absolute;
   bottom: 20px;
   right: 16px;
@@ -1247,11 +1248,28 @@ button {
   transition: opacity 0.15s, background 0.15s;
 }
 .viewer-stage:hover .focus-toggle,
-.focus-toggle:focus-visible {
+.viewer-stage:hover .edit-pill,
+.focus-toggle:focus-visible,
+.edit-pill:focus-visible {
   opacity: 1;
 }
-.focus-toggle:hover {
+.focus-toggle:hover,
+.edit-pill:hover:not([aria-disabled="true"]) {
   background: rgba(44, 47, 53, 0.9);
+}
+/* Across from Focus points, the turn between them. */
+.edit-pill {
+  right: auto;
+  left: 16px;
+  padding: 0 14px 0 12px;
+}
+/* Its disk isn't plugged in: pressing it says which. */
+.edit-pill[aria-disabled="true"] {
+  color: var(--muted);
+  cursor: default;
+}
+.edit-pill[aria-disabled="true"] svg {
+  opacity: 0.5;
 }
 .focus-toggle[aria-pressed="true"] {
   color: var(--accent);
@@ -3702,6 +3720,12 @@ button.link:hover {
 .repoint-modal .modal-head h2 svg {
   color: var(--accent);
   flex: none;
+}
+.argentum-modal {
+  width: 460px;
+}
+.argentum-modal .note {
+  margin: 0;
 }
 .repoint-modal .lead,
 .repoint-modal .repoint-note {

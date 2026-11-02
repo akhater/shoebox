@@ -29,6 +29,9 @@ pub struct Settings {
     /// only silences it for a password holding photos: a password opening an
     /// empty space (new, or mistyped) is always warned about.
     pub private_warning: bool,
+    /// The Argentum to open photos in, when it isn't where its installers put
+    /// it. Empty: found by itself (see argentum.rs).
+    pub argentum_path: String,
 }
 
 impl Default for Settings {
@@ -43,6 +46,7 @@ impl Default for Settings {
             catalog_map_mb: 0,
             private_lock_minutes: 5,
             private_warning: true,
+            argentum_path: String::new(),
         }
     }
 }

@@ -1693,3 +1693,154 @@ describe("a source whose photos live somewhere else now", () => {
     expect(repointed(be)).toEqual([]);
   });
 });
+
+describe("editing in Argentum", () => {
+  const asked = (be: FakeBackend) => be.calls.filter((c) => c.cmd === "open_in_argentum").map((c) => c.args.photoId);
+  const status = (host: HTMLElement) => host.querySelector(".statusbar .status-left")?.textContent;
+  const rightClick = async (host: HTMLElement, id: number) => {
+    await act(async () => {
+      tile(host, id).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
+    });
+    await wait(30);
+    return host.querySelector<HTMLElement>(".folder-menu")!;
+  };
+
+  test("one photo opens from the selection bar and with E, and says so", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(tile(host, 101));
+    await wait(30);
+    await click(byText(host, ".selection-bar button", "Edit in Argentum"));
+    await wait(30);
+    expect(asked(be)).toEqual([101]);
+    expect(status(host)).toBe("Opening IMG_101.CR3 in Argentum…");
+    await key(scroller(host), "e");
+    await wait(30);
+    expect(asked(be)).toEqual([101, 101]);
+  });
+
+  test("several photos: nothing is opened, and the window says why", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await click(tile(host, 101));
+    await click(tile(host, 201), { ctrlKey: true });
+    await wait(30);
+    expect(host.querySelector(".selection-bar")!.textContent).not.toMatch(/Argentum/);
+    await key(scroller(host), "e");
+    await wait(30);
+    expect(asked(be)).toEqual([]);
+    expect(status(host)).toBe("Argentum opens one photo at a time: select just one.");
+  });
+
+  test("right-click selects the photo; its menu edits it, and leaves one out of a selection", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    const menu = await rightClick(host, 102);
+    expect(tile(host, 102).classList).toContain("is-selected");
+    expect([...menu.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Edit in Argentum E", "Tag… T", "Move to… M"]);
+    await click(byText(menu, "button", /Edit in Argentum/));
+    await wait(30);
+    expect(asked(be)).toEqual([102]);
+    expect(host.querySelector(".folder-menu")).toBeNull();
+
+    await click(tile(host, 201), { ctrlKey: true });
+    await wait(30);
+    expect(byText(await rightClick(host, 102), "button", /Edit in Argentum/).matches(":disabled")).toBe(true);
+    await key(host.querySelector(".folder-menu")!, "Escape");
+    await wait(30);
+    expect(host.querySelector(".folder-menu")).toBeNull();
+    expect(asked(be)).toEqual([102]);
+  });
+
+  test("the viewer opens the photo shown, and names the disk to plug in", async () => {
+    const be = fakeBackend();
+    be.unplugged.set(202, "Trips 2");
+    const host = await renderApp();
+    await doubleClick(tile(host, 201));
+    await wait(100);
+    await click(viewer(host)!.querySelector(".edit-pill")!);
+    await wait(30);
+    expect(asked(be)).toEqual([201]);
+    expect(viewer(host)!.querySelector(".viewer-hint")!.textContent).toBe("Opening IMG_201.CR3 in Argentum…");
+    expect(viewer(host)).toBeTruthy();
+
+    await key(window as unknown as Element, "ArrowRight");
+    await wait(100);
+    await key(window as unknown as Element, "e");
+    await wait(30);
+    expect(asked(be)).toEqual([201, 202]);
+    expect(viewer(host)!.querySelector(".viewer-hint")!.textContent).toBe("Plug in Trips 2 to edit this photo.");
+  });
+
+  test("a photo whose disk is unplugged can't be opened from anywhere", async () => {
+    const be = fakeBackend();
+    be.unplugged.set(101, "Trips 2");
+    const host = await renderApp();
+    await click(tile(host, 101));
+    await wait(30);
+    const bar = byText(host, ".selection-bar button", "Edit in Argentum");
+    expect(bar.matches(":disabled")).toBe(true);
+    expect(bar.title).toBe("Its disk isn't plugged in");
+    const item = byText(await rightClick(host, 101), "button", /Edit in Argentum/);
+    expect(item.matches(":disabled")).toBe(true);
+    await key(host.querySelector(".folder-menu")!, "Escape");
+    await wait(30);
+
+    await doubleClick(tile(host, 101));
+    await wait(100);
+    const pill = viewer(host)!.querySelector<HTMLElement>(".edit-pill")!;
+    expect(pill.getAttribute("aria-disabled")).toBe("true");
+    await click(pill);
+    await wait(30);
+    expect(viewer(host), "pressing it keeps the viewer open").toBeTruthy();
+    expect(viewer(host)!.querySelector(".viewer-hint")!.textContent).toBe("Plug in Trips 2 to edit this photo.");
+  });
+
+  test("not on this computer: Shoebox asks, remembers where it is and opens the photo", async () => {
+    const be = fakeBackend();
+    be.noArgentum();
+    const host = await renderApp();
+    await doubleClick(tile(host, 201));
+    await wait(100);
+    await key(window as unknown as Element, "e");
+    await wait(30);
+    const dialog = () => host.querySelector<HTMLElement>(".argentum-modal");
+    expect(dialog()!.textContent).toMatch(/Argentum isn't on this computer/);
+
+    // Keys are the dialog's: Escape closes it, not the viewer behind it.
+    await key(window as unknown as Element, "Escape");
+    await wait(30);
+    expect(dialog()).toBeNull();
+    expect(viewer(host)).toBeTruthy();
+
+    await key(window as unknown as Element, "e");
+    await wait(30);
+    be.pick("C:\Tools\notepad.exe");
+    await click(byText(dialog()!, "button", "Find it…"));
+    await wait(30);
+    expect(dialog()!.textContent).toMatch(/That isn't Argentum/);
+    expect(be.calls.some((c) => c.cmd === "save_settings")).toBe(false);
+
+    be.pick("E:\Portable\Argentum.exe");
+    await click(byText(dialog()!, "button", "Find it…"));
+    await wait(60);
+    expect(dialog()).toBeNull();
+    const saved = be.calls.filter((c) => c.cmd === "save_settings").map((c) => (c.args.settings as { argentumPath: string }).argentumPath);
+    expect(saved).toEqual(["E:\Portable\Argentum.exe"]);
+    expect(asked(be)).toEqual([201, 201, 201]);
+    expect(viewer(host)!.querySelector(".viewer-hint")!.textContent).toBe("Opening IMG_201.CR3 in Argentum…");
+  });
+
+  test("Get Argentum opens its page, and nothing else", async () => {
+    const be = fakeBackend();
+    be.noArgentum();
+    const host = await renderApp();
+    await click(tile(host, 101));
+    await key(scroller(host), "e");
+    await wait(30);
+    await click(byText(host, ".argentum-modal button", "Get Argentum"));
+    await wait(30);
+    expect(be.calls.filter((c) => c.cmd === "open_argentum_page")).toHaveLength(1);
+    expect(host.querySelector(".argentum-modal")).toBeTruthy();
+  });
+});

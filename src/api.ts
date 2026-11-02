@@ -386,7 +386,17 @@ export interface Settings {
   /** Warn each time a password opens private photos. Off only for a password holding photos:
    *  one opening an empty space (new, or mistyped) is always warned about. */
   privateWarning: boolean;
+  /** The Argentum to open photos in, when it isn't where its installers put it. Empty: found by itself. */
+  argentumPath: string;
 }
+
+/** What became of a photo handed to Argentum. */
+export type Handoff =
+  | { state: "opened"; path: string }
+  | { state: "noArgentum" }
+  /** Its copies are all on these disks, none plugged in. */
+  | { state: "unplugged"; disks: string[] }
+  | { state: "gone" };
 
 export interface FolderCheck {
   /** Where the catalog would actually go. */
@@ -531,6 +541,12 @@ export const api = {
   scanStatus: () => invoke<{ current: Progress | null; queued: number[] }>("scan_status"),
   revealFile: (fileId: number) => invoke<void>("reveal_file", { fileId }),
   openFile: (fileId: number) => invoke<void>("open_file", { fileId }),
+  openInArgentum: (photoId: number) => invoke<Handoff>("open_in_argentum", { photoId }),
+  /** The Argentum photos open in, with `chosen` as the setting. */
+  argentumFound: (chosen: string) => invoke<string | null>("argentum_found", { chosen }),
+  /** The program `path` names, when it is Argentum. */
+  argentumChosen: (path: string) => invoke<string | null>("argentum_chosen", { path }),
+  openArgentumPage: () => invoke<void>("open_argentum_page"),
   settings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
   renameVolume: (volumeId: number, label: string) => invoke<void>("rename_volume", { volumeId, label }),

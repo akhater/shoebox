@@ -72,6 +72,8 @@ export function SettingsDialog({
   const [error, setError] = useState<string | null>(null);
   const [check, setCheck] = useState<FolderCheck | null>(null);
   const [moving, setMoving] = useState<MoveProgress | null>(null);
+  // The Argentum photos open in; undefined until asked.
+  const [argentum, setArgentum] = useState<string | null>();
 
   useEffect(() => {
     api.settings().then(setS).catch((e) => setError(String(e)));
@@ -89,6 +91,12 @@ export function SettingsDialog({
   useEffect(() => {
     if (privateQuieted) setS((now) => now && { ...now, privateWarning: false });
   }, [privateQuieted]);
+
+  const chosenArgentum = s?.argentumPath;
+  useEffect(() => {
+    if (chosenArgentum == null) return;
+    api.argentumFound(chosenArgentum).then(setArgentum).catch(() => setArgentum(null));
+  }, [chosenArgentum]);
 
   const busy = moving !== null && !moving.error;
 
@@ -108,6 +116,19 @@ export function SettingsDialog({
     if (typeof dir !== "string") return;
     try {
       setCheck(await api.checkCatalogFolder(dir));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const pickArgentum = async () => {
+    setError(null);
+    const path = await open({ multiple: false, title: "Where is Argentum?" });
+    if (typeof path !== "string") return;
+    try {
+      const program = await api.argentumChosen(path);
+      if (program) setS((now) => now && { ...now, argentumPath: program });
+      else setError("That isn't Argentum: look for the program named Argentum.");
     } catch (e) {
       setError(String(e));
     }
@@ -349,6 +370,24 @@ export function SettingsDialog({
                   </span>
                 </div>
               )}
+            </div>
+            <div className="field">
+              <span className="field-label">Argentum</span>
+              <div className="row">
+                <code className="grow">{argentum === undefined ? "…" : (argentum ?? "Not on this computer")}</code>
+                {s.argentumPath && (
+                  <button className="btn small ghost" onClick={() => setS({ ...s, argentumPath: "" })}>
+                    Automatic
+                  </button>
+                )}
+                <button className="btn small" onClick={pickArgentum}>
+                  Choose…
+                </button>
+              </div>
+              <small>
+                Where photos open to be edited (E). Shoebox finds it where its installer puts it: choose it only if it
+                lives somewhere else.
+              </small>
             </div>
             <div className="field">
               <span className="field-label">Updates</span>
