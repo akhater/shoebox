@@ -45,6 +45,8 @@ interface Props {
   onMark: (ids: number[], marked: boolean) => void;
   /** T: tag these photos. */
   onTag: (ids: number[]) => void;
+  /** E: edit these photos in Argentum, which opens one at a time. */
+  onEdit?: (ids: number[]) => void;
   /** M: move these photos to another folder. Set where photos can move: they can also be dragged onto a folder. */
   onMove?: (ids: number[]) => void;
   /** R / Shift+R: turn these photos a quarter turn clockwise (1) or counter-clockwise (-1). */
@@ -93,11 +95,78 @@ function dragPicture(list: PhotoList, ids: number[], count: number) {
 }
 
 
+/** What can be done with a photo, or the selection it is in: right-click on it, or the Menu key. */
+function PhotoMenu({
+  x,
+  y,
+  ids,
+  onEdit,
+  onTag,
+  onMove,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  ids: number[];
+  onEdit?: () => void;
+  onTag: () => void;
+  onMove?: () => void;
+  onClose: () => void;
+}) {
+  const act = (fn: () => void) => () => {
+    onClose();
+    fn();
+  };
+  return (
+    <div
+      className="menu folder-menu"
+      role="menu"
+      style={{ left: Math.min(x, window.innerWidth - 220), top: Math.min(y, window.innerHeight - 120) }}
+      ref={(el) => {
+        if (el && !el.contains(document.activeElement)) el.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        const items = [...e.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+        const i = items.indexOf(e.target as HTMLButtonElement);
+        if (e.key === "Escape" || e.key === "Tab") {
+          e.preventDefault();
+          onClose();
+        } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+        }
+      }}
+    >
+      {onEdit && (
+        <button
+          role="menuitem"
+          disabled={ids.length > 1}
+          onClick={act(onEdit)}
+          title={ids.length > 1 ? "Argentum opens one photo at a time" : undefined}
+        >
+          Edit in Argentum <span className="shortcut">E</span>
+        </button>
+      )}
+      <button role="menuitem" onClick={act(onTag)}>
+        Tag… <span className="shortcut">T</span>
+      </button>
+      {onMove && (
+        <button role="menuitem" onClick={act(onMove)}>
+          Move to… <span className="shortcut">M</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
 /** Drawn again only when what it shows changes (not for every update of the window). */
 export const PhotoGrid = memo(function PhotoGrid(p: Props) {
   const { list, rowHeight, focusIndex, selected, onSelect, flatLabel } = p;
   const scroller = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
+  const [menu, setMenu] = useState<{ x: number; y: number; ids: number[] } | null>(null);
   const [viewport, setViewport] = useState({ top: 0, height: 0 });
   // Where Shift+click / Shift+arrows ranges start.
   const anchor = useRef<number | null>(null);
@@ -161,6 +230,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
 
   const frame = useRef(0);
   const onScroll = () => {
+    setMenu(null);
     cancelAnimationFrame(frame.current);
     frame.current = requestAnimationFrame(() => {
       const el = scroller.current;
@@ -194,6 +264,24 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
     }
     onSelect(i, next);
   };
+
+  /** The photo's menu at `x`, `y`: for the selection when it is in it, else for it alone (selected first). */
+  const openMenu = (i: number, x: number, y: number) => {
+    const id = list.ids[i];
+    if (!selected.has(id)) moveTo(i);
+    setMenu({ x, y, ids: selected.has(id) ? list.ids.filter((x) => selected.has(x)) : [id] });
+  };
+  const closeMenu = () => {
+    setMenu(null);
+    scroller.current?.focus({ preventScroll: true });
+  };
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const events = ["pointerdown", "click", "blur", "resize"];
+    events.forEach((name) => window.addEventListener(name, close));
+    return () => events.forEach((name) => window.removeEventListener(name, close));
+  }, [menu]);
 
   /** The photo above/below `i` (dir -1/+1), `skip` pixels away at least, nearest horizontally. */
   const vertical = (i: number, dir: number, skip = 0) => {
@@ -271,6 +359,21 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
         onSelect(cur, new Set());
         e.stopPropagation();
         break;
+      case "ContextMenu": {
+        const tile = scroller.current?.querySelector(".tile.is-focus")?.getBoundingClientRect();
+        if (cur < 0 || !tile) return;
+        openMenu(cur, tile.left + 12, tile.top + 12);
+        break;
+      }
+      case "e":
+      case "E": {
+        if (ctrl || e.altKey || !p.onEdit) return;
+        const ids = list.ids.filter((id) => selected.has(id));
+        if (!ids.length && cur >= 0) ids.push(list.ids[cur]);
+        if (!ids.length) return;
+        p.onEdit(ids);
+        break;
+      }
       case "t":
       case "T": {
         if (ctrl) return;
@@ -414,6 +517,11 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                       moveTo(t.index, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey });
                     }}
                     onDoubleClick={() => p.onOpen(t.index)}
+                    onContextMenu={(e) => {
+                      if (!p.keyboard) return;
+                      scroller.current?.focus({ preventScroll: true });
+                      openMenu(t.index, e.clientX, e.clientY);
+                    }}
                     title={
                       marked
                         ? "Marked for deletion (Delete to unmark)"
@@ -502,6 +610,15 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
           )}
         </div>
       </div>
+      {menu && (
+        <PhotoMenu
+          {...menu}
+          onEdit={p.onEdit && (() => p.onEdit!(menu.ids))}
+          onTag={() => p.onTag(withFrames(list, menu.ids))}
+          onMove={p.onMove && (() => p.onMove!(withFrames(list, menu.ids)))}
+          onClose={closeMenu}
+        />
+      )}
       {rail && (
         <TimelineRail
           marks={marks}

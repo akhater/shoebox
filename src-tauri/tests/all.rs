@@ -7,6 +7,7 @@
 //! `cargo test --test all <file>::`.
 
 mod answers_kept;
+mod argentum;
 mod catalog_memory;
 mod catalog_move;
 mod cli_faces_reset;

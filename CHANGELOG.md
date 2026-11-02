@@ -6,6 +6,17 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **Edit in Argentum.** A photo opens in Argentum, the RAW editor, in one
+  step: press E, or use "Edit in Argentum" on the photo in the viewer, in the
+  selection bar, or in the new right-click menu on a thumbnail. Argentum comes
+  forward with that photo, in its open window if it has one. A photo with
+  copies opens from the copy Argentum already edited. An unplugged disk is
+  named instead, and the catalog doesn't change. Shoebox finds Argentum where
+  its installers put it, on Windows, macOS and Linux (an AppImage in
+  Applications, .local/bin or Downloads included); Settings shows which one
+  it uses and can point to another. If there is none, Shoebox says where to
+  get it or lets you show it where it is, then opens the photo. Headless:
+  `shoebox-cli argentum`.
 - **Move photos to another folder, one or many.** Drag the selected photos
   (or the one under the pointer) onto a folder in the sidebar, or press
   "Move to..." in the selection bar (M) to pick one: find it by name, take

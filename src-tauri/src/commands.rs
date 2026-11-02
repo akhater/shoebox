@@ -580,6 +580,30 @@ pub async fn open_file(state: State<'_, AppState>, file_id: i64) -> Res<()> {
     shell_open(&path, false)
 }
 
+/// Hands a photo to Argentum, or says why it can't.
+#[tauri::command]
+pub async fn open_in_argentum(state: State<'_, AppState>, photo_id: i64) -> Res<crate::argentum::Handoff> {
+    let cat = state.cat.clone();
+    blocking(move || crate::argentum::open(&cat, photo_id)).await
+}
+
+/// The Argentum photos open in, as Settings has it now.
+#[tauri::command]
+pub async fn argentum_found(chosen: String) -> Res<Option<String>> {
+    blocking(move || Ok(crate::argentum::find(&chosen).map(|p| p.display().to_string()))).await
+}
+
+/// The program `path` names, when it is Argentum.
+#[tauri::command]
+pub async fn argentum_chosen(path: String) -> Res<Option<String>> {
+    blocking(move || Ok(crate::argentum::program(Path::new(&path)).map(|p| p.display().to_string()))).await
+}
+
+#[tauri::command]
+pub async fn open_argentum_page() -> Res<()> {
+    shell_open(crate::argentum::RELEASES_PAGE, false)
+}
+
 /// Opens a file or folder with its usual app, or (`select`) shows the file
 /// selected in its folder: Explorer, Finder, or the desktop's file manager.
 fn shell_open(path: &str, select: bool) -> Res<()> {
