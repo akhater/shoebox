@@ -40,6 +40,10 @@
 //!                                {"kind":"folder","volumeId":3,"relPath":"<folder>"}
 //!                                "problems": what Cull found wrong with it, once measured (blurry,
 //!                                focus missed...): a camera that confirmed focus says nothing of shake
+//!   shoebox-cli argentum [id]    where Argentum is ("found", null when it isn't on this computer);
+//!                                with a photo's id, opens it there, as the window's Edit in
+//!                                Argentum does: "state" says what became of it: "opened" ("path":
+//!                                the copy), "noArgentum", "unplugged" ("disks" to plug in) or "gone"
 //!   shoebox-cli backup           consistent copies of the databases in backup\ (run it
 //!                                before each Kopia snapshot; see .kopiaignore)
 //!   shoebox-cli list [oldest|newest|name|added] [limit] [filters] [scope]   photos in grid order
@@ -270,7 +274,7 @@ use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::db::stored_rel;
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::scan::{self, Progress};
-use shoebox_lib::{cull, dates, focus, gear, organize, repoint, tags, upright};
+use shoebox_lib::{argentum, cull, dates, focus, gear, organize, repoint, tags, upright};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -397,6 +401,10 @@ fn main() -> anyhow::Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&logs)?);
         }
+        Some("argentum") => match args.get(1) {
+            Some(id) => println!("{}", serde_json::to_string_pretty(&argentum::open(&cat, id.parse()?)?)?),
+            None => println!("{}", serde_json::json!({ "found": argentum::find(&cat.settings().argentum_path) })),
+        },
         Some("backup") => {
             // Consistent copies of the databases in backup\ - Kopia's before-snapshot action.
             println!("{}", serde_json::to_string_pretty(&cat.backup()?)?);

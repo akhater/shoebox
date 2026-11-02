@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod argentum;
 pub mod catalog;
 pub mod cull;
 pub mod dates;
@@ -933,6 +934,10 @@ pub fn run() {
             commands::scan_status,
             commands::reveal_file,
             commands::open_file,
+            commands::open_in_argentum,
+            commands::argentum_found,
+            commands::argentum_chosen,
+            commands::open_argentum_page,
             commands::get_settings,
             commands::save_settings,
             commands::rename_volume,

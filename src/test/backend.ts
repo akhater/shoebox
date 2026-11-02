@@ -140,7 +140,13 @@ export function fakeBackend() {
   /** Names by password; an empty space's is forgotten once locked, as Shoebox does. */
   const names = new Map<string, string>();
   const status = () => ({ unlocked: open != null, photos: mine().size, name: (open != null && names.get(open)) || null });
-  let settings: Record<string, unknown> = { privateLockMinutes: 5, privateWarning: true };
+  let settings: Record<string, unknown> = { privateLockMinutes: 5, privateWarning: true, argentumPath: "" };
+  /** The Argentum found by itself. */
+  let installedArgentum: string | null = "C:\\Apps\\Argentum\\Argentum.exe";
+  /** Photos only on an unplugged disk. */
+  const unplugged = new Map<number, string>();
+  /** What the next file dialog answers. */
+  let picked: string | null = null;
   const hide = (ids: number[], confirm: unknown) => {
     if (open == null) throw new Error("Private photos are locked.");
     if (mine().size === 0 && confirm == null) throw new Error("Type the password again: no photos are private with it yet.");
@@ -293,7 +299,7 @@ export function fakeBackend() {
   const listOf = (ps: Photo[]): PhotoList => ({
     ids: ps.map((p) => p.id),
     taken: ps.map((p) => p.taken),
-    state: ps.map((p) => (missing.has(p.id) ? 0 : 2)),
+    state: ps.map((p) => (missing.has(p.id) ? 0 : unplugged.has(p.id) ? 1 : 2)),
     w: ps.map(() => 1500),
     h: ps.map(() => 1000),
     rev: ps.map((p) => revs.get(p.id) ?? 1),
@@ -536,6 +542,8 @@ export function fakeBackend() {
         return { photos: gone.length, files: gone.length };
       }
       // ask(): answered with its OK button.
+      case "plugin:dialog|open":
+        return picked;
       case "plugin:dialog|message":
         return (a.buttons as { OkCancelCustom?: [string, string] } | undefined)?.OkCancelCustom?.[0] ?? "Yes";
       case "mark_photos":
@@ -681,6 +689,18 @@ export function fakeBackend() {
       }
       case "undo_dates":
         return redate((a.done as Shifted).photos.map((p) => [p.id, -p.by]));
+      case "open_in_argentum": {
+        const id = a.photoId as number;
+        if (!(settings.argentumPath || installedArgentum)) return { state: "noArgentum" };
+        if (unplugged.has(id)) return { state: "unplugged", disks: [unplugged.get(id)] };
+        return { state: "opened", path: `D:\\Photos\\IMG_${id}.CR3` };
+      }
+      case "argentum_found":
+        return (a.chosen as string) || installedArgentum;
+      case "argentum_chosen":
+        return /argentum/i.test(a.path as string) ? a.path : null;
+      case "open_argentum_page":
+        return null;
       case "get_settings":
         return { ...settings };
       case "save_settings":
@@ -764,6 +784,16 @@ export function fakeBackend() {
     /** The files "Delete marked files…" lists. */
     filesToDelete: (files: [path: string, role: DeletePlan["files"][number]["role"]][]) => {
       deleteFiles = files.map(([path, role]) => ({ path, size: 2_000_000, role, volumeId: 1 }));
+    },
+    /** Argentum isn't on this computer. */
+    noArgentum: () => {
+      installedArgentum = null;
+    },
+    /** Photos only on an unplugged disk, by id. */
+    unplugged,
+    /** The file the next file dialog picks. */
+    pick: (path: string) => {
+      picked = path;
     },
     /** The source a photo is in now. */
     rootOf: (id: number) => photos.find((p) => p.id === id)!.root,

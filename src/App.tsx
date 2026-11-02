@@ -20,6 +20,7 @@ import {
   LockKeyholeOpen,
   RefreshCw,
   Search,
+  SlidersHorizontal,
   Sparkles,
   Tag as TagIcon,
   Trash2,
@@ -94,6 +95,7 @@ import { FixDatesDialog } from "./components/FixDatesDialog";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { FilterBar } from "./components/FilterBar";
 import { MoveDialog, movesAtOnce, rememberMoveTarget, type MoveTarget } from "./components/MoveDialog";
+import { ArgentumDialog } from "./components/ArgentumDialog";
 import { RepointDialog } from "./components/RepointDialog";
 import { StraysDialog } from "./components/StraysDialog";
 import { FindMoreDialog } from "./components/FindMoreDialog";
@@ -337,6 +339,8 @@ export default function App() {
   const [progress, setProgress] = useState<Progress | null>(null);
   const [queued, setQueued] = useState<number[]>([]);
   const [message, setMessage] = useState<Message | null>(null);
+  // Argentum wasn't found: the photo to open once it is.
+  const [findingArgentum, setFindingArgentum] = useState<{ id: number; say: (text: string, warn?: boolean) => void } | null>(null);
   // A folder on its way to another disk, and where it came from.
   const [folderMove, setFolderMove] = useState<FolderMoveEvent | null>(null);
   const movingFrom = useRef<FolderTarget | null>(null);
@@ -1231,6 +1235,23 @@ export default function App() {
   });
   const startMove = useLatest((ids: number[]) => setMovingPhotos({ ids, start: null }));
 
+  /** Hands a photo to Argentum. `say` tells what came of it, where the user is looking. */
+  const editPhoto = useLatest(async (id: number, say: (text: string, warn?: boolean) => void) => {
+    try {
+      const r = await api.openInArgentum(id);
+      if (r.state === "noArgentum") setFindingArgentum({ id, say });
+      else if (r.state === "opened") say(`Opening ${r.path.split(/[\\/]/).pop()} in Argentum…`);
+      else if (r.state === "unplugged") say(`Plug in ${r.disks.join(" or ")} to edit this photo.`, true);
+      else say("This photo's file isn't where it was, so there is nothing to open.", true);
+    } catch (e) {
+      say(String(e), true);
+    }
+  });
+  const editPhotos = useLatest((ids: number[]) => {
+    if (ids.length > 1) setMessage({ text: "Argentum opens one photo at a time: select just one.", warn: true });
+    else editPhoto(ids[0], (text, warn) => setMessage({ text, warn }));
+  });
+
   // Gear: one name per camera or lens. A view or filter on the old name follows it.
   const followGear = (kind: GearKind, from: string, to: string[]) => {
     setScope((s) => (s.kind === kind && s.name === from ? { kind, name: to[0] } : s));
@@ -1468,6 +1489,8 @@ export default function App() {
     () => (current && selected.size > 0 ? shown.ids.filter((id, i) => shown.state[i] === 0 && selected.has(id)) : []),
     [current, selected, shown],
   );
+  // The one photo selected is on a disk not plugged in.
+  const selectedOffline = selected.size === 1 && shown.state[shown.ids.indexOf([...selected][0])] === 1;
   // Selected photos that are private (listed only while their space is open).
   const privateSelected = useMemo(
     () => (unlocked && selected.size > 0 ? withFrames(shown, shown.ids.filter((id, i) => shown.private[i] === 1 && selected.has(id))) : []),
@@ -2168,6 +2191,7 @@ export default function App() {
               onSelect={selectPhotos}
               onMark={setMarked}
               onTag={setTagging}
+              onEdit={editPhotos}
               onMove={startMove}
               onTurn={sidewaysView ? undefined : turnPhotos}
               turned={turnedShown}
@@ -2186,7 +2210,8 @@ export default function App() {
                 !tagging &&
                 !reassigning &&
                 !datesOpen &&
-                !movingPhotos
+                !movingPhotos &&
+                !findingArgentum
               }
               focusRequest={gridFocus}
               focusIndex={focusIndex}
@@ -2212,6 +2237,16 @@ export default function App() {
                   <X size={15} />
                 </button>
                 <span className="vsep" />
+                {selected.size === 1 && !missingSelected.length && (
+                  <button
+                    className="btn ghost"
+                    disabled={selectedOffline}
+                    onClick={() => editPhotos([...selected])}
+                    title={selectedOffline ? "Its disk isn't plugged in" : "Edit this photo in Argentum (E)"}
+                  >
+                    <SlidersHorizontal size={15} /> Edit in Argentum
+                  </button>
+                )}
                 <button
                   className="btn ghost"
                   onClick={() => setTagging(withFrames(shown, shown.ids.filter((id) => selected.has(id))))}
@@ -2337,6 +2372,8 @@ export default function App() {
           onIndex={(i) => setViewerId(shown.ids[i])}
           onToggleMark={() => setMarked(withFrames(shown, [shown.ids[viewerIndex]]), shown.marked[viewerIndex] !== 1)}
           onForget={() => forgetMissing([shown.ids[viewerIndex]])}
+          onEdit={editPhoto}
+          paused={!!findingArgentum}
           onTagsChanged={refreshSoon}
           onPrivate={unlocked ? (isPrivate) => makePrivate([shown.ids[viewerIndex]], isPrivate) : undefined}
           onTurn={(ids, by) => turnPhotos(ids, by)}
@@ -2374,6 +2411,16 @@ export default function App() {
             <p className="muted small">Enter adds · commas add several · Esc closes. Tags stay with the photo when it moves or is copied.</p>
           </div>
         </div>
+      )}
+      {findingArgentum && (
+        <ArgentumDialog
+          onFound={(argentumPath) => {
+            const { id, say } = findingArgentum;
+            setFindingArgentum(null);
+            run(api.settings().then((s) => api.saveSettings({ ...s, argentumPath })).then(() => editPhoto(id, say)));
+          }}
+          onClose={() => setFindingArgentum(null)}
+        />
       )}
       {repointAsking && (
         <RepointDialog
