@@ -1489,9 +1489,9 @@ export default function App() {
     () => (current && selected.size > 0 ? shown.ids.filter((id, i) => shown.state[i] === 0 && selected.has(id)) : []),
     [current, selected, shown],
   );
-  // Selected photos that are private (listed only while their space is open).
-  /** The one photo selected is on a disk not plugged in. */
+  // The one photo selected is on a disk not plugged in.
   const selectedOffline = selected.size === 1 && shown.state[shown.ids.indexOf([...selected][0])] === 1;
+  // Selected photos that are private (listed only while their space is open).
   const privateSelected = useMemo(
     () => (unlocked && selected.size > 0 ? withFrames(shown, shown.ids.filter((id, i) => shown.private[i] === 1 && selected.has(id))) : []),
     [unlocked, selected, shown],

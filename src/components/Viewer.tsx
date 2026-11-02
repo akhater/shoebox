@@ -545,6 +545,7 @@ export function Viewer({
             />
           )
         )}
+        {/* Not `disabled`: pressed offline it says which disk, and a press on it must not reach the stage. */}
         {!missing && (
           <button
             className="edit-pill"
