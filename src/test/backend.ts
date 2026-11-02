@@ -299,7 +299,7 @@ export function fakeBackend() {
   const listOf = (ps: Photo[]): PhotoList => ({
     ids: ps.map((p) => p.id),
     taken: ps.map((p) => p.taken),
-    state: ps.map((p) => (missing.has(p.id) ? 0 : 2)),
+    state: ps.map((p) => (missing.has(p.id) ? 0 : unplugged.has(p.id) ? 1 : 2)),
     w: ps.map(() => 1500),
     h: ps.map(() => 1000),
     rev: ps.map((p) => revs.get(p.id) ?? 1),

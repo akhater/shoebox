@@ -548,11 +548,12 @@ export function Viewer({
         {!missing && (
           <button
             className="edit-pill"
+            aria-disabled={!reachable}
             onClick={(e) => {
               e.stopPropagation();
               onEdit(id, setHint);
             }}
-            title="Edit this photo in Argentum (E)"
+            title={reachable ? "Edit this photo in Argentum (E)" : "Its disk isn't plugged in"}
           >
             <SlidersHorizontal size={16} /> Edit in Argentum
           </button>

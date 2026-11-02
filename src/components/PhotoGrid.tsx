@@ -100,6 +100,7 @@ function PhotoMenu({
   x,
   y,
   ids,
+  offline,
   onEdit,
   onTag,
   onMove,
@@ -108,6 +109,8 @@ function PhotoMenu({
   x: number;
   y: number;
   ids: number[];
+  /** Its disk isn't plugged in. */
+  offline: boolean;
   onEdit?: () => void;
   onTag: () => void;
   onMove?: () => void;
@@ -142,9 +145,9 @@ function PhotoMenu({
       {onEdit && (
         <button
           role="menuitem"
-          disabled={ids.length > 1}
+          disabled={ids.length > 1 || offline}
           onClick={act(onEdit)}
-          title={ids.length > 1 ? "Argentum opens one photo at a time" : undefined}
+          title={ids.length > 1 ? "Argentum opens one photo at a time" : offline ? "Its disk isn't plugged in" : undefined}
         >
           Edit in Argentum <span className="shortcut">E</span>
         </button>
@@ -166,7 +169,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
   const { list, rowHeight, focusIndex, selected, onSelect, flatLabel } = p;
   const scroller = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
-  const [menu, setMenu] = useState<{ x: number; y: number; ids: number[] } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; ids: number[]; offline: boolean } | null>(null);
   const [viewport, setViewport] = useState({ top: 0, height: 0 });
   // Where Shift+click / Shift+arrows ranges start.
   const anchor = useRef<number | null>(null);
@@ -269,7 +272,7 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
   const openMenu = (i: number, x: number, y: number) => {
     const id = list.ids[i];
     if (!selected.has(id)) moveTo(i);
-    setMenu({ x, y, ids: selected.has(id) ? list.ids.filter((x) => selected.has(x)) : [id] });
+    setMenu({ x, y, ids: selected.has(id) ? list.ids.filter((x) => selected.has(x)) : [id], offline: list.state[i] === 1 });
   };
   const closeMenu = () => {
     setMenu(null);

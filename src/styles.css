@@ -1254,7 +1254,7 @@ button {
   opacity: 1;
 }
 .focus-toggle:hover,
-.edit-pill:hover {
+.edit-pill:hover:not([aria-disabled="true"]) {
   background: rgba(44, 47, 53, 0.9);
 }
 /* Across from Focus points, the turn between them. */
@@ -1262,6 +1262,14 @@ button {
   right: auto;
   left: 16px;
   padding: 0 14px 0 12px;
+}
+/* Its disk isn't plugged in: pressing it says which. */
+.edit-pill[aria-disabled="true"] {
+  color: var(--muted);
+  cursor: default;
+}
+.edit-pill[aria-disabled="true"] svg {
+  opacity: 0.5;
 }
 .focus-toggle[aria-pressed="true"] {
   color: var(--accent);

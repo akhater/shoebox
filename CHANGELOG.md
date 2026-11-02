@@ -10,8 +10,9 @@ Newest first. Same format and versioning as Argentum.
   step: press E, or use "Edit in Argentum" on the photo in the viewer, in the
   selection bar, or in the new right-click menu on a thumbnail. Argentum comes
   forward with that photo, in its open window if it has one. A photo with
-  copies opens from the copy Argentum already edited. An unplugged disk is
-  named instead, and the catalog doesn't change. Shoebox finds Argentum where
+  copies opens from the copy Argentum already edited. While a photo's disk is
+  unplugged the action is greyed out and pressing it names the disk; the
+  catalog doesn't change. Shoebox finds Argentum where
   its installers put it, on Windows, macOS and Linux (an AppImage in
   Applications, .local/bin or Downloads included); Settings shows which one
   it uses and can point to another. If there is none, Shoebox says where to

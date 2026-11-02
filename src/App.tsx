@@ -1490,6 +1490,8 @@ export default function App() {
     [current, selected, shown],
   );
   // Selected photos that are private (listed only while their space is open).
+  /** The one photo selected is on a disk not plugged in. */
+  const selectedOffline = selected.size === 1 && shown.state[shown.ids.indexOf([...selected][0])] === 1;
   const privateSelected = useMemo(
     () => (unlocked && selected.size > 0 ? withFrames(shown, shown.ids.filter((id, i) => shown.private[i] === 1 && selected.has(id))) : []),
     [unlocked, selected, shown],
@@ -2238,8 +2240,9 @@ export default function App() {
                 {selected.size === 1 && !missingSelected.length && (
                   <button
                     className="btn ghost"
+                    disabled={selectedOffline}
                     onClick={() => editPhotos([...selected])}
-                    title="Edit this photo in Argentum (E)"
+                    title={selectedOffline ? "Its disk isn't plugged in" : "Edit this photo in Argentum (E)"}
                   >
                     <SlidersHorizontal size={15} /> Edit in Argentum
                   </button>

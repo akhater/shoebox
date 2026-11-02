@@ -1772,6 +1772,30 @@ describe("editing in Argentum", () => {
     expect(viewer(host)!.querySelector(".viewer-hint")!.textContent).toBe("Plug in Trips 2 to edit this photo.");
   });
 
+  test("a photo whose disk is unplugged can't be opened from anywhere", async () => {
+    const be = fakeBackend();
+    be.unplugged.set(101, "Trips 2");
+    const host = await renderApp();
+    await click(tile(host, 101));
+    await wait(30);
+    const bar = byText(host, ".selection-bar button", "Edit in Argentum");
+    expect(bar.matches(":disabled")).toBe(true);
+    expect(bar.title).toBe("Its disk isn't plugged in");
+    const item = byText(await rightClick(host, 101), "button", /Edit in Argentum/);
+    expect(item.matches(":disabled")).toBe(true);
+    await key(host.querySelector(".folder-menu")!, "Escape");
+    await wait(30);
+
+    await doubleClick(tile(host, 101));
+    await wait(100);
+    const pill = viewer(host)!.querySelector<HTMLElement>(".edit-pill")!;
+    expect(pill.getAttribute("aria-disabled")).toBe("true");
+    await click(pill);
+    await wait(30);
+    expect(viewer(host), "pressing it keeps the viewer open").toBeTruthy();
+    expect(viewer(host)!.querySelector(".viewer-hint")!.textContent).toBe("Plug in Trips 2 to edit this photo.");
+  });
+
   test("not on this computer: Shoebox asks, remembers where it is and opens the photo", async () => {
     const be = fakeBackend();
     be.noArgentum();
