@@ -48,7 +48,7 @@ fern = { version = "0.7", features = ["date-based"] }
 chrono = "0.4"
 rusqlite = { version = "0.37", features = ["bundled"] }
 # Same RAW reader and revision as Argentum, so both apps read files identically.
-rawler = { git = "https://github.com/akhater/RapidRAW-DngLab.git", rev = "16b9b01068ac1f7a9b5319705a075ef6c7789d7a" }
+rawler = { git = "https://github.com/akhater/RapidRAW-DngLab.git", rev = "734763ba431111d0cfaa01b02152a5b6e7b834d3" }
 image = "0.25.10"
 kamadak-exif = "0.6.1"
 # Decodes a camera's embedded JPEG at 1/2, 1/4, 1/8 size straight from the compressed data.
