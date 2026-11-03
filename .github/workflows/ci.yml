@@ -73,7 +73,7 @@ jobs:
       # view costs a fraction of the whole catalog (view_cost).
       - name: cargo test
         working-directory: src-tauri
-        run: cargo test --lib --test '*'
+        run: cargo test --lib --test '*' --workspace
 
   # The same checks as `check`, on Linux. The window is WebKitGTK there, and
   # the build needs its libraries (the list release.yml installs).
@@ -115,7 +115,7 @@ jobs:
 
       - name: cargo test
         working-directory: src-tauri
-        run: cargo test --lib --test '*'
+        run: cargo test --lib --test '*' --workspace
 
   # The same checks as `check`, on macOS (Apple silicon). The system's own web
   # view and TLS, so nothing to install.
@@ -155,7 +155,7 @@ jobs:
 
       - name: cargo test
         working-directory: src-tauri
-        run: cargo test --lib --test '*'
+        run: cargo test --lib --test '*' --workspace
 
   # Shoebox and Argentum read RAW files through the same rawler revision, so a
   # photo reads the same in both. This warns when the two differ; it never
