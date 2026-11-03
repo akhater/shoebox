@@ -47,10 +47,11 @@ same test from the same values (`src/edited.rs`).
 
 That is proven, not assumed: a differential check ran Argentum's own code and
 this crate on the same sidecars and required the same answer for each, for a
-RAW photo and for any other: 5,762 generated sidecars (every editor value moved
+RAW photo and for any other: 6,237 generated sidecars (every editor value moved
 off its default one at a time, alone and among the editor's defaults; edges of
 each rule; film looks; malformed files and text Argentum's reader refuses;
-random mixes) and 295 real ones, 12,114 answers, all identical.
+random mixes; null, missing and array-written fields of every shape the rule
+reads) and 295 real ones, 13,064 answers, all identical.
 `tests/fixtures/generated.jsonl` is the generated part with Argentum's
 answers, so the crate's tests guard them;
 `tests/fixtures/editor-defaults.json` is the editor's starting edit those cases

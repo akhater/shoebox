@@ -631,6 +631,10 @@ fn film_look(edit: &Facts) -> bool {
 
 /// Shapes a value must read as for the rule to count it. Most fields are only
 /// checked by reading them, never used.
+///
+/// Each shape also reads from an array of its fields in order. There a field
+/// with `#[serde(default)]` (one that may be absent) may be missing from the
+/// end, while a plain `Option` (may be null, not absent) must be there.
 #[allow(dead_code)]
 mod shape {
     use std::fmt;
@@ -715,11 +719,14 @@ mod shape {
     #[serde(deny_unknown_fields)]
     pub struct LensTable {
         source: Text,
-        default_on: Option<bool>,
+        #[serde(default)]
+        default_on: bool,
         vignetting: Option<LensCurve>,
         distortion: Option<LensCurve>,
         chromatic: Option<[LensCurve; 2]>,
+        #[serde(default)]
         always: Option<Always>,
+        #[serde(default)]
         centre: Option<[f32; 2]>,
     }
 
@@ -775,7 +782,7 @@ mod shape {
         look: Text,
         #[serde(default)]
         options: Switches,
-        #[serde(rename = "ownWb")]
+        #[serde(default, rename = "ownWb")]
         own_wb: Option<OwnWhite>,
         #[serde(default)]
         before: Before,
@@ -784,6 +791,7 @@ mod shape {
     #[derive(Deserialize)]
     struct OwnWhite {
         option: Text,
+        // May be left out of an object, but not of an array (measured).
         wb: Option<WhiteInts>,
     }
 
@@ -795,6 +803,7 @@ mod shape {
 
     /// The tone rendering the edit had before the look.
     #[derive(Deserialize, Default)]
+    #[serde(default)]
     struct Before {
         #[serde(rename = "rawToneRendering")]
         rendering: Option<Text>,
