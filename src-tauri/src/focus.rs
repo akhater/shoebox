@@ -24,7 +24,8 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // The reader itself is the `focus-points` crate; what the rest of Shoebox uses of it is named here.
-pub use focus_points::{Bracket, Focus, MODES, OLYMPUS_CAMERA_SETTINGS, Point, State, from_crw};
+pub(crate) use focus_points::OLYMPUS_CAMERA_SETTINGS;
+pub use focus_points::{Bracket, Focus, MODES, Point, State, from_crw};
 
 /// Version of how focus points are read. Photos an older version read are
 /// read again ([`find`]); raise it when Shoebox learns another maker's notes.
@@ -138,6 +139,7 @@ fn state_of(code: u8) -> State {
 /// time) with the points it used, else its points as they are.
 pub fn stored(db: &Connection, focus: Option<&Focus>) -> rusqlite::Result<Option<Vec<u8>>> {
     let Some(f) = focus else { return Ok(None) };
+    // The stored value is the index into the crate's `MODES` (plus one), so its order must never change.
     let code = f.mode.and_then(|m| MODES.iter().position(|x| *x == m)).map_or(0, |i| i as u8 + 1);
     let mut out = vec![BLOB_VERSION, code];
     let layout = f.points.len() > 1 && f.points.iter().any(|p| p.state == State::Other);

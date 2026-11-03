@@ -251,7 +251,7 @@ cargo run --bin shoebox-cli -- stats
 ```
 
 Tests: `npm test` for the window (Vitest and jsdom, against a fake backend
-in `src/test`), `cargo test` in `src-tauri` for the rest.
+in `src/test`), `cargo test --workspace` in `src-tauri` for the rest.
 
 ## Contributing
 
