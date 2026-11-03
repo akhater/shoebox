@@ -5,15 +5,20 @@
 //!
 //! Computed while the value streams past. Each value is reduced to a digest:
 //! its canonical bytes while they are short (most numbers, keys and small
-//! objects), their BLAKE3 hash once they are not, so a sidecar costs a few
-//! hashers rather than one per number. Nothing else of the value is kept but
-//! one digest per member of the object being read.
+//! objects), their BLAKE3 hash once they are not. The canonical bytes of the
+//! values being read are written one after the other in a single scratch
+//! buffer, each truncated away once its digest is taken, so a sidecar costs one
+//! buffer of a few kilobytes and a hash per long value; nothing else of the
+//! value is kept but one digest per member of the object being read.
+//! The same pass can also build the value (`Hash<true>`), for the few the
+//! edited rule reads.
 
 use std::borrow::Cow;
 use std::fmt;
 
 use serde::Deserialize;
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde_json::{Map, Value};
 
 /// The fingerprint of an edit.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,7 +33,7 @@ impl Fingerprint {
         blake3::Hash::from_bytes(self.0).to_hex().to_string()
     }
 
-    pub(crate) fn of(value: Hashed) -> Self {
+    pub(crate) fn of(value: &Hashed) -> Self {
         let mut h = blake3::Hasher::new_derive_key("agdata 2026-11 edit fingerprint v1");
         h.update(value.digest.as_slice());
         Self(*h.finalize().as_bytes())
@@ -47,11 +52,12 @@ impl fmt::Display for Fingerprint {
     }
 }
 
-/// A value's digest, and whether it is an array with something in it.
-#[derive(Clone, Copy)]
+/// A value read: its digest, whether it is an array with something in it, and
+/// the value itself when it was asked for (else null).
 pub(crate) struct Hashed {
     pub digest: Digest,
     pub non_empty_array: bool,
+    pub value: Value,
 }
 
 /// The longest canonical encoding kept as it is.
@@ -70,6 +76,19 @@ impl Digest {
     fn as_slice(&self) -> &[u8] {
         &self.bytes[..self.len as usize]
     }
+
+    fn short(encoding: &[u8]) -> Self {
+        let mut bytes = [0; SHORT];
+        bytes[..encoding.len()].copy_from_slice(encoding);
+        Digest { len: encoding.len() as u8, bytes }
+    }
+
+    fn hashed(hash: blake3::Hash) -> Self {
+        let mut bytes = [0; SHORT];
+        bytes[0] = HASHED;
+        bytes[1..33].copy_from_slice(hash.as_bytes());
+        Digest { len: 33, bytes }
+    }
 }
 
 const NULL: u8 = 0;
@@ -82,88 +101,69 @@ const ARRAY: u8 = 6;
 const OBJECT: u8 = 7;
 const HASHED: u8 = 0xff;
 
-/// Canonical bytes, kept while short and hashed from the moment they are not.
-enum Sink {
-    Short(usize, [u8; SHORT]),
-    Long(Box<Spill>),
-}
+/// Where the canonical bytes of the values being read are written, innermost
+/// last.
+pub(crate) struct Scratch(Vec<u8>);
 
-/// A hasher fed in blocks: BLAKE3 is fast on kilobytes, slow on a byte at a time.
-struct Spill {
-    hasher: blake3::Hasher,
-    len: usize,
-    block: [u8; BLOCK],
-}
-
-const BLOCK: usize = 1024;
-
-impl Spill {
-    fn write(&mut self, data: &[u8]) {
-        if self.len + data.len() > BLOCK {
-            self.hasher.update(&self.block[..self.len]);
-            self.len = 0;
-        }
-        if data.len() >= BLOCK {
-            self.hasher.update(data);
-        } else {
-            self.block[self.len..self.len + data.len()].copy_from_slice(data);
-            self.len += data.len();
-        }
-    }
-
-    fn finish(mut self) -> blake3::Hash {
-        self.hasher.update(&self.block[..self.len]);
-        self.hasher.finalize()
+impl Scratch {
+    pub fn new() -> Self {
+        Scratch(Vec::with_capacity(4096))
     }
 }
 
-impl Sink {
-    fn new(tag: u8) -> Self {
-        let mut bytes = [0; SHORT];
-        bytes[0] = tag;
-        Sink::Short(1, bytes)
+/// How much of one value's bytes waits in the scratch buffer before going to
+/// its hasher in one block.
+const BLOCK: usize = 16 * 1024;
+
+/// One array's or object's canonical bytes, from `start` in the scratch buffer.
+struct Frame {
+    start: usize,
+    hasher: Option<Box<blake3::Hasher>>,
+}
+
+impl Frame {
+    fn open(s: &mut Scratch, tag: u8) -> Frame {
+        let start = s.0.len();
+        s.0.push(tag);
+        Frame { start, hasher: None }
     }
 
-    fn write(&mut self, data: &[u8]) {
-        match self {
-            Sink::Short(len, bytes) if *len + data.len() <= SHORT => {
-                bytes[*len..*len + data.len()].copy_from_slice(data);
-                *len += data.len();
-            }
-            Sink::Short(len, bytes) => {
-                let mut spill = Box::new(Spill { hasher: blake3::Hasher::new(), len: 0, block: [0; BLOCK] });
-                spill.write(&bytes[..*len]);
-                spill.write(data);
-                *self = Sink::Long(spill);
-            }
-            Sink::Long(spill) => spill.write(data),
+    fn write(&mut self, s: &mut Scratch, data: &[u8]) {
+        s.0.extend_from_slice(data);
+        if s.0.len() - self.start >= BLOCK {
+            let hasher = self.hasher.get_or_insert_with(|| Box::new(blake3::Hasher::new()));
+            hasher.update(&s.0[self.start..]);
+            s.0.truncate(self.start);
         }
     }
 
     /// A member's digest, framed by its length.
-    fn write_digest(&mut self, d: &Digest) {
-        self.write(&[d.len]);
-        self.write(d.as_slice());
+    fn write_digest(&mut self, s: &mut Scratch, d: &Digest) {
+        self.write(s, &[d.len]);
+        self.write(s, d.as_slice());
     }
 
-    fn finish(self, non_empty_array: bool) -> Hashed {
-        let digest = match self {
-            Sink::Short(len, bytes) => Digest { len: len as u8, bytes },
-            Sink::Long(spill) => {
-                let mut bytes = [0; SHORT];
-                bytes[0] = HASHED;
-                bytes[1..33].copy_from_slice(spill.finish().as_bytes());
-                Digest { len: 33, bytes }
-            }
+    fn close(self, s: &mut Scratch) -> Digest {
+        let bytes = &s.0[self.start..];
+        let digest = match self.hasher {
+            None if bytes.len() <= SHORT => Digest::short(bytes),
+            None => Digest::hashed(blake3::hash(bytes)),
+            Some(mut hasher) => Digest::hashed(hasher.update(bytes).finalize()),
         };
-        Hashed { digest, non_empty_array }
+        s.0.truncate(self.start);
+        digest
     }
 }
 
-fn leaf(tag: u8, payload: &[u8]) -> Hashed {
-    let mut sink = Sink::new(tag);
-    sink.write(payload);
-    sink.finish(false)
+fn leaf(tag: u8, payload: &[u8]) -> Digest {
+    if 1 + payload.len() <= SHORT {
+        let mut bytes = [0; SHORT];
+        bytes[0] = tag;
+        bytes[1..1 + payload.len()].copy_from_slice(payload);
+        Digest { len: 1 + payload.len() as u8, bytes }
+    } else {
+        Digest::hashed(blake3::Hasher::new().update(&[tag]).update(payload).finalize())
+    }
 }
 
 /// A key, borrowed from the text unless it had to be unescaped.
@@ -190,35 +190,40 @@ impl<'de> Deserialize<'de> for Key<'de> {
 
 /// The members of an object, taken in key order whatever order they came in.
 #[derive(Default)]
-pub(crate) struct Members<'de>(Vec<(Cow<'de, str>, Digest)>);
+pub(crate) struct Members<'de>(Vec<(Cow<'de, str>, Hashed)>);
 
 impl<'de> Members<'de> {
     pub fn add(&mut self, key: Cow<'de, str>, value: Hashed) {
-        self.0.push((key, value.digest));
+        self.0.push((key, value));
     }
 
-    pub fn finish(mut self) -> Hashed {
+    /// The object's digest and, when `keep`, the object itself.
+    pub fn finish(mut self, s: &mut Scratch, keep: bool) -> Hashed {
         // Stable: of a key given twice, the later stays last and is kept.
         self.0.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut sink = Sink::new(OBJECT);
-        let members = &self.0;
-        for (i, (key, digest)) in members.iter().enumerate() {
-            if members.get(i + 1).is_some_and(|next| next.0 == *key) {
+        let mut frame = Frame::open(s, OBJECT);
+        let mut object = Map::new();
+        let mut members = self.0.into_iter().peekable();
+        while let Some((key, value)) = members.next() {
+            if members.peek().is_some_and(|next| next.0 == key) {
                 continue;
             }
-            sink.write(&(key.len() as u64).to_le_bytes());
-            sink.write(key.as_bytes());
-            sink.write_digest(digest);
+            frame.write(s, &(key.len() as u64).to_le_bytes());
+            frame.write(s, key.as_bytes());
+            frame.write_digest(s, &value.digest);
+            if keep {
+                object.insert(key.into_owned(), value.value);
+            }
         }
-        sink.finish(false)
+        let value = if keep { Value::Object(object) } else { Value::Null };
+        Hashed { digest: frame.close(s), non_empty_array: false, value }
     }
 }
 
-/// Hashes the value it is given.
-#[derive(Clone, Copy)]
-pub(crate) struct Hash;
+/// Hashes the value it is given and, when `KEEP`, builds it too.
+pub(crate) struct Hash<'s, const KEEP: bool>(pub &'s mut Scratch);
 
-impl<'de> DeserializeSeed<'de> for Hash {
+impl<'de, const KEEP: bool> DeserializeSeed<'de> for Hash<'_, KEEP> {
     type Value = Hashed;
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Hashed, D::Error> {
@@ -226,7 +231,13 @@ impl<'de> DeserializeSeed<'de> for Hash {
     }
 }
 
-impl<'de> Visitor<'de> for Hash {
+impl<const KEEP: bool> Hash<'_, KEEP> {
+    fn leaf(tag: u8, payload: &[u8], value: impl FnOnce() -> Value) -> Hashed {
+        Hashed { digest: leaf(tag, payload), non_empty_array: false, value: if KEEP { value() } else { Value::Null } }
+    }
+}
+
+impl<'de, const KEEP: bool> Visitor<'de> for Hash<'_, KEEP> {
     type Value = Hashed;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -234,55 +245,62 @@ impl<'de> Visitor<'de> for Hash {
     }
 
     fn visit_unit<E: serde::de::Error>(self) -> Result<Hashed, E> {
-        Ok(leaf(NULL, &[]))
+        Ok(Self::leaf(NULL, &[], || Value::Null))
     }
 
     fn visit_none<E: serde::de::Error>(self) -> Result<Hashed, E> {
-        Ok(leaf(NULL, &[]))
+        self.visit_unit()
     }
 
     fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Hashed, E> {
-        Ok(leaf(BOOL, &[v as u8]))
+        Ok(Self::leaf(BOOL, &[v as u8], || Value::Bool(v)))
     }
 
     fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Hashed, E> {
-        Ok(leaf(UNSIGNED, &v.to_le_bytes()))
+        Ok(Self::leaf(UNSIGNED, &v.to_le_bytes(), || Value::from(v)))
     }
 
     fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Hashed, E> {
-        Ok(leaf(SIGNED, &v.to_le_bytes()))
+        Ok(Self::leaf(SIGNED, &v.to_le_bytes(), || Value::from(v)))
     }
 
     fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Hashed, E> {
-        Ok(leaf(FLOAT, &v.to_bits().to_le_bytes()))
+        Ok(Self::leaf(FLOAT, &v.to_bits().to_le_bytes(), || Value::from(v)))
     }
 
     fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Hashed, E> {
-        Ok(leaf(STRING, v.as_bytes()))
+        Ok(Self::leaf(STRING, v.as_bytes(), || Value::String(v.to_owned())))
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Hashed, A::Error> {
-        let mut sink = Sink::new(ARRAY);
+        let s = self.0;
+        let mut frame = Frame::open(s, ARRAY);
+        let mut items = Vec::new();
         let mut len = 0u64;
-        while let Some(item) = seq.next_element_seed(Hash)? {
-            sink.write_digest(&item.digest);
+        while let Some(item) = seq.next_element_seed(Hash::<KEEP>(&mut *s))? {
+            frame.write_digest(s, &item.digest);
+            if KEEP {
+                items.push(item.value);
+            }
             len += 1;
         }
-        sink.write(&len.to_le_bytes());
-        Ok(sink.finish(len > 0))
+        frame.write(s, &len.to_le_bytes());
+        let value = if KEEP { Value::Array(items) } else { Value::Null };
+        Ok(Hashed { digest: frame.close(s), non_empty_array: len > 0, value })
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Hashed, A::Error> {
+        let s = self.0;
         let mut members = Members::default();
         while let Some(Key(key)) = map.next_key::<Key>()? {
-            let value = map.next_value_seed(Hash)?;
+            let value = map.next_value_seed(Hash::<KEEP>(&mut *s))?;
             members.add(key, value);
         }
-        Ok(members.finish())
+        Ok(members.finish(s, KEEP))
     }
 }
 
 /// The hash of `null`.
 pub(crate) fn null() -> Hashed {
-    leaf(NULL, &[])
+    Hashed { digest: leaf(NULL, &[]), non_empty_array: false, value: Value::Null }
 }

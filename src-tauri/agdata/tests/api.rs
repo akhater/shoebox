@@ -42,6 +42,25 @@ fn an_unreadable_sidecar_is_an_error_not_a_panic() {
 }
 
 #[test]
+fn a_part_argentum_cannot_read_spoils_the_sidecar_even_where_skipped() {
+    // A lone surrogate, or a number past f64, anywhere: Argentum's reader fails
+    // on the whole file and shows the photo unedited.
+    for bad in [
+        r#"{"version":1,"rating":0,"exif":{"a":"\ud800"},"adjustments":{"exposure":0.5}}"#,
+        r#"{"version":1,"rating":0,"agHistory":["\udc00"],"adjustments":{"exposure":0.5}}"#,
+        r#"{"version":1,"rating":0,"exif":{"\ud800":"a"},"adjustments":{"exposure":0.5}}"#,
+        r#"{"version":1,"rating":0,"exif":{"n":1e999},"adjustments":{"exposure":0.5}}"#,
+        r#"{"version":1,"rating":0,"adjustments":{"exposure":0.5,"note":"\ud800"}}"#,
+        r#"{"version":1,"rating":0,"adjustments":{"exposure":0.5,"curves":{"luma":"\ud800"}}}"#,
+    ] {
+        assert!(status(bad.as_bytes(), true).is_err(), "{bad}");
+    }
+    // A surrogate pair is fine.
+    let pair = r#"{"version":1,"rating":0,"exif":{"a":"😀"},"adjustments":{"exposure":0.5}}"#;
+    assert_eq!(kind(pair, true), Kind::Edit);
+}
+
+#[test]
 fn no_edit_is_none() {
     assert_eq!(kind(r#"{"version":1,"rating":3,"adjustments":{}}"#, true), Kind::None);
     assert_eq!(kind(r#"{"version":1,"rating":0,"adjustments":null}"#, false), Kind::None);
