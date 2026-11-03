@@ -75,7 +75,9 @@ impl std::error::Error for Error {
 }
 
 /// What the sidecar `bytes` says about its photo's edit. `is_raw`: whether the
-/// photo is a RAW file, which changes what an untouched edit renders as.
+/// photo is a RAW file, which changes what an untouched edit renders as. It
+/// must be Argentum's own answer (its list of RAW extensions, any case, plus a
+/// `.tif`/`.tiff` that is a camera's RAW); see the README.
 pub fn status(bytes: &[u8], is_raw: bool) -> Result<Status, Error> {
     let edit = read::edit(bytes)?;
     Ok(Status { kind: edited::kind(&edit.facts, is_raw), fingerprint: edit.fingerprint })

@@ -1,12 +1,15 @@
-//! Sidecar names: `<photo>.agdata` for the photo, `<photo>.<id>.agdata` for each
-//! virtual copy, the id being six lowercase hex digits.
+//! Sidecar file names: `<photo>.agdata` holds a photo's edit, and
+//! `<photo>.<id>.agdata` the edit of one of its virtual copies, where `id` is
+//! six lowercase hex digits.
 
-/// A sidecar's extension, without the dot.
+/// The sidecar's file extension, without the dot.
 pub const EXTENSION: &str = "agdata";
 
-const COPY_ID_LEN: usize = 6;
+/// The end of every sidecar's name.
+const ENDING: &str = ".agdata";
 
-/// The photo and virtual copy a sidecar belongs to.
+/// What a sidecar's file name says: the photo it belongs to and, for a virtual
+/// copy, the copy's id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SidecarName<'a> {
     /// The photo's file name.
@@ -15,30 +18,51 @@ pub struct SidecarName<'a> {
     pub copy: Option<&'a str>,
 }
 
-/// The sidecar of the photo named `photo` (a file name, not a path).
+/// The name of the sidecar holding the edit of the photo named `photo`.
 pub fn sidecar_name(photo: &str) -> String {
-    format!("{photo}.{EXTENSION}")
+    format!("{photo}{ENDING}")
 }
 
-/// The sidecar of virtual copy `id` of the photo named `photo`; `None` when
-/// `id` is not a copy id.
+/// The name of the sidecar holding the edit of virtual copy `id` of the photo
+/// named `photo`; `None` when `id` is not a copy id (six lowercase hex digits).
 pub fn copy_sidecar_name(photo: &str, id: &str) -> Option<String> {
-    is_copy_id(id).then(|| format!("{photo}.{id}.{EXTENSION}"))
+    is_copy_id(id).then(|| format!("{photo}.{id}{ENDING}"))
 }
 
-/// The photo and copy a sidecar named `file_name` belongs to; `None` when it is
-/// not a sidecar's name. A name ending in `.` and six lowercase hex digits
-/// before the extension is a virtual copy's.
+/// The photo and copy a sidecar's file name stands for; `None` when the name is
+/// not a sidecar's. A last part that is not a copy id is part of the photo's
+/// own name.
 pub fn parse_sidecar_name(file_name: &str) -> Option<SidecarName<'_>> {
-    let base = file_name.strip_suffix(EXTENSION)?.strip_suffix('.')?;
-    if let Some((photo, id)) = base.rsplit_once('.')
-        && is_copy_id(id)
-    {
-        return Some(SidecarName { photo, copy: Some(id) });
-    }
-    Some(SidecarName { photo: base, copy: None })
+    let base = file_name.strip_suffix(ENDING)?;
+    // A copy id holds no dot, so the last dot is the one before it.
+    Some(match base.rsplit_once('.') {
+        Some((photo, id)) if is_copy_id(id) => SidecarName { photo, copy: Some(id) },
+        _ => SidecarName { photo: base, copy: None },
+    })
 }
 
+/// Six characters, each a digit or a lowercase `a` to `f`.
 fn is_copy_id(id: &str) -> bool {
-    id.len() == COPY_ID_LEN && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    id.len() == 6 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_round_trip() {
+        assert_eq!(parse_sidecar_name(&sidecar_name("a.b.jpg")), Some(SidecarName { photo: "a.b.jpg", copy: None }));
+        let copy = copy_sidecar_name("a.jpg", "0f9e8d").unwrap();
+        assert_eq!(parse_sidecar_name(&copy), Some(SidecarName { photo: "a.jpg", copy: Some("0f9e8d") }));
+    }
+
+    #[test]
+    fn odd_names_do_not_panic() {
+        assert_eq!(parse_sidecar_name(".agdata"), Some(SidecarName { photo: "", copy: None }));
+        assert_eq!(parse_sidecar_name(".abcdef.agdata"), Some(SidecarName { photo: "", copy: Some("abcdef") }));
+        assert_eq!(parse_sidecar_name("été.ééé.agdata"), Some(SidecarName { photo: "été.ééé", copy: None }));
+        assert_eq!(parse_sidecar_name("日本語"), None);
+        assert_eq!(parse_sidecar_name("photo.ABCDEF.agdata"), Some(SidecarName { photo: "photo.ABCDEF", copy: None }));
+    }
 }

@@ -21,6 +21,11 @@ let key = status.fingerprint.to_hex(); // re-render when this changes
   settings (no tone mapper forced in Settings). It depends on whether the photo
   is a RAW file: an edit that names no tone rendering is in DNG Standard for a
   RAW and in none for any other photo.
+- **`is_raw` must be Argentum's own answer** for the photo, or the kind can
+  differ: a RAW is a file whose extension (any case) is in Argentum's list of
+  RAW extensions (`RAW_EXTENSIONS` in its `src-tauri/src/formats.rs`), or a
+  `.tif`/`.tiff` that is a camera's RAW. A caller's own idea of "RAW" (another
+  list, or "not a JPEG") is not enough.
 - **Fingerprint.** BLAKE3 of the edit (`adjustments`) alone, independent of key
   order and layout. Rating, tags, flag, the EXIF copy, history and snapshots do
   not count, so Argentum rewriting those leaves it as it was.
@@ -42,11 +47,12 @@ same test from the same values (`src/edited.rs`).
 
 That is proven, not assumed: a differential check ran Argentum's own code and
 this crate on the same sidecars and required the same answer for each, for a
-RAW photo and for any other: 5,742 generated sidecars (every editor value moved
+RAW photo and for any other: 5,762 generated sidecars (every editor value moved
 off its default one at a time, alone and among the editor's defaults; edges of
-each rule; film looks; malformed files; random mixes) and 295 real ones, 12,074
-answers, all identical. `tests/fixtures/generated.jsonl` is the generated part
-with Argentum's answers, so the crate's tests guard them;
+each rule; film looks; malformed files and text Argentum's reader refuses;
+random mixes) and 295 real ones, 12,114 answers, all identical.
+`tests/fixtures/generated.jsonl` is the generated part with Argentum's
+answers, so the crate's tests guard them;
 `tests/fixtures/editor-defaults.json` is the editor's starting edit those cases
 are built on.
 
@@ -63,6 +69,9 @@ from the file before that conversion would differ anyway.
 
 The sidecar's key names, default values and the rule's thresholds are facts
 of Argentum's file format, used here as such. This crate contains no Argentum
-or RapidRAW code.
+or RapidRAW code: the rule (`src/edited.rs`) and the naming rule
+(`src/name.rs`) were written clean-room, from a description of their behaviour
+only, by an implementer who did not see Argentum's source; the reader and the
+fingerprint are this crate's own design.
 
 MIT, see `LICENSE`.

@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # Argentum main at 772b1b28, 2026-11-03.
-PINNED=817c78f0599fd06ecd38051ce872b237294330f70b06087be937250b3d5db64d
+PINNED=7dc2457db374bc72bf8d7912b5f3126525e07a2ee68cfb02876f115d0a561985
 
 # file | start of the item's first line ("*" for the whole file)
 PARTS='
@@ -41,6 +41,10 @@ src-tauri/src/guided_perspective.rs|pub struct GuidePoint
 src-tauri/src/file_management.rs|pub fn sidecar_for
 src-tauri/src/file_management.rs|pub fn parse_sidecar_name
 src-tauri/src/exif_processing.rs|pub fn peek_sidecar
+src-tauri/src/formats.rs|pub const RAW_EXTENSIONS
+src-tauri/src/formats.rs|pub const NON_RAW_EXTENSIONS
+src-tauri/src/formats.rs|pub fn is_raw_file
+src-tauri/src/mods/tif_raw.rs|pub fn is_camera_raw
 src-tauri/src/app_settings.rs|tonemapper_override_enabled: Some(
 src-tauri/src/mods/salvage.rs|pub fn readable_keys
 src-tauri/src/mods/salvage.rs|pub fn readable<
@@ -68,18 +72,29 @@ src-tauri/src/mods/raw_tone.rs|pub fn mode_index
 src-tauri/src/mods/raw_tone.rs|pub fn mode_of
 src-tauri/src/mods/raw_tone.rs|pub fn points_of
 src-tauri/src/mods/raw_tone.rs|fn fill_missing
+src-tauri/src/mods/raw_tone.rs|pub fn is_camera_raw_style
 src-tauri/src/mods/dng_standard.rs|*
 src-tauri/src/mods/dng_baseline.tsv|*
 src-tauri/src/mods/film_lut.rs|pub fn declared_input
 src-tauri/src/mods/film_lut.rs|pub fn exposure_ev
 src-tauri/src/mods/clipping.rs|pub fn mode
+src-tauri/src/mods/clipping.rs|pub const OFF
+src-tauri/src/mods/clipping.rs|pub const ALL
+src-tauri/src/mods/clipping.rs|pub const LAST
 src-tauri/src/mods/black_white.rs|pub fn from_json
 src-tauri/src/mods/black_white.rs|pub fn leave_out_colour_controls
 src-tauri/src/mods/color_grade.rs|pub fn of
+src-tauri/src/mods/color_grade.rs|fn is_lightroom
 src-tauri/src/mods/lens_builtin.rs|pub const KEYS
 src-tauri/src/mods/lens_builtin.rs|pub fn from_adjustments
 src-tauri/src/mods/lens_builtin.rs|pub fn with_lensfun
 src-tauri/src/mods/profile_correction.rs|pub fn rows_for
+src-tauri/src/mods/profile_correction.rs|fn built_in_for_this_render
+src-tauri/src/mods/profile_correction.rs|fn colour_for_this_render
+src-tauri/src/mods/profile_correction.rs|pub fn correction_for
+src-tauri/src/mods/profile_correction.rs|fn chosen_correction
+src-tauri/src/mods/profile_correction.rs|fn dng_colour_correction
+src-tauri/src/mods/profile_correction.rs|fn fits_this_photo
 src-tauri/engine/src/rm_lens_builtin.rs|pub struct Radial
 src-tauri/engine/src/rm_lens_builtin.rs|fn valid
 src-tauri/engine/src/rm_lens_builtin.rs|pub struct Parts

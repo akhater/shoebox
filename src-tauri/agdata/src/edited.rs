@@ -1,17 +1,12 @@
-//! Argentum's rule for "this photo was edited", from the sidecar format.
+//! The edited rule: whether an edit changes its photo, and whether it has a
+//! film look on.
 //!
-//! Argentum marks a photo edited when its edit names a camera profile, holds
-//! AI patches or masks, crops off-centre, turns, flips or reshapes the picture,
-//! or else when what its renderer is given differs from what an empty edit
-//! gives it. That last test is made here on the same values, worked out the
-//! way the renderer receives them (32-bit floats, scaled, clamped, behind each
-//! section's eye), so an edit that only moves a value back to its default, or
-//! sets one the renderer never sees, is no edit.
-//!
-//! Its settings are Argentum's defaults: no tone mapper forced in Settings
-//! (the edit's own `toneMapper` counts).
+//! An edit changes its photo when it names something that always shows (a
+//! camera profile, masks, AI patches, an off-centre crop, a turn, a flip, a
+//! reshape, a lens correction), or else when the values a renderer is given
+//! for it differ from those given for an empty edit, compared bit for bit as
+//! 32-bit floats and integers.
 
-use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -20,9 +15,9 @@ use serde_json::Value;
 use crate::Kind;
 use crate::read::Facts;
 
-/// The edit's keys the rule reads, in byte order. `masks` and `aiPatches` are
-/// read apart: only whether they hold anything counts.
-pub(crate) const KEYS: &[&str] = &[
+/// The edit's top-level keys the rule reads, in byte order for a binary search.
+/// `masks` and `aiPatches` are not here: the reader keeps them as flags.
+const READ_KEYS: [&str; 79] = [
     "agBlackWhite",
     "agLutDeclaredInput",
     "agProviderLook",
@@ -104,619 +99,716 @@ pub(crate) const KEYS: &[&str] = &[
     "whites",
 ];
 
-/// Does the rule read `key` of an edit?
+/// Whether the rule reads the edit's top-level key `key`.
 pub(crate) fn reads(key: &str) -> bool {
-    KEYS.binary_search(&key).is_ok()
+    READ_KEYS.binary_search(&key).is_ok()
 }
 
-/// Argentum's mark for an edit.
+/// The mark an edit gets. `is_raw`: whether its photo is a RAW file.
 pub(crate) fn kind(edit: &Facts, is_raw: bool) -> Kind {
-    if !is_edited(edit, is_raw) {
-        Kind::None
-    } else if has_film_look(edit) {
-        Kind::Film
-    } else {
-        Kind::Edit
-    }
-}
-
-fn is_edited(edit: &Facts, is_raw: bool) -> bool {
     if !edit.object {
-        return false;
+        return Kind::None;
     }
-    if names_camera_profile(edit)
-        || edit.ai_patches
-        || edit.masks
-        || crops_off_centre(edit)
-        || turns_or_flips(edit)
-        || reshapes(edit)
-    {
-        return true;
+    let eyes = Eyes::of(edit);
+    let edited = shows_directly(edit, &eyes) || Rendered::of(edit, &eyes, is_raw) != *untouched(is_raw);
+    match edited {
+        false => Kind::None,
+        true if film_look(edit) => Kind::Film,
+        true => Kind::Edit,
     }
-    static UNTOUCHED: OnceLock<[Vec<u32>; 2]> = OnceLock::new();
-    let untouched = UNTOUCHED.get_or_init(|| {
+}
+
+/// What a renderer is given for an empty edit, worked out once per kind of photo.
+fn untouched(is_raw: bool) -> &'static Rendered {
+    static UNTOUCHED: [OnceLock<Rendered>; 2] = [OnceLock::new(), OnceLock::new()];
+    UNTOUCHED[usize::from(is_raw)].get_or_init(|| {
         let empty = Facts { object: true, ..Facts::default() };
-        [render(&empty, false), render(&empty, true)]
-    });
-    render(edit, is_raw) != untouched[is_raw as usize]
+        Rendered::of(&empty, &Eyes::of(&empty), is_raw)
+    })
 }
 
 // ---------------------------------------------------------------------------
-// The film mark: a provider look on. `lutPath` is its marker, and the look it
-// names must read as one.
-// ---------------------------------------------------------------------------
+// Reading values
 
-const PROVIDER_LOOK_MARKER: &str = "provider-look";
-
-/// Read only to check it reads, as Argentum does.
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderLook {
-    camera: String,
-    look: String,
-    #[serde(default)]
-    options: BTreeMap<String, bool>,
-    #[serde(default)]
-    own_wb: Option<OwnWb>,
-    #[serde(default)]
-    before: RenderingBefore,
+/// `v` as a number, or `default` when it is not one.
+fn number(v: &Value, default: f64) -> f64 {
+    v.as_f64().unwrap_or(default)
 }
 
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct OwnWb {
-    option: String,
-    wb: Option<LookWb>,
+/// `v` as a number, or `default`, as a 32-bit float.
+fn float(v: &Value, default: f64) -> f32 {
+    number(v, default) as f32
 }
 
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct LookWb {
-    temperature: i32,
-    tint: i32,
+/// Whether `v` is the boolean `true`.
+fn is_true(v: &Value) -> bool {
+    v.as_bool() == Some(true)
 }
 
-#[allow(dead_code)]
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
-struct RenderingBefore {
-    raw_tone_rendering: Option<String>,
-    raw_tone_curve: Option<Vec<CurvePoint>>,
-    raw_tone_curve_mode: Option<String>,
+/// The editor's sections, each with an eye that hides its values.
+#[derive(Clone, Copy)]
+enum Section {
+    Basic,
+    Color,
+    Curves,
+    Details,
+    Effects,
+    Lens,
 }
 
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct CurvePoint {
-    x: f32,
-    y: f32,
-}
+/// Which sections are shown. Only an explicit `false` hides one.
+struct Eyes([bool; 6]);
 
-fn has_film_look(edit: &Facts) -> bool {
-    edit.get("lutPath").as_str() == Some(PROVIDER_LOOK_MARKER)
-        && ProviderLook::deserialize(edit.get("agProviderLook")).is_ok()
-}
+impl Eyes {
+    fn of(edit: &Facts) -> Self {
+        let v = edit.get("sectionVisibility");
+        let shown = |name: &str| v[name].as_bool() != Some(false);
+        Eyes([shown("basic"), shown("color"), shown("curves"), shown("details"), shown("effects"), shown("lens")])
+    }
 
-// ---------------------------------------------------------------------------
-// What counts before the renderer is asked.
-// ---------------------------------------------------------------------------
-
-fn names_camera_profile(edit: &Facts) -> bool {
-    edit.get("cameraProfile").as_str().is_some_and(|p| !p.trim().is_empty())
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct Crop {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
-/// A crop counts only when it starts away from the top left corner.
-fn crops_off_centre(edit: &Facts) -> bool {
-    let crop = edit.get("crop");
-    !crop.is_null() && Crop::deserialize(crop).is_ok_and(|c| c.x.abs() > 0.1 || c.y.abs() > 0.1)
-}
-
-fn turns_or_flips(edit: &Facts) -> bool {
-    edit.get("orientationSteps").as_u64().unwrap_or(0) != 0
-        || edit.get("rotation").as_f64().unwrap_or(0.0).abs() > 0.001
-        || edit.get("flipHorizontal").as_bool().unwrap_or(false)
-        || edit.get("flipVertical").as_bool().unwrap_or(false)
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct GuideLine {
-    id: String,
-    #[serde(rename = "type")]
-    orientation: GuideOrientation,
-    p1: GuidePoint,
-    p2: GuidePoint,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum GuideOrientation {
-    Vertical,
-    Horizontal,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct GuidePoint {
-    x: f64,
-    y: f64,
-}
-
-/// The camera's own lens correction, as the edit stores it.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LensCorrection {
-    #[allow(dead_code)]
-    source: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    default_on: bool,
-    vignetting: Option<Radial>,
-    distortion: Option<Radial>,
-    chromatic: Option<[Radial; 2]>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    always: Option<Parts>,
-    #[serde(default)]
-    centre: Option<[f32; 2]>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Radial {
-    knots: Vec<f32>,
-    values: Vec<f32>,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Parts {
-    distortion: bool,
-    chromatic: bool,
-    vignetting: bool,
-}
-
-impl Radial {
-    fn is_valid(&self) -> bool {
-        let (k, v) = (&self.knots, &self.values);
-        k.len() >= 2
-            && k.len() == v.len()
-            && k.len() <= 64
-            && k.iter().chain(v).all(|x| x.is_finite())
-            && k.windows(2).all(|w| w[0] < w[1])
-            && k[0] >= 0.0
-            && v.iter().all(|x| (0.2..=5.0).contains(x))
+    fn shown(&self, section: Section) -> bool {
+        self.0[section as usize]
     }
 }
 
-impl LensCorrection {
-    fn corrects(&self) -> bool {
-        let radials = self.vignetting.iter().chain(&self.distortion).chain(self.chromatic.iter().flatten());
-        (self.vignetting.is_some() || self.distortion.is_some() || self.chromatic.is_some())
-            && self.centre.iter().flatten().all(|c| (0.0..=1.0).contains(c))
-            && radials.into_iter().all(Radial::is_valid)
-    }
-}
-
-/// Perspective, distortion, scale, offset, guided lines or a lens correction
-/// that moves the picture.
-fn reshapes(edit: &Facts) -> bool {
-    let guided = edit.get("guidedPerspective");
-    if guided.get("enabled").and_then(Value::as_bool).unwrap_or(false)
-        && guided.get("lines").and_then(|l| Vec::<GuideLine>::deserialize(l).ok()).is_some_and(|l| l.len() >= 2)
-    {
-        return true;
-    }
-    let f32_of = |key: &str, default: f64| edit.get(key).as_f64().unwrap_or(default) as f32;
-    let transforms = [
-        "transformDistortion",
-        "transformVertical",
-        "transformHorizontal",
-        "transformRotate",
-        "transformAspect",
-        "transformXOffset",
-        "transformYOffset",
-    ];
-    if transforms.iter().any(|k| f32_of(k, 0.0) != 0.0) || f32_of("transformScale", 100.0) != 100.0 {
-        return true;
-    }
-
-    let lens_shown = is_visible(edit, "lens");
-    if lens_shown
-        && edit.get("lensBuiltin").as_bool() == Some(true)
-        && LensCorrection::deserialize(edit.get("lensBuiltinParams")).is_ok_and(|c| c.corrects())
-    {
-        return true;
-    }
-    let profile = edit.get("lensDistortionParams").as_object();
-    let param =
-        |key: &str, default: f64| profile.and_then(|p| p.get(key)).and_then(Value::as_f64).unwrap_or(default) as f32;
-    let part = |enabled: &str, amount: &str| {
-        let on = lens_shown && edit.get(enabled).as_bool().unwrap_or(true);
-        let amount = f32_of(amount, 100.0) / 100.0;
-        (on, (amount - 1.0).abs() < 1e-4)
-    };
-    let (on, neutral) = part("lensDistortionEnabled", "lensDistortionAmount");
-    let distortion = on && !(neutral && ["k1", "k2", "k3"].iter().all(|k| param(k, 0.0).abs() < 1e-6));
-    let (on, neutral) = part("lensTcaEnabled", "lensTcaAmount");
-    let chromatic = on && !(neutral && ["tca_vr", "tca_vb"].iter().all(|k| (param(k, 1.0) - 1.0).abs() < 1e-6));
-    let (on, neutral) = part("lensVignetteEnabled", "lensVignetteAmount");
-    let vignetting = on && !(neutral && ["vig_k1", "vig_k2", "vig_k3"].iter().all(|k| param(k, 0.0).abs() < 1e-6));
-    distortion || chromatic || vignetting
-}
-
 // ---------------------------------------------------------------------------
-// What the renderer is given, as 32-bit words. Only compared, never drawn
-// with: the order is this file's own.
-// ---------------------------------------------------------------------------
+// What always shows
 
-/// Is the eye of `section` open? Only `false` closes it.
-fn is_visible(edit: &Facts, section: &str) -> bool {
-    edit.get("sectionVisibility").get(section).and_then(Value::as_bool).unwrap_or(true)
-}
-
-/// A slider: its section, key, the divisor the renderer applies, its default.
-type Slider = (&'static str, &'static str, f32, f64);
-
-const SLIDERS: [Slider; 32] = [
-    ("basic", "exposure", 0.8, 0.0),
-    ("basic", "brightness", 0.8, 0.0),
-    ("basic", "contrast", 100.0, 0.0),
-    ("basic", "highlights", 120.0, 0.0),
-    ("basic", "shadows", 120.0, 0.0),
-    ("basic", "whites", 40.0, 0.0),
-    ("basic", "blacks", 40.0, 0.0),
-    ("basic", "saturation", 100.0, 0.0),
-    ("basic", "vibrance", 100.0, 0.0),
-    ("basic", "centréX", 1.0, 0.5),
-    ("basic", "centréY", 1.0, 0.5),
-    ("basic", "clarity", 125.0, 0.0),
-    ("basic", "dehaze", 750.0, 0.0),
-    ("basic", "structure", 125.0, 0.0),
-    ("basic", "centré", 250.0, 0.0),
-    ("color", "hue", 1.0, 0.0),
-    ("details", "sharpness", 50.0, 0.0),
-    ("details", "lumaNoiseReduction", 100.0, 0.0),
-    ("details", "colorNoiseReduction", 100.0, 0.0),
-    ("details", "sharpnessThreshold", 100.0, 15.0),
-    ("effects", "vignetteAmount", 100.0, 0.0),
-    ("effects", "vignetteMidpoint", 100.0, 50.0),
-    ("effects", "vignetteRoundness", 100.0, 0.0),
-    ("effects", "vignetteFeather", 100.0, 50.0),
-    ("effects", "vignetteCenterX", 1.0, 0.5),
-    ("effects", "vignetteCenterY", 1.0, 0.5),
-    ("effects", "grainAmount", 200.0, 0.0),
-    ("effects", "grainSize", 50.0, 25.0),
-    ("effects", "grainRoughness", 100.0, 50.0),
-    ("effects", "glowAmount", 100.0, 0.0),
-    ("effects", "halationAmount", 100.0, 0.0),
-    ("effects", "flareAmount", 100.0, 0.0),
+/// Keys whose value, as a 32-bit float, reshapes the picture unless it is 0.
+const RESHAPES: [&str; 7] = [
+    "transformDistortion",
+    "transformVertical",
+    "transformHorizontal",
+    "transformRotate",
+    "transformAspect",
+    "transformXOffset",
+    "transformYOffset",
 ];
 
-struct Words(Vec<u32>);
-
-impl Words {
-    fn f(&mut self, v: f32) {
-        self.0.push(v.to_bits());
-    }
-
-    fn u(&mut self, v: u32) {
-        self.0.push(v);
-    }
-
-    fn flag(&mut self, v: bool) {
-        self.0.push(v as u32);
-    }
-
-    /// Up to 16 curve points, as the renderer stores them: a point without a
-    /// number for x or y is (0, 0).
-    fn points(&mut self, points: &[Value]) {
-        for i in 0..16 {
-            let (x, y) = points.get(i).map_or((0.0, 0.0), point);
-            self.f(x);
-            self.f(y);
-        }
-    }
+/// A lens profile correction: its switch, its amount, and its parameters in
+/// `lensDistortionParams`, with the value each one rests at.
+struct LensPart {
+    switch: &'static str,
+    amount: &'static str,
+    params: &'static [&'static str],
+    rest: f32,
 }
 
-fn point(p: &Value) -> (f32, f32) {
-    match (p["x"].as_f64(), p["y"].as_f64()) {
-        (Some(x), Some(y)) => (x as f32, y as f32),
-        _ => (0.0, 0.0),
-    }
+const LENS_PARTS: [LensPart; 3] = [
+    LensPart {
+        switch: "lensDistortionEnabled",
+        amount: "lensDistortionAmount",
+        params: &["k1", "k2", "k3"],
+        rest: 0.0,
+    },
+    LensPart { switch: "lensTcaEnabled", amount: "lensTcaAmount", params: &["tca_vr", "tca_vb"], rest: 1.0 },
+    LensPart {
+        switch: "lensVignetteEnabled",
+        amount: "lensVignetteAmount",
+        params: &["vig_k1", "vig_k2", "vig_k3"],
+        rest: 0.0,
+    },
+];
+
+/// Whether the edit names something that changes the photo whatever its values.
+fn shows_directly(edit: &Facts, eyes: &Eyes) -> bool {
+    edit.get("cameraProfile").as_str().is_some_and(|p| !p.trim().is_empty())
+        || edit.ai_patches
+        || edit.masks
+        || crops_off_centre(edit.get("crop"))
+        || edit.get("orientationSteps").as_u64().is_some_and(|n| n != 0)
+        || number(edit.get("rotation"), 0.0).abs() > 0.001
+        || is_true(edit.get("flipHorizontal"))
+        || is_true(edit.get("flipVertical"))
+        || guides_perspective(edit.get("guidedPerspective"))
+        || RESHAPES.iter().any(|key| float(edit.get(key), 0.0) != 0.0)
+        || float(edit.get("transformScale"), 100.0) != 100.0
+        || corrects_built_in_lens(edit, eyes)
+        || LENS_PARTS.iter().any(|part| corrects_lens_part(edit, eyes, part))
 }
 
-fn render(edit: &Facts, is_raw: bool) -> Vec<u32> {
-    let mut w = Words(Vec::with_capacity(512));
-    let visible = |section| is_visible(edit, section);
-    let number = |v: &Value, default: f64| v.as_f64().unwrap_or(default) as f32;
-
-    // Sliders. Black & white also clears saturation, vibrance, hue and HSL,
-    // but turning it on is itself a change (below), so that is not repeated.
-    for (section, key, scale, default) in SLIDERS {
-        let v = if visible(section) { number(edit.get(key), default) } else { default as f32 };
-        w.f(v / scale);
-    }
-    // Lens fringe sliders: behind no eye.
-    for key in ["chromaticAberrationRedCyan", "chromaticAberrationBlueYellow"] {
-        w.f(number(edit.get(key), 0.0) / 10000.0);
-    }
-
-    w.u(clipping(edit.get("showClipping")));
-    w.flag(edit.get("lutPath").is_string());
-    w.f(number(edit.get("lutIntensity"), 100.0) / 100.0);
-    w.flag(edit.get("lutIsSceneReferred").as_bool().unwrap_or(false));
-    w.flag(edit.get("toneMapper").as_str() == Some("agx"));
-    // A LUT that declares its input; its exposure counts only then.
-    w.flag(edit.get("agLutDeclaredInput").as_bool() == Some(true) || edit.get("lutPath").as_str() == Some("preview"));
-    w.flag(white_balance_moved(edit));
-
-    let color = visible("color");
-    let calibration = edit.get("colorCalibration");
-    for (key, scale) in [
-        ("shadowsTint", 400.0),
-        ("redHue", 400.0),
-        ("redSaturation", 120.0),
-        ("greenHue", 400.0),
-        ("greenSaturation", 120.0),
-        ("blueHue", 400.0),
-        ("blueSaturation", 120.0),
-    ] {
-        w.f(if color { number(&calibration[key], 0.0) / scale } else { 0.0 });
-    }
-
-    let grading = edit.get("colorGrading");
-    for region in ["shadows", "midtones", "highlights", "global"] {
-        let r = &grading[region];
-        let (h, s, l) = if color && !r.is_null() {
-            (number(&r["hue"], 0.0), number(&r["saturation"], 0.0) / 500.0, number(&r["luminance"], 0.0) / 500.0)
-        } else {
-            (0.0, 0.0, 0.0)
-        };
-        w.f(h);
-        w.f(s);
-        w.f(l);
-    }
-    w.f(if color { number(&grading["blending"], 50.0) / 100.0 } else { 0.5 });
-    w.f(if color { number(&grading["balance"], 0.0) / 200.0 } else { 0.0 });
-    // Lightroom's grading: behind no eye.
-    w.flag(grading.get("agLightroom").and_then(Value::as_f64) == Some(1.0));
-
-    let hsl = edit.get("hsl").as_object().filter(|_| color);
-    for band in ["reds", "oranges", "yellows", "greens", "aquas", "blues", "purples", "magentas"] {
-        let (h, s, l) = match hsl.and_then(|m| m.get(band)) {
-            Some(b) => (
-                number(&b["hue"], 0.0) * 0.3,
-                number(&b["saturation"], 0.0) / 100.0,
-                number(&b["luminance"], 0.0) / 100.0,
-            ),
-            None => (0.0, 0.0, 0.0),
-        };
-        w.f(h);
-        w.f(s);
-        w.f(l);
-    }
-
-    let curves = edit.get("curves");
-    let straight_line = [serde_json::json!({"x": 0.0, "y": 0.0}), serde_json::json!({"x": 255.0, "y": 255.0})];
-    for channel in ["luma", "red", "green", "blue"] {
-        let points: &[Value] = if !visible("curves") {
-            &[]
-        } else {
-            match curves.get(channel) {
-                Some(v) => v.as_array().map_or(&[], Vec::as_slice),
-                None => &straight_line,
-            }
-        };
-        w.points(points);
-        w.u(if is_straight(points) { 0 } else { points.len() as u32 });
-    }
-
-    raw_tone(edit, is_raw, &mut w);
-    sharpening(edit, is_raw, &mut w);
-    w.flag(color && edit.get("agBlackWhite").get("enabled").and_then(Value::as_bool) == Some(true));
-    w.0
+fn crops_off_centre(crop: &Value) -> bool {
+    !crop.is_null() && shape::Rect::deserialize(crop).is_ok_and(|r| r.x.abs() > 0.1 || r.y.abs() > 0.1)
 }
 
-/// A curve sent as no curve: from (0, 0) to (255, 255), each point within half
-/// a level of the diagonal.
-fn is_straight(points: &[Value]) -> bool {
-    let len = points.len();
-    let at = |i: usize| points.get(i.min(15)).map_or((0.0, 0.0), point);
-    len >= 2
-        && (0..len).all(|i| (at(i).0 - at(i).1).abs() <= 0.5)
-        && at(0).0.abs() < 0.1
-        && at(0).1.abs() < 0.1
-        && (at(len - 1).0 - 255.0).abs() < 0.1
-        && (at(len - 1).1 - 255.0).abs() < 0.1
+fn guides_perspective(guided: &Value) -> bool {
+    is_true(&guided["enabled"]) && Vec::<shape::GuideLine>::deserialize(&guided["lines"]).is_ok_and(|l| l.len() >= 2)
 }
 
-/// The clipping warning: a number up to 9 picks one, `true` all of them.
-fn clipping(v: &Value) -> u32 {
-    match v.as_u64() {
-        Some(n) => {
-            if n <= 9 {
-                n as u32
-            } else {
-                0
-            }
-        }
-        None => v.as_bool().unwrap_or(false) as u32,
+fn corrects_built_in_lens(edit: &Facts, eyes: &Eyes) -> bool {
+    eyes.shown(Section::Lens)
+        && is_true(edit.get("lensBuiltin"))
+        && shape::LensTable::deserialize(edit.get("lensBuiltinParams")).is_ok_and(|t| t.has_part() && t.is_valid())
+}
+
+fn corrects_lens_part(edit: &Facts, eyes: &Eyes, part: &LensPart) -> bool {
+    let on = eyes.shown(Section::Lens) && edit.get(part.switch).as_bool().unwrap_or(true);
+    if !on {
+        return false;
     }
+    let amount = float(edit.get(part.amount), 100.0) / 100.0;
+    let neutral = (amount - 1.0).abs() < 1e-4;
+    let params = edit.get("lensDistortionParams");
+    let at_rest = part.params.iter().all(|key| (float(&params[*key], f64::from(part.rest)) - part.rest).abs() < 1e-6);
+    !(neutral && at_rest)
 }
 
 // ---------------------------------------------------------------------------
-// White balance: `whiteBalance` (absolute) moved by `temperature` and `tint`
-// (relative), behind Basic's eye. The renderer gets the change from the
-// reference white as gains, which are zero only when nothing moved.
-// ---------------------------------------------------------------------------
+// What the renderer is given
 
-#[derive(Deserialize, Clone, Copy, PartialEq)]
-struct WhiteBalance {
+/// The sliders: section, key, divisor, default.
+const SLIDERS: [(Section, &str, f32, f64); 32] = [
+    (Section::Basic, "exposure", 0.8, 0.0),
+    (Section::Basic, "brightness", 0.8, 0.0),
+    (Section::Basic, "contrast", 100.0, 0.0),
+    (Section::Basic, "highlights", 120.0, 0.0),
+    (Section::Basic, "shadows", 120.0, 0.0),
+    (Section::Basic, "whites", 40.0, 0.0),
+    (Section::Basic, "blacks", 40.0, 0.0),
+    (Section::Basic, "saturation", 100.0, 0.0),
+    (Section::Basic, "vibrance", 100.0, 0.0),
+    (Section::Basic, "centréX", 1.0, 0.5),
+    (Section::Basic, "centréY", 1.0, 0.5),
+    (Section::Basic, "clarity", 125.0, 0.0),
+    (Section::Basic, "dehaze", 750.0, 0.0),
+    (Section::Basic, "structure", 125.0, 0.0),
+    (Section::Basic, "centré", 250.0, 0.0),
+    (Section::Color, "hue", 1.0, 0.0),
+    (Section::Details, "sharpness", 50.0, 0.0),
+    (Section::Details, "lumaNoiseReduction", 100.0, 0.0),
+    (Section::Details, "colorNoiseReduction", 100.0, 0.0),
+    (Section::Details, "sharpnessThreshold", 100.0, 15.0),
+    (Section::Effects, "vignetteAmount", 100.0, 0.0),
+    (Section::Effects, "vignetteMidpoint", 100.0, 50.0),
+    (Section::Effects, "vignetteRoundness", 100.0, 0.0),
+    (Section::Effects, "vignetteFeather", 100.0, 50.0),
+    (Section::Effects, "vignetteCenterX", 1.0, 0.5),
+    (Section::Effects, "vignetteCenterY", 1.0, 0.5),
+    (Section::Effects, "grainAmount", 200.0, 0.0),
+    (Section::Effects, "grainSize", 50.0, 25.0),
+    (Section::Effects, "grainRoughness", 100.0, 50.0),
+    (Section::Effects, "glowAmount", 100.0, 0.0),
+    (Section::Effects, "halationAmount", 100.0, 0.0),
+    (Section::Effects, "flareAmount", 100.0, 0.0),
+];
+
+/// Colour calibration, in `colorCalibration`: key and divisor.
+const CALIBRATION: [(&str, f32); 7] = [
+    ("shadowsTint", 400.0),
+    ("redHue", 400.0),
+    ("redSaturation", 120.0),
+    ("greenHue", 400.0),
+    ("greenSaturation", 120.0),
+    ("blueHue", 400.0),
+    ("blueSaturation", 120.0),
+];
+
+const GRADING_REGIONS: [&str; 4] = ["shadows", "midtones", "highlights", "global"];
+
+const HSL_BANDS: [&str; 8] = ["reds", "oranges", "yellows", "greens", "aquas", "blues", "purples", "magentas"];
+
+const CURVE_CHANNELS: [&str; 4] = ["luma", "red", "green", "blue"];
+
+/// A white balance as temperature and tint.
+#[derive(Deserialize)]
+struct White {
     temperature: f64,
     tint: f64,
 }
 
-/// D65 in Argentum's temperature and tint, the white an edit is compared from.
-const REFERENCE: WhiteBalance = WhiteBalance {
-    temperature: f64::from_bits(0x40b9_67b4_ffe0_ce15), // 6503.707029390634
-    tint: f64::from_bits(0x4023_8a3a_b86d_4e98),        // 9.769979251235142
-};
+/// The white an edit without one is given.
+const REFERENCE_WHITE: White =
+    White { temperature: f64::from_bits(0x40b967b4ffe0ce15), tint: f64::from_bits(0x40238a3ab86d4e98) };
 
-fn white_balance_moved(edit: &Facts) -> bool {
-    if !is_visible(edit, "basic") {
-        return false;
-    }
-    let base = WhiteBalance::deserialize(edit.get("whiteBalance")).unwrap_or(REFERENCE);
-    let (temperature, tint) =
-        (edit.get("temperature").as_f64().unwrap_or(0.0), edit.get("tint").as_f64().unwrap_or(0.0));
-    let target = if temperature == 0.0 && tint == 0.0 {
-        base
-    } else {
-        // 1.5 mired and 1.5 tint units a step, kept in range.
-        let mired = 1.0e6 / base.temperature - temperature * 1.5;
-        WhiteBalance {
-            temperature: (1.0e6 / mired.max(1.0e6 / 50000.0)).clamp(2000.0, 50000.0),
-            tint: (base.tint + tint * 1.5).clamp(-150.0, 150.0),
-        }
-    };
-    target != REFERENCE
-}
+/// The DNG Standard rendering, as tone renderings are numbered.
+const DNG_STANDARD: u32 = 3;
 
-// ---------------------------------------------------------------------------
-// A RAW's tone rendering: which one, and its curve. One that names none is in
-// DNG Standard, with the curve below for a photo of no known camera. Other
-// photos get none, but a curve stored in their edit still reaches the renderer.
-// ---------------------------------------------------------------------------
+/// The curve a RAW photo in DNG Standard gets when its edit has none: the bits
+/// of each point's x and y.
+const DNG_STANDARD_CURVE: [[u32; 2]; 16] = [
+    [0x00000000, 0x00000000],
+    [0x40f16b49, 0x40dcb582],
+    [0x41949c62, 0x4186b4f5],
+    [0x41fbbff5, 0x4201e06b],
+    [0x4236f621, 0x425a9f49],
+    [0x4274892f, 0x42a1143e],
+    [0x429af85f, 0x42da48e8],
+    [0x42bd5b21, 0x430c04f7],
+    [0x42e14080, 0x43281f23],
+    [0x430342e7, 0x433fbec7],
+    [0x4316878c, 0x4352ef25],
+    [0x432a62a1, 0x43624383],
+    [0x433eca6b, 0x436e1940],
+    [0x4353b694, 0x43765fb6],
+    [0x43691fe2, 0x437bcf9f],
+    [0x437f0000, 0x437effff],
+];
 
-/// The renderings, numbered as the renderer knows them.
+/// A tone rendering's number; 0 for a name that is none.
 fn rendering(name: &str) -> u32 {
     match name {
         "baseCurve" => 1,
         "autoMatched" => 2,
-        "dngStandard" => 3,
+        "dngStandard" => DNG_STANDARD,
         "linear" => 4,
         _ => 0,
     }
 }
 
-const DNG_STANDARD: u32 = 3;
-
-/// DNG Standard's curve where the edit carries none and the camera is not
-/// known: Argentum's, as 32-bit floats (x, y on 0 to 255).
-const DNG_STANDARD_CURVE: [(f32, f32); 16] = [
-    (f32::from_bits(0x00000000), f32::from_bits(0x00000000)), // 0, 0
-    (f32::from_bits(0x40f16b49), f32::from_bits(0x40dcb582)), // 7.5443463, 6.8971567
-    (f32::from_bits(0x41949c62), f32::from_bits(0x4186b4f5)), // 18.576359, 16.838358
-    (f32::from_bits(0x41fbbff5), f32::from_bits(0x4201e06b)), // 31.468729, 32.46916
-    (f32::from_bits(0x4236f621), f32::from_bits(0x425a9f49)), // 45.74036, 54.655552
-    (f32::from_bits(0x4274892f), f32::from_bits(0x42a1143e)), // 61.13397, 80.539536
-    (f32::from_bits(0x429af85f), f32::from_bits(0x42da48e8)), // 77.4851, 109.142395
-    (f32::from_bits(0x42bd5b21), f32::from_bits(0x430c04f7)), // 94.677986, 140.0194
-    (f32::from_bits(0x42e14080), f32::from_bits(0x43281f23)), // 112.62598, 168.12163
-    (f32::from_bits(0x430342e7), f32::from_bits(0x433fbec7)), // 131.26134, 191.74522
-    (f32::from_bits(0x4316878c), f32::from_bits(0x4352ef25)), // 150.52948, 210.93416
-    (f32::from_bits(0x432a62a1), f32::from_bits(0x43624383)), // 170.38527, 226.26372
-    (f32::from_bits(0x433eca6b), f32::from_bits(0x436e1940)), // 190.7907, 238.09863
-    (f32::from_bits(0x4353b694), f32::from_bits(0x43765fb6)), // 211.7132, 246.37387
-    (f32::from_bits(0x43691fe2), f32::from_bits(0x437bcf9f)), // 233.12454, 251.81102
-    (f32::from_bits(0x437f0000), f32::from_bits(0x437effff)), // 255, 254.99998
-];
-
-fn rendering_of(edit: &Facts, is_raw: bool) -> u32 {
+/// The tone rendering of a RAW photo (DNG Standard unless named), none for any
+/// other photo.
+fn raw_rendering(edit: &Facts, is_raw: bool) -> u32 {
     if !is_raw {
         return 0;
     }
     edit.get("rawToneRendering").as_str().map_or(DNG_STANDARD, rendering)
 }
 
-fn raw_tone(edit: &Facts, is_raw: bool, w: &mut Words) {
-    let mode = rendering_of(edit, is_raw);
-    let fitted_for = edit.get("rawToneCurveMode").as_str().map(rendering);
-    let stored: &[Value] = match fitted_for {
-        Some(fitted) if fitted != mode => &[],
-        _ => edit.get("rawToneCurve").as_array().map_or(&[], Vec::as_slice),
+/// A curve as a renderer holds it: its first 16 points, (0, 0) where a point
+/// is not two numbers, and how many points it had.
+struct Curve {
+    slots: [[f32; 2]; 16],
+    len: usize,
+}
+
+impl Curve {
+    /// The curve a channel without one gets: a straight line.
+    const STRAIGHT: Curve = {
+        let mut slots = [[0.0; 2]; 16];
+        slots[1] = [255.0, 255.0];
+        Curve { slots, len: 2 }
     };
-    w.u(mode);
-    // Another rendering is already a change; only DNG Standard's stand-in
-    // curve is ever compared.
-    if mode == DNG_STANDARD && stored.len() < 2 {
-        w.u(16);
-        for (x, y) in DNG_STANDARD_CURVE {
-            w.f(x);
-            w.f(y);
+
+    fn of(points: &[Value]) -> Self {
+        let mut slots = [[0.0; 2]; 16];
+        for (slot, point) in slots.iter_mut().zip(points) {
+            if let (Some(x), Some(y)) = (point["x"].as_f64(), point["y"].as_f64()) {
+                *slot = [x as f32, y as f32];
+            }
         }
-    } else {
-        w.u(if mode == 0 { 0 } else { stored.len().min(16) as u32 });
-        w.points(stored);
+        Curve { slots, len: points.len() }
+    }
+
+    /// Whether the curve leaves tones as they are: a diagonal from (0, 0) to
+    /// (255, 255). Points past the 16th are read as the 16th.
+    fn is_straight(&self) -> bool {
+        let slot = |i: usize| self.slots[i.min(15)];
+        let [x0, y0] = slot(0);
+        let [xn, yn] = slot(self.len.wrapping_sub(1));
+        self.len >= 2
+            && (0..self.len.min(16)).all(|i| (slot(i)[0] - slot(i)[1]).abs() <= 0.5)
+            && x0.abs() < 0.1
+            && y0.abs() < 0.1
+            && (xn - 255.0).abs() < 0.1
+            && (yn - 255.0).abs() < 0.1
     }
 }
 
-// ---------------------------------------------------------------------------
-// Sharpening (`agSharpen`), behind Details' eye and its own switch. A RAW, or a
-// photo restored from one (`agRestore`), also gets capture sharpening; a RAW in
-// DNG Standard or Linear brings Camera Raw's amount and radius as defaults.
-// ---------------------------------------------------------------------------
+/// `v` as an array, empty when it is not one.
+fn items(v: &Value) -> &[Value] {
+    v.as_array().map_or(&[][..], Vec::as_slice)
+}
 
-fn sharpening(edit: &Facts, is_raw: bool, w: &mut Words) {
-    let s = edit.get("agSharpen");
-    let number = |key: &str, default: f32| {
-        s.get(key).and_then(Value::as_f64).map(|v| v as f32).filter(|v| v.is_finite()).unwrap_or(default)
-    };
-    let flag = |key: &str, default: bool| s.get(key).and_then(Value::as_bool).unwrap_or(default);
+/// How many words `Rendered` holds.
+const WORDS: usize = 264;
 
-    if !is_visible(edit, "details") || !flag("enabled", true) {
-        w.0.extend([0; 10]);
-        return;
+/// What a renderer is given for an edit: each value's bits, in a fixed order.
+#[derive(PartialEq, Eq)]
+struct Rendered {
+    words: [u32; WORDS],
+    len: usize,
+}
+
+impl Rendered {
+    fn of(edit: &Facts, eyes: &Eyes, is_raw: bool) -> Self {
+        let mut r = Rendered { words: [0; WORDS], len: 0 };
+        r.sliders(edit, eyes);
+        r.ungated(edit);
+        r.flag(eyes.shown(Section::Basic) && white_balance_moved(edit));
+        r.colour(edit, eyes);
+        r.curves(edit, eyes);
+        let mode = raw_rendering(edit, is_raw);
+        r.raw_tone(edit, mode);
+        r.sharpening(edit, eyes, is_raw, mode);
+        r.flag(eyes.shown(Section::Color) && is_true(&edit.get("agBlackWhite")["enabled"]));
+        debug_assert_eq!(r.len, WORDS);
+        r
     }
-    let restored_radius = edit
-        .get("agRestore")
-        .get("captureRadius")
-        .and_then(Value::as_f64)
-        .map(|r| r as f32)
-        .filter(|r| r.is_finite() && *r > 0.0);
-    let raw_like = is_raw || restored_radius.is_some();
-    let capture = raw_like && flag("capture", true);
-    let capture_radius =
-        if flag("autoRadius", true) { restored_radius.unwrap_or(0.75) } else { number("radius", 0.75).clamp(0.4, 2.0) };
-    let mut flags = 0;
-    if flag("autoContrast", true) {
-        flags |= 1;
+
+    fn word(&mut self, word: u32) {
+        self.words[self.len] = word;
+        self.len += 1;
     }
-    if flag("iterCheck", true) {
-        flags |= 2;
+
+    fn float(&mut self, v: f32) {
+        self.word(v.to_bits());
     }
-    if !raw_like || flag("usmOwnMask", false) {
-        flags |= 4;
-        if flag("usmAutoContrast", true) {
-            flags |= 8;
+
+    fn flag(&mut self, on: bool) {
+        self.word(u32::from(on));
+    }
+
+    fn sliders(&mut self, edit: &Facts, eyes: &Eyes) {
+        for (section, key, divisor, default) in SLIDERS {
+            let v = if eyes.shown(section) { float(edit.get(key), default) } else { default as f32 };
+            self.float(v / divisor);
         }
     }
-    let camera_raw = matches!(rendering_of(edit, is_raw), 3 | 4);
-    let (amount, radius) = if camera_raw { (25.0, 1.0) } else { (0.0, 2.0) };
 
-    w.f(if capture { (number("captureAmount", 100.0) / 100.0).clamp(0.0, 1.0) } else { 0.0 });
-    w.f(capture_radius);
-    w.f(number("cornerBoost", 0.0).clamp(-0.5, 0.5));
-    w.u(number("iterations", 20.0).clamp(1.0, 100.0) as u32);
-    w.f((number("amount", amount) / 100.0).clamp(0.0, 2.0));
-    w.f(number("usmRadius", radius).clamp(0.1, 8.0));
-    w.f(number("threshold", 0.5).clamp(0.0, 100.0));
-    w.f(number("contrast", 10.0).clamp(0.0, 200.0));
-    w.u(flags);
-    w.f(number("usmContrast", 10.0).clamp(0.0, 200.0));
+    /// Values no eye hides.
+    fn ungated(&mut self, edit: &Facts) {
+        self.float(float(edit.get("chromaticAberrationRedCyan"), 0.0) / 10000.0);
+        self.float(float(edit.get("chromaticAberrationBlueYellow"), 0.0) / 10000.0);
+        let clipping = edit.get("showClipping");
+        self.word(match clipping.as_u64() {
+            Some(n) if n <= 9 => n as u32,
+            Some(_) => 0,
+            None => u32::from(is_true(clipping)),
+        });
+        let lut = edit.get("lutPath");
+        self.flag(lut.is_string());
+        self.float(float(edit.get("lutIntensity"), 100.0) / 100.0);
+        self.flag(is_true(edit.get("lutIsSceneReferred")));
+        self.flag(edit.get("toneMapper").as_str() == Some("agx"));
+        self.flag(is_true(edit.get("agLutDeclaredInput")) || lut.as_str() == Some("preview"));
+        self.flag(edit.get("colorGrading")["agLightroom"].as_f64() == Some(1.0));
+    }
+
+    /// Calibration, grading and the HSL table, all behind the colour eye.
+    fn colour(&mut self, edit: &Facts, eyes: &Eyes) {
+        let shown = eyes.shown(Section::Color);
+
+        let calibration = edit.get("colorCalibration");
+        for (key, divisor) in CALIBRATION {
+            self.float(if shown { float(&calibration[key], 0.0) / divisor } else { 0.0 });
+        }
+
+        let grading = edit.get("colorGrading");
+        for region in GRADING_REGIONS {
+            let r = &grading[region];
+            if shown && !r.is_null() {
+                self.float(float(&r["hue"], 0.0));
+                self.float(float(&r["saturation"], 0.0) / 500.0);
+                self.float(float(&r["luminance"], 0.0) / 500.0);
+            } else {
+                self.zeros(3);
+            }
+        }
+        self.float(if shown { float(&grading["blending"], 50.0) / 100.0 } else { 0.5 });
+        self.float(if shown { float(&grading["balance"], 0.0) / 200.0 } else { 0.0 });
+
+        let hsl = edit.get("hsl").as_object();
+        for band in HSL_BANDS {
+            match hsl.and_then(|m| m.get(band)) {
+                Some(b) if shown => {
+                    self.float(float(&b["hue"], 0.0) * 0.3);
+                    self.float(float(&b["saturation"], 0.0) / 100.0);
+                    self.float(float(&b["luminance"], 0.0) / 100.0);
+                }
+                _ => self.zeros(3),
+            }
+        }
+    }
+
+    fn curves(&mut self, edit: &Facts, eyes: &Eyes) {
+        let curves = edit.get("curves").as_object();
+        for channel in CURVE_CHANNELS {
+            let curve = match curves.and_then(|m| m.get(channel)) {
+                _ if !eyes.shown(Section::Curves) => Curve::of(&[]),
+                Some(points) => Curve::of(items(points)),
+                None => Curve::STRAIGHT,
+            };
+            self.points(&curve.slots);
+            self.word(if curve.is_straight() { 0 } else { curve.len as u32 });
+        }
+    }
+
+    /// The RAW tone rendering `mode` and its curve.
+    fn raw_tone(&mut self, edit: &Facts, mode: u32) {
+        let points: &[Value] = match edit.get("rawToneCurveMode").as_str() {
+            Some(name) if rendering(name) != mode => &[],
+            _ => items(edit.get("rawToneCurve")),
+        };
+        self.word(mode);
+        if mode == DNG_STANDARD && points.len() < 2 {
+            self.word(16);
+            for [x, y] in DNG_STANDARD_CURVE {
+                self.word(x);
+                self.word(y);
+            }
+        } else {
+            self.word(if mode == 0 { 0 } else { points.len().min(16) as u32 });
+            self.points(&Curve::of(points).slots);
+        }
+    }
+
+    /// Sharpening (`agSharpen`), behind the details eye. `mode`: the RAW tone
+    /// rendering.
+    fn sharpening(&mut self, edit: &Facts, eyes: &Eyes, is_raw: bool, mode: u32) {
+        let s = edit.get("agSharpen");
+        let num =
+            |key: &str, default: f32| s[key].as_f64().map(|v| v as f32).filter(|v| v.is_finite()).unwrap_or(default);
+        let flag = |key: &str, default: bool| s[key].as_bool().unwrap_or(default);
+        if !eyes.shown(Section::Details) || !flag("enabled", true) {
+            self.zeros(10);
+            return;
+        }
+        let restored =
+            edit.get("agRestore")["captureRadius"].as_f64().map(|v| v as f32).filter(|v| v.is_finite() && *v > 0.0);
+        let raw_like = is_raw || restored.is_some();
+        let capture = raw_like && flag("capture", true);
+        let camera_raw = is_raw && matches!(mode, 3 | 4);
+        let (amount, usm_radius) = if camera_raw { (25.0, 1.0) } else { (0.0, 2.0) };
+
+        self.float(if capture { (num("captureAmount", 100.0) / 100.0).clamp(0.0, 1.0) } else { 0.0 });
+        self.float(if flag("autoRadius", true) {
+            restored.unwrap_or(0.75)
+        } else {
+            num("radius", 0.75).clamp(0.4, 2.0)
+        });
+        self.float(num("cornerBoost", 0.0).clamp(-0.5, 0.5));
+        self.word(num("iterations", 20.0).clamp(1.0, 100.0) as u32);
+        self.float((num("amount", amount) / 100.0).clamp(0.0, 2.0));
+        self.float(num("usmRadius", usm_radius).clamp(0.1, 8.0));
+        self.float(num("threshold", 0.5).clamp(0.0, 100.0));
+        self.float(num("contrast", 10.0).clamp(0.0, 200.0));
+        let mut flags = 0;
+        if flag("autoContrast", true) {
+            flags += 1;
+        }
+        if flag("iterCheck", true) {
+            flags += 2;
+        }
+        if !raw_like || flag("usmOwnMask", false) {
+            flags += 4;
+            if flag("usmAutoContrast", true) {
+                flags += 8;
+            }
+        }
+        self.word(flags);
+        self.float(num("usmContrast", 10.0).clamp(0.0, 200.0));
+    }
+
+    fn points(&mut self, slots: &[[f32; 2]; 16]) {
+        for [x, y] in slots {
+            self.float(*x);
+            self.float(*y);
+        }
+    }
+
+    fn zeros(&mut self, n: usize) {
+        for _ in 0..n {
+            self.word(0);
+        }
+    }
+}
+
+/// Whether the white balance ends somewhere other than the reference white.
+fn white_balance_moved(edit: &Facts) -> bool {
+    let base = White::deserialize(edit.get("whiteBalance")).unwrap_or(REFERENCE_WHITE);
+    let t = number(edit.get("temperature"), 0.0);
+    let n = number(edit.get("tint"), 0.0);
+    let target = if t == 0.0 && n == 0.0 {
+        base
+    } else {
+        let mired = 1_000_000.0 / base.temperature - 1.5 * t;
+        White {
+            temperature: (1_000_000.0 / mired.max(20.0)).clamp(2000.0, 50000.0),
+            tint: (base.tint + 1.5 * n).clamp(-150.0, 150.0),
+        }
+    };
+    target.temperature != REFERENCE_WHITE.temperature || target.tint != REFERENCE_WHITE.tint
+}
+
+// ---------------------------------------------------------------------------
+// Film look
+
+/// Whether the edit has a provider's film look on.
+fn film_look(edit: &Facts) -> bool {
+    edit.get("lutPath").as_str() == Some("provider-look")
+        && shape::Look::deserialize(edit.get("agProviderLook")).is_ok()
+}
+
+/// Shapes a value must read as for the rule to count it. Most fields are only
+/// checked by reading them, never used.
+#[allow(dead_code)]
+mod shape {
+    use std::fmt;
+
+    use serde::Deserialize;
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+
+    /// A JSON string, checked and not kept.
+    pub struct Text;
+
+    impl<'de> Deserialize<'de> for Text {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct V;
+            impl Visitor<'_> for V {
+                type Value = Text;
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("a string")
+                }
+                fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Text, E> {
+                    Ok(Text)
+                }
+            }
+            deserializer.deserialize_str(V)
+        }
+    }
+
+    /// A JSON object whose values are all booleans, checked and not kept.
+    #[derive(Default)]
+    pub struct Switches;
+
+    impl<'de> Deserialize<'de> for Switches {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> Visitor<'de> for V {
+                type Value = Switches;
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("an object of booleans")
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Switches, A::Error> {
+                    while map.next_entry::<IgnoredAny, bool>()?.is_some() {}
+                    Ok(Switches)
+                }
+            }
+            deserializer.deserialize_map(V)
+        }
+    }
+
+    /// The crop.
+    #[derive(Deserialize)]
+    pub struct Rect {
+        pub x: f64,
+        pub y: f64,
+        width: f64,
+        height: f64,
+    }
+
+    #[derive(Deserialize)]
+    struct Point {
+        x: f64,
+        y: f64,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    enum Direction {
+        Vertical,
+        Horizontal,
+    }
+
+    /// A guide line of guided perspective.
+    #[derive(Deserialize)]
+    pub struct GuideLine {
+        id: Text,
+        #[serde(rename = "type")]
+        direction: Direction,
+        p1: Point,
+        p2: Point,
+    }
+
+    /// A camera's built-in lens correction.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct LensTable {
+        source: Text,
+        default_on: Option<bool>,
+        vignetting: Option<LensCurve>,
+        distortion: Option<LensCurve>,
+        chromatic: Option<[LensCurve; 2]>,
+        always: Option<Always>,
+        centre: Option<[f32; 2]>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Always {
+        distortion: bool,
+        chromatic: bool,
+        vignetting: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LensCurve {
+        knots: Vec<f32>,
+        values: Vec<f32>,
+    }
+
+    impl LensTable {
+        /// Whether it corrects anything.
+        pub fn has_part(&self) -> bool {
+            self.vignetting.is_some() || self.distortion.is_some() || self.chromatic.is_some()
+        }
+
+        /// Whether a renderer accepts it.
+        pub fn is_valid(&self) -> bool {
+            self.centre.is_none_or(|c| c.iter().all(|v| (0.0..=1.0).contains(v)))
+                && self
+                    .vignetting
+                    .iter()
+                    .chain(&self.distortion)
+                    .chain(self.chromatic.iter().flatten())
+                    .all(LensCurve::is_valid)
+        }
+    }
+
+    impl LensCurve {
+        fn is_valid(&self) -> bool {
+            let (knots, values) = (&self.knots, &self.values);
+            (2..=64).contains(&knots.len())
+                && values.len() == knots.len()
+                && knots.iter().chain(values).all(|v| v.is_finite())
+                && knots[0] >= 0.0
+                && knots.windows(2).all(|w| w[0] < w[1])
+                && values.iter().all(|v| (0.2..=5.0).contains(v))
+        }
+    }
+
+    /// A provider's film look (`agProviderLook`).
+    #[derive(Deserialize)]
+    pub struct Look {
+        camera: Text,
+        look: Text,
+        #[serde(default)]
+        options: Switches,
+        #[serde(rename = "ownWb")]
+        own_wb: Option<OwnWhite>,
+        #[serde(default)]
+        before: Before,
+    }
+
+    #[derive(Deserialize)]
+    struct OwnWhite {
+        option: Text,
+        wb: Option<WhiteInts>,
+    }
+
+    #[derive(Deserialize)]
+    struct WhiteInts {
+        temperature: i32,
+        tint: i32,
+    }
+
+    /// The tone rendering the edit had before the look.
+    #[derive(Deserialize, Default)]
+    struct Before {
+        #[serde(rename = "rawToneRendering")]
+        rendering: Option<Text>,
+        #[serde(rename = "rawToneCurve")]
+        curve: Option<Vec<Point32>>,
+        #[serde(rename = "rawToneCurveMode")]
+        curve_mode: Option<Text>,
+    }
+
+    #[derive(Deserialize)]
+    struct Point32 {
+        x: f32,
+        y: f32,
+    }
 }
 
 #[cfg(test)]
@@ -724,7 +816,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keys_are_in_byte_order_for_the_binary_search() {
-        assert!(KEYS.windows(2).all(|w| w[0] < w[1]), "{:?}", KEYS.windows(2).find(|w| w[0] >= w[1]));
+    fn read_keys_are_sorted_for_the_binary_search() {
+        assert!(READ_KEYS.windows(2).all(|w| w[0] < w[1]));
+        assert!(reads("centréX") && reads("whites") && reads("agBlackWhite"));
+        assert!(!reads("masks") && !reads("aiPatches") && !reads("version"));
+    }
+
+    #[test]
+    fn an_empty_edit_renders_as_untouched() {
+        let empty = Facts { object: true, ..Facts::default() };
+        for is_raw in [false, true] {
+            assert_eq!(kind(&empty, is_raw), Kind::None);
+        }
     }
 }

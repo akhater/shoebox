@@ -107,13 +107,13 @@ pub(crate) struct Scratch(Vec<u8>);
 
 impl Scratch {
     pub fn new() -> Self {
-        Scratch(Vec::with_capacity(4096))
+        Scratch(Vec::with_capacity(1024))
     }
 }
 
 /// How much of one value's bytes waits in the scratch buffer before going to
 /// its hasher in one block.
-const BLOCK: usize = 16 * 1024;
+const BLOCK: usize = 4 * 1024;
 
 /// One array's or object's canonical bytes, from `start` in the scratch buffer.
 struct Frame {
@@ -156,7 +156,7 @@ impl Frame {
 }
 
 fn leaf(tag: u8, payload: &[u8]) -> Digest {
-    if 1 + payload.len() <= SHORT {
+    if payload.len() < SHORT {
         let mut bytes = [0; SHORT];
         bytes[0] = tag;
         bytes[1..1 + payload.len()].copy_from_slice(payload);

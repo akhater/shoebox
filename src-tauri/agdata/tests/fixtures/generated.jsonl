@@ -60,6 +60,26 @@
 {"case":"ai patch","edit":{"aiPatches":[{"id":"patch-1","invert":false}]},"other":"edit","raw":"edit"}
 {"case":"deep nesting","other":"none","raw":"none","sidecar":"{\"adjustments\":{\"deep\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"exposure\":1},\"rating\":0,\"tags\":[],\"version\":1}"}
 {"case":"deep nesting, 120","edit":{"deep":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],"exposure":1},"other":"edit","raw":"edit"}
+{"case":"strict: lone high surrogate in exif","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"exif\":{\"a\":\"\\ud800\"},\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: lone low surrogate in history","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"agHistory\":[\"\\udc00\"],\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: lone surrogate in an exif key","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"exif\":{\"\\ud800\":\"a\"},\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: lone surrogate in snapshots","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"agSnapshots\":[{\"name\":\"\\ud800x\"}],\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: lone surrogate in an unread edit key","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"adjustments\":{\"exposure\":0.5,\"note\":\"\\ud800\"}}"}
+{"case":"strict: lone surrogate in a read edit key","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"adjustments\":{\"exposure\":0.5,\"lutPath\":\"\\udfff\"}}"}
+{"case":"strict: surrogate pair in exif","other":"edit","raw":"edit","sidecar":"{\"version\":1,\"rating\":0,\"exif\":{\"a\":\"\\ud83d\\ude00\"},\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: reversed surrogate pair in exif","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"exif\":{\"a\":\"\\ude00\\ud83d\"},\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: number out of range in exif","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"exif\":{\"n\":1e999},\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: number out of range in history","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"agHistory\":{\"n\":-1e400},\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: number out of range in an unread edit key","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"adjustments\":{\"exposure\":0.5,\"x\":1e999}}"}
+{"case":"strict: tiny number in exif","other":"edit","raw":"edit","sidecar":"{\"version\":1,\"rating\":0,\"exif\":{\"n\":1e-999},\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: huge integer in exif","other":"edit","raw":"edit","sidecar":"{\"version\":1,\"rating\":0,\"exif\":{\"n\":123456789012345678901234567890},\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: bad escape in exif","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"exif\":{\"a\":\"\\q\"},\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: control character in exif","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"exif\":{\"a\":\"x\u0001y\"},\"adjustments\":{\"exposure\":0.5}}"}
+{"case":"strict: escaped key centre","other":"edit","raw":"edit","sidecar":"{\"version\":1,\"rating\":0,\"adjustments\":{\"centr\\u00e9X\":0.42}}"}
+{"case":"strict: escaped key exposure","other":"edit","raw":"edit","sidecar":"{\"version\":1,\"rating\":0,\"adjustments\":{\"e\\u0078posure\":0.5}}"}
+{"case":"strict: escaped adjustments key","other":"edit","raw":"edit","sidecar":"{\"version\":1,\"rating\":0,\"\\u0061djustments\":{\"exposure\":0.5}}"}
+{"case":"strict: escaped film marker","other":"film","raw":"film","sidecar":"{\"version\":1,\"rating\":0,\"adjustments\":{\"lutPath\":\"provider\\u002dlook\",\"agProviderLook\":{\"camera\":\"c\",\"look\":\"l\"}}}"}
+{"case":"strict: deep history","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"agHistory\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"adjustments\":{\"exposure\":0.5}}"}
 {"case":"malformed: empty file","other":"none","raw":"none","sidecar":""}
 {"case":"malformed: truncated","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"adjustments\":{\"exposure\":1"}
 {"case":"malformed: trailing garbage","other":"none","raw":"none","sidecar":"{\"version\":1,\"rating\":0,\"adjustments\":{\"exposure\":1}} x"}
