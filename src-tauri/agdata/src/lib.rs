@@ -13,9 +13,8 @@
 //! assert_eq!(status.kind, agdata::Kind::Edit);
 //! ```
 //!
-//! The sidecar is read in one pass: its EXIF copy, history and snapshots are
-//! skipped without being built, and of the edit only the few small values the
-//! rule needs are kept.
+//! The sidecar is read without being built: of its edit, only the values the
+//! rule asks for are.
 
 mod edited;
 mod fingerprint;
@@ -25,7 +24,7 @@ mod read;
 use std::fmt;
 
 pub use fingerprint::Fingerprint;
-pub use name::{EXTENSION, SidecarName, copy_sidecar_name, parse_sidecar_name, sidecar_name};
+pub use name::{EXTENSION, SidecarName, parse_sidecar_name, sidecar_name};
 
 /// How Argentum marks a photo in its library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -43,36 +42,22 @@ pub enum Kind {
 pub struct Status {
     pub kind: Kind,
     /// Changes when the edit changes; stays when only the rest of the sidecar
-    /// (rating, tags, EXIF copy, history, snapshots) or its layout does.
+    /// (rating, tags, EXIF copy, history, snapshots) does.
     pub fingerprint: Fingerprint,
 }
 
-/// A sidecar that does not read as one. Argentum shows its photo unedited.
+/// A sidecar that does not read as one: not UTF-8 text, or not a JSON object.
+/// Argentum shows its photo unedited.
 #[derive(Debug)]
-pub enum Error {
-    /// Not UTF-8 text.
-    NotText,
-    /// Not a JSON object.
-    NotJson(serde_json::Error),
-}
+pub struct Error;
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::NotText => f.write_str("the sidecar is not UTF-8 text"),
-            Error::NotJson(e) => write!(f, "the sidecar is not a JSON object: {e}"),
-        }
+        f.write_str("the sidecar is not a JSON object in UTF-8 text")
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::NotText => None,
-            Error::NotJson(e) => Some(e),
-        }
-    }
-}
+impl std::error::Error for Error {}
 
 /// What the sidecar `bytes` says about its photo's edit. `is_raw`: whether the
 /// photo is a RAW file, which changes what an untouched edit renders as. It

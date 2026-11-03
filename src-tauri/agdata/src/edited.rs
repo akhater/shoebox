@@ -7,102 +7,11 @@
 //! for it differ from those given for an empty edit, compared bit for bit as
 //! 32-bit floats and integers.
 
-use std::sync::OnceLock;
-
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::Kind;
 use crate::read::Facts;
-
-/// The edit's top-level keys the rule reads, in byte order for a binary search.
-/// `masks` and `aiPatches` are not here: the reader keeps them as flags.
-const READ_KEYS: [&str; 79] = [
-    "agBlackWhite",
-    "agLutDeclaredInput",
-    "agProviderLook",
-    "agRestore",
-    "agSharpen",
-    "blacks",
-    "brightness",
-    "cameraProfile",
-    "centré",
-    "centréX",
-    "centréY",
-    "chromaticAberrationBlueYellow",
-    "chromaticAberrationRedCyan",
-    "clarity",
-    "colorCalibration",
-    "colorGrading",
-    "colorNoiseReduction",
-    "contrast",
-    "crop",
-    "curves",
-    "dehaze",
-    "exposure",
-    "flareAmount",
-    "flipHorizontal",
-    "flipVertical",
-    "glowAmount",
-    "grainAmount",
-    "grainRoughness",
-    "grainSize",
-    "guidedPerspective",
-    "halationAmount",
-    "highlights",
-    "hsl",
-    "hue",
-    "lensBuiltin",
-    "lensBuiltinParams",
-    "lensDistortionAmount",
-    "lensDistortionEnabled",
-    "lensDistortionParams",
-    "lensTcaAmount",
-    "lensTcaEnabled",
-    "lensVignetteAmount",
-    "lensVignetteEnabled",
-    "lumaNoiseReduction",
-    "lutIntensity",
-    "lutIsSceneReferred",
-    "lutPath",
-    "orientationSteps",
-    "rawToneCurve",
-    "rawToneCurveMode",
-    "rawToneRendering",
-    "rotation",
-    "saturation",
-    "sectionVisibility",
-    "shadows",
-    "sharpness",
-    "sharpnessThreshold",
-    "showClipping",
-    "structure",
-    "temperature",
-    "tint",
-    "toneMapper",
-    "transformAspect",
-    "transformDistortion",
-    "transformHorizontal",
-    "transformRotate",
-    "transformScale",
-    "transformVertical",
-    "transformXOffset",
-    "transformYOffset",
-    "vibrance",
-    "vignetteAmount",
-    "vignetteCenterX",
-    "vignetteCenterY",
-    "vignetteFeather",
-    "vignetteMidpoint",
-    "vignetteRoundness",
-    "whiteBalance",
-    "whites",
-];
-
-/// Whether the rule reads the edit's top-level key `key`.
-pub(crate) fn reads(key: &str) -> bool {
-    READ_KEYS.binary_search(&key).is_ok()
-}
 
 /// The mark an edit gets. `is_raw`: whether its photo is a RAW file.
 pub(crate) fn kind(edit: &Facts, is_raw: bool) -> Kind {
@@ -110,7 +19,7 @@ pub(crate) fn kind(edit: &Facts, is_raw: bool) -> Kind {
         return Kind::None;
     }
     let eyes = Eyes::of(edit);
-    let edited = shows_directly(edit, &eyes) || Rendered::of(edit, &eyes, is_raw) != *untouched(is_raw);
+    let edited = shows_directly(edit, &eyes) || Rendered::of(edit, &eyes, is_raw) != untouched(is_raw);
     match edited {
         false => Kind::None,
         true if film_look(edit) => Kind::Film,
@@ -118,13 +27,10 @@ pub(crate) fn kind(edit: &Facts, is_raw: bool) -> Kind {
     }
 }
 
-/// What a renderer is given for an empty edit, worked out once per kind of photo.
-fn untouched(is_raw: bool) -> &'static Rendered {
-    static UNTOUCHED: [OnceLock<Rendered>; 2] = [OnceLock::new(), OnceLock::new()];
-    UNTOUCHED[usize::from(is_raw)].get_or_init(|| {
-        let empty = Facts { object: true, ..Facts::default() };
-        Rendered::of(&empty, &Eyes::of(&empty), is_raw)
-    })
+/// What a renderer is given for an empty edit.
+fn untouched(is_raw: bool) -> Rendered {
+    let empty = Facts { object: true, ..Facts::default() };
+    Rendered::of(&empty, &Eyes::of(&empty), is_raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -637,50 +543,9 @@ fn film_look(edit: &Facts) -> bool {
 /// end, while a plain `Option` (may be null, not absent) must be there.
 #[allow(dead_code)]
 mod shape {
-    use std::fmt;
+    use std::collections::HashMap;
 
     use serde::Deserialize;
-    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
-
-    /// A JSON string, checked and not kept.
-    pub struct Text;
-
-    impl<'de> Deserialize<'de> for Text {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            struct V;
-            impl Visitor<'_> for V {
-                type Value = Text;
-                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    f.write_str("a string")
-                }
-                fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Text, E> {
-                    Ok(Text)
-                }
-            }
-            deserializer.deserialize_str(V)
-        }
-    }
-
-    /// A JSON object whose values are all booleans, checked and not kept.
-    #[derive(Default)]
-    pub struct Switches;
-
-    impl<'de> Deserialize<'de> for Switches {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            struct V;
-            impl<'de> Visitor<'de> for V {
-                type Value = Switches;
-                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    f.write_str("an object of booleans")
-                }
-                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Switches, A::Error> {
-                    while map.next_entry::<IgnoredAny, bool>()?.is_some() {}
-                    Ok(Switches)
-                }
-            }
-            deserializer.deserialize_map(V)
-        }
-    }
 
     /// The crop.
     #[derive(Deserialize)]
@@ -707,7 +572,7 @@ mod shape {
     /// A guide line of guided perspective.
     #[derive(Deserialize)]
     pub struct GuideLine {
-        id: Text,
+        id: String,
         #[serde(rename = "type")]
         direction: Direction,
         p1: Point,
@@ -718,7 +583,7 @@ mod shape {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct LensTable {
-        source: Text,
+        source: String,
         #[serde(default)]
         default_on: bool,
         vignetting: Option<LensCurve>,
@@ -778,10 +643,10 @@ mod shape {
     /// A provider's film look (`agProviderLook`).
     #[derive(Deserialize)]
     pub struct Look {
-        camera: Text,
-        look: Text,
+        camera: String,
+        look: String,
         #[serde(default)]
-        options: Switches,
+        options: HashMap<String, bool>,
         #[serde(default, rename = "ownWb")]
         own_wb: Option<OwnWhite>,
         #[serde(default)]
@@ -790,7 +655,7 @@ mod shape {
 
     #[derive(Deserialize)]
     struct OwnWhite {
-        option: Text,
+        option: String,
         // May be left out of an object, but not of an array (measured).
         wb: Option<WhiteInts>,
     }
@@ -806,11 +671,11 @@ mod shape {
     #[serde(default)]
     struct Before {
         #[serde(rename = "rawToneRendering")]
-        rendering: Option<Text>,
+        rendering: Option<String>,
         #[serde(rename = "rawToneCurve")]
         curve: Option<Vec<Point32>>,
         #[serde(rename = "rawToneCurveMode")]
-        curve_mode: Option<Text>,
+        curve_mode: Option<String>,
     }
 
     #[derive(Deserialize)]
@@ -823,13 +688,6 @@ mod shape {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn read_keys_are_sorted_for_the_binary_search() {
-        assert!(READ_KEYS.windows(2).all(|w| w[0] < w[1]));
-        assert!(reads("centréX") && reads("whites") && reads("agBlackWhite"));
-        assert!(!reads("masks") && !reads("aiPatches") && !reads("version"));
-    }
 
     #[test]
     fn an_empty_edit_renders_as_untouched() {

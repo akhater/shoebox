@@ -199,11 +199,12 @@ jobs:
       - name: Compare with Argentum's main branch
         run: |
           set +e
-          hash=$(bash src-tauri/agdata/argentum-drift.sh)
+          files=$(bash src-tauri/agdata/argentum-drift.sh)
           status=$?
+          echo "$files"
           case $status in
-            0) echo "Argentum's edit rule is the one agdata was checked against (${hash:0:12})." ;;
-            1) echo "::warning title=Argentum edit rule::The parts of Argentum that src-tauri/agdata follows have changed (now ${hash:0:12}). Run its differential check again (src-tauri/agdata/README.md), then update PINNED in argentum-drift.sh." ;;
-            *) echo "::warning title=Argentum edit rule::Could not read every part of Argentum that src-tauri/agdata follows (see the log); some were moved or renamed." ;;
+            0) echo "Argentum's edit rule is the one agdata was checked against." ;;
+            1) echo "::warning title=Argentum edit rule::Argentum files that src-tauri/agdata follows have changed: $(echo $files). Run its differential check again (src-tauri/agdata/README.md), then update the hashes in argentum-drift.sh." ;;
+            *) echo "::warning title=Argentum edit rule::Argentum files that src-tauri/agdata follows were moved or renamed: $(echo $files)." ;;
           esac
           exit 0

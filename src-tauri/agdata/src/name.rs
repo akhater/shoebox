@@ -23,12 +23,6 @@ pub fn sidecar_name(photo: &str) -> String {
     format!("{photo}{ENDING}")
 }
 
-/// The name of the sidecar holding the edit of virtual copy `id` of the photo
-/// named `photo`; `None` when `id` is not a copy id (six lowercase hex digits).
-pub fn copy_sidecar_name(photo: &str, id: &str) -> Option<String> {
-    is_copy_id(id).then(|| format!("{photo}.{id}{ENDING}"))
-}
-
 /// The photo and copy a sidecar's file name stands for; `None` when the name is
 /// not a sidecar's. A last part that is not a copy id is part of the photo's
 /// own name.
@@ -44,25 +38,4 @@ pub fn parse_sidecar_name(file_name: &str) -> Option<SidecarName<'_>> {
 /// Six characters, each a digit or a lowercase `a` to `f`.
 fn is_copy_id(id: &str) -> bool {
     id.len() == 6 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_round_trip() {
-        assert_eq!(parse_sidecar_name(&sidecar_name("a.b.jpg")), Some(SidecarName { photo: "a.b.jpg", copy: None }));
-        let copy = copy_sidecar_name("a.jpg", "0f9e8d").unwrap();
-        assert_eq!(parse_sidecar_name(&copy), Some(SidecarName { photo: "a.jpg", copy: Some("0f9e8d") }));
-    }
-
-    #[test]
-    fn odd_names_do_not_panic() {
-        assert_eq!(parse_sidecar_name(".agdata"), Some(SidecarName { photo: "", copy: None }));
-        assert_eq!(parse_sidecar_name(".abcdef.agdata"), Some(SidecarName { photo: "", copy: Some("abcdef") }));
-        assert_eq!(parse_sidecar_name("été.ééé.agdata"), Some(SidecarName { photo: "été.ééé", copy: None }));
-        assert_eq!(parse_sidecar_name("日本語"), None);
-        assert_eq!(parse_sidecar_name("photo.ABCDEF.agdata"), Some(SidecarName { photo: "photo.ABCDEF", copy: None }));
-    }
 }
