@@ -1047,9 +1047,10 @@ mod tests {
             "purge_all",
             "restore_all",
         ];
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut bad = Vec::new();
-        for entry in walkdir::WalkDir::new(&src).into_iter().flatten() {
+        // The crates in this workspace are scanned too.
+        for entry in ["src", "focus-points/src"].iter().flat_map(|d| walkdir::WalkDir::new(root.join(d))).flatten() {
             let p = entry.path();
             if p.extension().is_none_or(|e| e != "rs") || p.ends_with("paths.rs") || p.ends_with("organize.rs") {
                 continue;

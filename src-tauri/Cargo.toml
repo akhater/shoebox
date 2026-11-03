@@ -9,6 +9,11 @@ default-run = "shoebox"
 # Integration tests are one program, declared below (see tests/all.rs).
 autotests = false
 
+# The autofocus-point reader is a crate of its own (focus-points/); a workspace
+# so its tests run with `cargo test --workspace` and it shares this target folder.
+[workspace]
+members = ["focus-points"]
+
 [lib]
 name = "shoebox_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -31,6 +36,7 @@ path = "tests/all.rs"
 tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
+focus-points = { path = "focus-points" }
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-single-instance = "2.4.3"

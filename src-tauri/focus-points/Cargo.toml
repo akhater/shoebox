@@ -1,0 +1,11 @@
+[package]
+name = "focus-points"
+description = "Reads the autofocus points a camera records in a photo's maker note."
+authors = ["The Shoebox contributors"]
+license = "MIT"
+edition = "2024"
+version = "0.1.0"
+rust-version = "1.98"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
