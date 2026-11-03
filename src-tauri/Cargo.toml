@@ -9,10 +9,11 @@ default-run = "shoebox"
 # Integration tests are one program, declared below (see tests/all.rs).
 autotests = false
 
-# The autofocus-point reader is a crate of its own (focus-points/); a workspace
-# so its tests run with `cargo test --workspace` and it shares this target folder.
+# The autofocus-point reader (focus-points/) and the Argentum sidecar reader
+# (agdata/) are crates of their own; a workspace so their tests run with
+# `cargo test --workspace` and they share this target folder.
 [workspace]
-members = ["focus-points"]
+members = ["focus-points", "agdata"]
 
 [lib]
 name = "shoebox_lib"

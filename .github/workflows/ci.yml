@@ -185,3 +185,25 @@ jobs:
             echo "Shoebox and Argentum both use rawler ${mine:0:9}."
           fi
           exit 0
+
+  # src-tauri/agdata tells whether a photo was edited the way Argentum does,
+  # proven against Argentum's code as it was then. This warns when the parts of
+  # Argentum that rule depends on have changed since; it never fails.
+  argentum-edit-rule:
+    name: Argentum edit rule
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare with Argentum's main branch
+        run: |
+          set +e
+          hash=$(bash src-tauri/agdata/argentum-drift.sh)
+          status=$?
+          case $status in
+            0) echo "Argentum's edit rule is the one agdata was checked against (${hash:0:12})." ;;
+            1) echo "::warning title=Argentum edit rule::The parts of Argentum that src-tauri/agdata follows have changed (now ${hash:0:12}). Run its differential check again (src-tauri/agdata/README.md), then update PINNED in argentum-drift.sh." ;;
+            *) echo "::warning title=Argentum edit rule::Could not read every part of Argentum that src-tauri/agdata follows (see the log); some were moved or renamed." ;;
+          esac
+          exit 0
