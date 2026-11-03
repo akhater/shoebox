@@ -42,8 +42,13 @@ same test from the same values (`src/edited.rs`).
 
 That is proven, not assumed: a differential check ran Argentum's own code and
 this crate on the same sidecars and required the same answer for each, for a
-RAW photo and for any other. `tests/fixtures/generated.jsonl` is the generated
-part of that corpus with Argentum's answers, so the crate's tests guard them.
+RAW photo and for any other: 5,742 generated sidecars (every editor value moved
+off its default one at a time, alone and among the editor's defaults; edges of
+each rule; film looks; malformed files; random mixes) and 295 real ones, 12,074
+answers, all identical. `tests/fixtures/generated.jsonl` is the generated part
+with Argentum's answers, so the crate's tests guard them;
+`tests/fixtures/editor-defaults.json` is the editor's starting edit those cases
+are built on.
 
 `argentum-drift.sh` hashes the parts of Argentum's source the rule depends on;
 CI warns when Argentum's main branch no longer matches the pinned hash, which
