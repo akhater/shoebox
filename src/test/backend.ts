@@ -77,6 +77,12 @@ export function fakeBackend() {
   /** Argentum's marks (1 an edit, 2 a film look), and those made since the window last looked. */
   const edited = new Map<number, number>();
   const editedSince = new Map<number, number>();
+  /** The version Argentum rendered of an edited photo's edit; one without waits for it. */
+  const rendered = new Map<number, string>();
+  /** Whether the Argentum installed renders edits. */
+  let rendering: "ready" | "outdated" | "missing" | "cantStart" = "ready";
+  /** Stopped from the status bar, until started again. */
+  let stoppedRenders = false;
   /** How photos were turned, and their previews' revisions (a turn makes a new one). */
   const turns = new Map<number, number>();
   const revs = new Map<number, number>();
@@ -458,8 +464,12 @@ export function fakeBackend() {
           volumeLabel: "Disk",
           path: `D:\\${root.name}\\IMG_${id}.jpg`,
           folder: root.name,
+          edits: edited.has(id)
+            ? [{ copy: null, film: edited.get(id) === 2, version: rendered.get(id) ?? null, waiting: !rendered.has(id), error: null }]
+            : [],
         },
       ],
+      edited: edited.has(id) ? (rendered.get(id) ?? null) : null,
     };
   };
 
@@ -725,6 +735,14 @@ export function fakeBackend() {
         if (changed) void emit("catalog-changed", null);
         return changed;
       }
+      case "edit_rendering":
+        return stoppedRenders ? "stopped" : rendering;
+      case "cancel_edit_renders":
+        stoppedRenders = true;
+        return null;
+      case "start_edit_renders":
+        stoppedRenders = false;
+        return null;
       case "argentum_found":
         return (a.chosen as string) || installedArgentum;
       case "argentum_chosen":
@@ -817,6 +835,12 @@ export function fakeBackend() {
     },
     /** Photos edited in Argentum, by id: 1 an edit, 2 a film look. */
     edited,
+    /** Versions Argentum rendered, by photo id. */
+    rendered,
+    /** What the Argentum installed can do: render edits, or not (too old, none). */
+    renders: (can: typeof rendering) => {
+      rendering = can;
+    },
     /** Edits a photo in Argentum: the window learns of it when it next looks. */
     editInArgentum: (id: number, kind: number) => editedSince.set(id, kind),
     /** Argentum isn't on this computer. */

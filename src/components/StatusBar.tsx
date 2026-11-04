@@ -1,5 +1,5 @@
 import { LoaderCircle, X } from "lucide-react";
-import { fmtBytes, fmtDay, fmtNum, type AiProgress, type FolderMoveEvent, type Overview, type PhotoDetail, type Progress } from "../api";
+import { fmtBytes, fmtDay, fmtNum, type AiProgress, type EditsProgress, type FolderMoveEvent, type Overview, type PhotoDetail, type Progress } from "../api";
 import type { Message } from "../App";
 
 interface Props {
@@ -10,6 +10,9 @@ interface Props {
   overview: Overview | null;
   progress: Progress | null;
   aiProgress: AiProgress | null;
+  /** Argentum rendering edited photos. */
+  editsProgress: EditsProgress | null;
+  onStopEdits: () => void;
   queued: number;
   message: Message | null;
   onCancel: () => void;
@@ -22,7 +25,20 @@ const MOVE_PHASE = { copying: "copying", checking: "checking every byte", removi
 /** Photos are copied and checked one by one, then their originals removed. */
 const PHOTOS_PHASE = { copying: "copying and checking", checking: "checking every byte", removing: "removing the originals" } as const;
 
-export function StatusBar({ photo, selected, overview, progress, aiProgress, queued, message, onCancel, move, onStopMove }: Props) {
+export function StatusBar({
+  photo,
+  selected,
+  overview,
+  progress,
+  aiProgress,
+  editsProgress,
+  onStopEdits,
+  queued,
+  message,
+  onCancel,
+  move,
+  onStopMove,
+}: Props) {
   if (move?.progress) {
     const m = move.progress;
     const pct = m.phase === "removing" ? (m.files / Math.max(1, m.totalFiles)) * 100 : (m.bytes / Math.max(1, m.totalBytes)) * 100;
@@ -84,6 +100,25 @@ export function StatusBar({ photo, selected, overview, progress, aiProgress, que
           </span>
         )}
         <button className="btn small ghost" onClick={onCancel}>
+          <X size={14} /> Stop
+        </button>
+      </footer>
+    );
+  }
+  if (editsProgress) {
+    const left = editsProgress.total - editsProgress.done;
+    return (
+      <footer className="statusbar busy">
+        <LoaderCircle size={14} className="spinning" />
+        <span>
+          <b>Argentum is rendering edits</b> · {fmtNum(editsProgress.done)} of {fmtNum(editsProgress.total)} photos
+          <span className="muted"> · each shows as edited once done</span>
+        </span>
+        <span className="grow" />
+        <span className="bar">
+          <span style={{ width: `${(editsProgress.done / Math.max(1, editsProgress.total)) * 100}%` }} />
+        </span>
+        <button className="btn small ghost" onClick={onStopEdits} title={`Stop: the ${fmtNum(left)} left wait, through scans and plug-ins, until you start rendering again (Settings > Argentum, or a photo's details) or restart Shoebox`}>
           <X size={14} /> Stop
         </button>
       </footer>

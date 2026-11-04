@@ -124,6 +124,60 @@ impl DataDir {
         shard(&self.root.join("faces"), face_id)
     }
 
+    /// The preview or thumbnail (`thumb`) of an edited version of a photo
+    /// (see renders.rs), named by its edit (`version`): a new edit is a new
+    /// file, so a backup copies only what's new.
+    pub fn edited_path(&self, photo_id: i64, version: &str, thumb: bool) -> PathBuf {
+        let base = self.root.join(if thumb { EDITED_THUMBS } else { EDITED_PREVIEWS });
+        base.join(format!("{:02x}", photo_id & 0xff)).join(format!("{photo_id}-{version}.jpg"))
+    }
+
+    /// Every edited version kept, as (photo, version), sealed or not, in order.
+    /// Known by its preview, written last.
+    pub fn edited_versions(&self) -> Vec<(i64, String)> {
+        versions_in(&self.root.join(EDITED_PREVIEWS), 2)
+    }
+
+    /// The edited versions of one photo kept, sealed or not.
+    pub fn edited_versions_of(&self, photo_id: i64) -> Vec<String> {
+        let shard = self.edited_path(photo_id, "", false).parent().map(Path::to_path_buf).unwrap_or_default();
+        versions_in(&shard, 1).into_iter().filter(|(p, _)| *p == photo_id).map(|(_, v)| v).collect()
+    }
+
+    /// A new empty folder Argentum renders one batch into (see renders.rs),
+    /// inside the catalog: Argentum writes there, never beside a photo. Held
+    /// while in use (the window and the CLI can render at once), removed with
+    /// all in it once let go of.
+    pub fn render_dir(&self) -> io::Result<RenderDir> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let name = format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        let lock =
+            self.try_op_lock(&format!("render-{name}"))?.ok_or_else(|| io::Error::other("render folder taken"))?;
+        let path = self.root.join(RENDER_DIR).join(name);
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path)?;
+        Ok(RenderDir { path, _lock: lock })
+    }
+
+    /// Removes the render folders no Shoebox holds any more, left by one
+    /// stopped mid-batch: a private photo's pictures can be in them, in the
+    /// clear. Returns how many.
+    pub fn clear_stray_render_dirs(&self) -> usize {
+        let all = self.root.join(RENDER_DIR);
+        let mut removed = 0;
+        for left in std::fs::read_dir(&all).into_iter().flatten().flatten() {
+            // Taken now: no one holds it.
+            if let Ok(Some(_free)) = self.try_op_lock(&format!("render-{}", left.file_name().to_string_lossy())) {
+                match std::fs::remove_dir_all(left.path()) {
+                    Ok(()) => removed += 1,
+                    Err(e) => log::warn!("can't remove {}: {e}", left.path().display()),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir(all);
+        removed
+    }
+
     /// Where a private photo's copy at `path` (preview, thumbnail, face
     /// picture) is kept sealed instead (see private.rs).
     pub fn sealed_path(path: &Path) -> PathBuf {
@@ -228,7 +282,7 @@ impl DataDir {
                 e.depth() != 1
                     || !matches!(
                         e.file_name().to_str(),
-                        Some("models" | POINTER_FILE | MOVE_JOURNAL | MOVE_LOCK | OPS_DIR)
+                        Some("models" | POINTER_FILE | MOVE_JOURNAL | MOVE_LOCK | OPS_DIR | RENDER_DIR)
                     )
             })
             .flatten()
@@ -272,13 +326,13 @@ impl DataDir {
     }
 
     /// Moves this catalog's files into `target` (after [`DataDir::begin_move`]).
-    /// The big folders (previews, thumbnails, faces) move whole, the way the
+    /// The big folders (previews, thumbnails, faces, edited pictures) move whole, the way the
     /// OS moves a folder: on the same disk an instant rename, nothing copied;
     /// each is written down just before. What is left (settings, logs - and
     /// everything, on another disk) is copied.
     pub fn move_files_to(&self, target: &DataDir, progress: &dyn Fn(usize, usize)) -> io::Result<()> {
         let mut journal = self.journal().ok_or_else(|| io::Error::other("the catalog move wasn't begun"))?;
-        for sub in ["previews", "thumbs", "faces"] {
+        for sub in ["previews", "thumbs", "faces", EDITED_PREVIEWS, EDITED_THUMBS] {
             let (from, to) = (self.root.join(sub), target.root.join(sub));
             if !from.is_dir() || to.exists() || !inside(&to, &target.root) {
                 continue;
@@ -627,6 +681,15 @@ pub fn remember_data_dir(root: &Path, left_behind: Option<&Path>) -> io::Result<
 /// Where the locks of folder operations live, in the catalog folder.
 const OPS_DIR: &str = "ops";
 
+/// The edited pictures of photos edited in Argentum (see renders.rs), beside
+/// previews and thumbnails and handled like them.
+pub const EDITED_PREVIEWS: &str = "edited-previews";
+pub const EDITED_THUMBS: &str = "edited-thumbs";
+
+/// Where Argentum renders edited photos for Shoebox (see renders.rs): a
+/// folder per Shoebox running, emptied after each batch.
+const RENDER_DIR: &str = "rendering";
+
 /// Held for as long as a folder move, rename or delete runs (organize.rs): a
 /// lock on `ops\<id>.lock` in the catalog folder. The system lets go of it
 /// when the process ends, however it ends, so an operation whose lock is free
@@ -644,13 +707,37 @@ impl Drop for OpLock {
     }
 }
 
+/// A folder Argentum renders a batch into ([`DataDir::render_dir`]): removed
+/// once let go of. One that can't be (a file still open) is only logged; the
+/// next start removes it ([`DataDir::clear_stray_render_dirs`]).
+pub struct RenderDir {
+    pub path: PathBuf,
+    _lock: OpLock,
+}
+
+impl Drop for RenderDir {
+    fn drop(&mut self) {
+        match std::fs::remove_dir_all(&self.path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                log::warn!("can't remove {} yet: {e}", self.path.display());
+            }
+            _ => {}
+        }
+        // The last one out takes the folder along.
+        if let Some(all) = self.path.parent() {
+            let _ = std::fs::remove_dir(all);
+        }
+    }
+}
+
 /// What a catalog folder holds of its own: the databases (and their SQLite
 /// side files), settings, logs, backups, previews, thumbnails, faces, and a
 /// move's notes.
 fn is_catalog_entry(name: &str, is_dir: bool) -> bool {
     let n = name.to_lowercase();
     if is_dir {
-        return ["previews", "thumbs", "faces", "logs", "backup", OPS_DIR].contains(&n.as_str());
+        return ["previews", "thumbs", "faces", "logs", "backup", OPS_DIR, EDITED_PREVIEWS, EDITED_THUMBS, RENDER_DIR]
+            .contains(&n.as_str());
     }
     let db_file = std::iter::once(&"catalog.db")
         .chain(&SIDE_DATABASES)
@@ -820,6 +907,25 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     written.and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// The edited versions (photo, version) of the files `depth` folders down `dir`.
+fn versions_in(dir: &Path, depth: usize) -> Vec<(i64, String)> {
+    let mut found: Vec<(i64, String)> = walkdir::WalkDir::new(dir)
+        .min_depth(depth)
+        .max_depth(depth)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?;
+            let stem = name.strip_suffix(".jpg").or_else(|| name.strip_suffix(".sealed"))?;
+            let (photo, version) = stem.split_once('-')?;
+            Some((photo.parse().ok()?, version.to_string()))
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    found
 }
 
 /// 256 sub-folders so no single folder holds 100k files.

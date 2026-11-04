@@ -6,6 +6,7 @@ import {
   api,
   fmtBytes,
   fmtNum,
+  type EditRendering,
   type FolderCheck,
   type MoveProgress,
   type PrivateStatus,
@@ -91,6 +92,12 @@ export function SettingsDialog({
   useEffect(() => {
     if (privateQuieted) setS((now) => now && { ...now, privateWarning: false });
   }, [privateQuieted]);
+
+  // Whether the saved Argentum can render what edits look like.
+  const [rendering, setRendering] = useState<EditRendering | null>(null);
+  useEffect(() => {
+    api.editRendering().then(setRendering).catch(() => {});
+  }, []);
 
   const chosenArgentum = s?.argentumPath;
   useEffect(() => {
@@ -386,8 +393,40 @@ export function SettingsDialog({
               </div>
               <small>
                 Where photos open to be edited (E). Shoebox finds it where its installer puts it: choose it only if it
-                lives somewhere else.
+                lives somewhere else.{" "}
+                {rendering === "ready"
+                  ? "Edited photos show as Argentum renders them."
+                  : rendering === "outdated" && "Edited photos show with their mark only."}
               </small>
+              {rendering === "outdated" && argentum && chosenArgentum === s.argentumPath && (
+                <div className="row argentum-update">
+                  <span className="warn-text grow">Update Argentum to show edits: this version can't render them for Shoebox.</span>
+                  <button className="btn small" onClick={() => api.openArgentumPage().catch((e) => setError(String(e)))}>
+                    Get Argentum
+                  </button>
+                </div>
+              )}
+              {rendering === "cantStart" && argentum && (
+                <div className="row argentum-update">
+                  <span className="warn-text grow">Argentum couldn't start, so edited photos show with their mark only.</span>
+                </div>
+              )}
+              {rendering === "stopped" && (
+                <div className="row argentum-update">
+                  <span className="grow">Rendering edits is stopped until you start it again.</span>
+                  <button
+                    className="btn small"
+                    onClick={() =>
+                      api
+                        .startEditRenders()
+                        .then(() => setRendering("ready"))
+                        .catch((e) => setError(String(e)))
+                    }
+                  >
+                    Render edits
+                  </button>
+                </div>
+              )}
             </div>
             <div className="field">
               <span className="field-label">Updates</span>

@@ -4,6 +4,7 @@
 import { emit } from "@tauri-apps/api/event";
 import { act } from "react";
 import { describe, expect, test } from "vitest";
+import { editedVersions } from "../components/EditMark";
 import { ALL, type FakeBackend, fakeBackend, photosOf, SEARCH } from "./backend";
 import {
   backButton,
@@ -1645,6 +1646,77 @@ describe("Argentum's marks", () => {
     await click(byText(host, ".filter-panel label", /^Edited/).querySelector("input")!);
     await wait(300);
     expect(gridIds(host)).toEqual([101, 102]);
+  });
+
+  test("an edited photo opens as Argentum rendered it; Original, or \\, shows the photo's own", async () => {
+    const be = fakeBackend();
+    be.edited.set(101, 1);
+    be.rendered.set(101, "00000000000000aa");
+    const host = await renderApp();
+    await doubleClick(tile(host, 101));
+    await wait(100);
+    const shown = () => viewer(host)!.querySelector(".viewer-img")!.getAttribute("src");
+    const picked = () => viewer(host)!.querySelector(".view-switch button.on")?.textContent;
+    expect(shown()).toMatch(/\/preview\/101\?r=/); // as everywhere: its edit
+    const versions = [...viewer(host)!.querySelectorAll(".view-switch button")].map((b) => b.textContent);
+    expect(versions).toEqual(["Original", "Edited"]);
+    expect(picked()).toBe("Edited");
+
+    await click(byText(viewer(host)!, ".view-switch button", "Original"));
+    expect(shown()).toMatch(/\/original\/101\?r=/);
+    expect(viewer(host)).not.toBeNull(); // the switch doesn't close the viewer
+    await key(viewer(host)!, "\\");
+    expect(shown()).toMatch(/\/edited\/101\/00000000000000aa$/);
+    expect(picked()).toBe("Edited");
+
+    // A photo not edited has nothing to switch.
+    await key(viewer(host)!, "ArrowRight");
+    await wait(100);
+    expect(viewer(host)!.querySelector(".view-switch")).toBeNull();
+  });
+
+  test("an edit Argentum hasn't rendered says why it doesn't show yet", async () => {
+    const be = fakeBackend();
+    be.edited.set(101, 1);
+    be.renders("outdated");
+    const host = await renderApp();
+    await doubleClick(tile(host, 101));
+    await wait(100);
+    expect(viewer(host)!.querySelector(".view-switch")).toBeNull();
+    expect(viewer(host)!.querySelector(".loc-edit-note")?.textContent).toBe("Update Argentum to show edits");
+  });
+
+  test("Stop holds through a look at a photo, which offers to start rendering again", async () => {
+    const be = fakeBackend();
+    be.edited.set(101, 1);
+    const host = await renderApp();
+    await act(async () => {
+      await emit("edits-progress", { done: 0, total: 8, changed: 0, finished: false });
+    });
+    await wait(50);
+    await click(byText(host, ".statusbar button", /Stop/));
+    await wait(50);
+    const asked = (cmd: string) => be.calls.filter((c) => c.cmd === cmd).length;
+    expect(asked("cancel_edit_renders")).toBe(1);
+
+    await doubleClick(tile(host, 101));
+    await wait(100);
+    const note = () => viewer(host)!.querySelector(".loc-edit-note")!;
+    expect(note().textContent).toMatch(/^Rendering edits is stopped/);
+    expect(asked("start_edit_renders")).toBe(0);
+    await click(byText(note(), "button", "Render now"));
+    await wait(50);
+    expect(asked("start_edit_renders")).toBe(1);
+    expect(note().textContent).toBe("Argentum is rendering the edit…");
+  });
+
+  test("two copies of a photo, each with an edit of its own, are two versions told apart by disk", () => {
+    const edit = (version: string, copy: string | null = null) => ({ copy, film: false, version, waiting: false, error: null });
+    const files = [
+      { id: 1, volumeLabel: "Trips", edits: [edit("aaaaaaaaaaaaaaaa"), edit("cccccccccccccccc", "a1b2c3")] },
+      { id: 2, volumeLabel: "Backup", edits: [edit("bbbbbbbbbbbbbbbb"), edit("cccccccccccccccc", "a1b2c3")] },
+    ];
+    expect(editedVersions(files).map((v) => v.label)).toEqual(["Edited · Trips", "Edited · Backup", "Copy"]);
   });
 
   test("back from Argentum, the photos handed to it are looked at again, and the grid reloads only on a change", async () => {

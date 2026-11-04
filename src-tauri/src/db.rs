@@ -416,8 +416,25 @@ fn migrate(conn: &Connection) -> Result<()> {
         };
         conn.execute_batch(&format!("BEGIN; {columns} {} PRAGMA user_version = 21; COMMIT;", schema_v21()))?;
     }
+    if version < 22 {
+        // Safe to run again on a catalog that already has them (its version set back by hand).
+        let has_renders =
+            conn.prepare("SELECT 1 FROM pragma_table_info('edits') WHERE name = 'rendered'")?.exists([])?;
+        let columns = if has_renders { "" } else { SCHEMA_V22 };
+        conn.execute_batch(&format!("BEGIN; {columns} PRAGMA user_version = 22; COMMIT;"))?;
+    }
     Ok(())
 }
+
+/// What Argentum's edits look like (see renders.rs). `edits.rendered`: the
+/// fingerprint of the edit its edited pictures were rendered from (shown
+/// until a newer edit's are in); `render_failed` and `render_error`: the edit
+/// Argentum couldn't render, and why. `photos.edited`: the fingerprint of the
+/// version shown in place of the original's pictures; None shows those.
+const SCHEMA_V22: &str = "ALTER TABLE edits ADD COLUMN rendered BLOB;
+     ALTER TABLE edits ADD COLUMN render_failed BLOB;
+     ALTER TABLE edits ADD COLUMN render_error TEXT;
+     ALTER TABLE photos ADD COLUMN edited BLOB;";
 
 /// A photo's Argentum mark, worked out again from its files' edits (see
 /// edits.rs), for the photo whose id is `photo` (an SQL expression): the

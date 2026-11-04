@@ -32,6 +32,12 @@ fn is_app(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("app"))
 }
 
+/// The program itself to start for Argentum at `path` (as [`find`] gives
+/// it): inside a macOS app, when run headless rather than through the system.
+pub(crate) fn executable(path: &Path) -> PathBuf {
+    if is_app(path) { path.join("Contents/MacOS/Argentum") } else { path.to_path_buf() }
+}
+
 /// The program, when `path` is Argentum. Only a program of that name is ever
 /// started, whatever the settings say.
 pub fn program(path: &Path) -> Option<PathBuf> {

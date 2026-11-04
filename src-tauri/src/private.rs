@@ -588,9 +588,13 @@ fn private_keys(cat: &Catalog) -> Result<Vec<(i64, PublicKey)>> {
     Ok(rows.into_iter().filter_map(|(id, to)| Some((id, PublicKey::from(<[u8; 32]>::try_from(to).ok()?)))).collect())
 }
 
-/// Every copy Shoebox makes of a photo: preview, thumbnail, face pictures.
+/// Every copy Shoebox makes of a photo: preview, thumbnail, face pictures,
+/// edited pictures.
 fn copies_of(cat: &Catalog, photo_id: i64) -> Result<Vec<PathBuf>> {
     let mut out = vec![cat.data.preview_path(photo_id), cat.data.thumb_path(photo_id)];
+    for version in cat.data.edited_versions_of(photo_id) {
+        out.extend([true, false].map(|thumb| cat.data.edited_path(photo_id, &version, thumb)));
+    }
     let db = cat.read()?;
     let mut stmt = db.prepare("SELECT id FROM faces WHERE photo_id = ?1")?;
     for f in stmt.query_map([photo_id], |r| r.get::<_, i64>(0))? {

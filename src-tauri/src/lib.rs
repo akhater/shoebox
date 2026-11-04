@@ -16,6 +16,7 @@ pub mod organize;
 pub mod paths;
 pub mod private;
 pub mod psd;
+pub mod renders;
 pub mod repair;
 pub mod repoint;
 pub mod scan;
@@ -35,6 +36,7 @@ mod commands;
 
 use catalog::Catalog;
 use paths::DataDir;
+use renders::Picture;
 use scan::Progress;
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,6 +138,7 @@ pub struct AppState {
     pub measure: Arc<MeasureQueue>,
     pub closer: Arc<CloserQueue>,
     pub ai: Arc<AiQueue>,
+    pub renders: Arc<RenderQueue>,
     /// A folder being moved to another disk (one at a time), and its Stop.
     pub moving: Arc<AtomicBool>,
     pub move_cancel: Arc<AtomicBool>,
@@ -310,6 +313,67 @@ impl Kick {
             k = self.wake.wait(k).unwrap();
         }
         *k = false;
+    }
+}
+
+/// Wakes the worker that has Argentum render what edits look like. A Stop
+/// holds until rendering is started again, or Shoebox restarts: a scan, a
+/// plug-in or a look at a photo doesn't undo it.
+#[derive(Default)]
+pub struct RenderQueue {
+    kick: Kick,
+    cancel: AtomicBool,
+    stopped: AtomicBool,
+}
+
+impl RenderQueue {
+    /// There may be edits to render: nothing happens while stopped.
+    pub fn kick(&self) {
+        if !self.is_stopped() {
+            self.kick.kick();
+        }
+    }
+
+    /// Stops what is being rendered, and rendering until [`RenderQueue::start`].
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Renders again what waits, asked for by the user.
+    pub fn start(&self) {
+        self.stopped.store(false, Ordering::SeqCst);
+        self.kick.kick();
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+}
+
+/// Has Argentum render what edited photos look like (see renders.rs). Kicked
+/// at start, after each scan, after a check after editing found a change, and
+/// when a disk is plugged in. Without an Argentum that can, nothing is
+/// rendered: the edited mark shows all the same.
+fn render_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<RenderQueue>) {
+    // The first look after a start tries again the edits that failed before.
+    let mut retry = true;
+    loop {
+        q.kick.wait();
+        if q.is_stopped() {
+            continue;
+        }
+        q.cancel.store(false, Ordering::SeqCst);
+        let Ok(argentum) = renders::argentum(&cat) else { continue };
+        let progress = |p: &renders::Progress| {
+            let _ = app.emit("edits-progress", p);
+        };
+        let options = renders::Options { photo: None, retry };
+        if let Err(e) = renders::render_pending(&cat, &argentum, &options, &q.cancel, &progress) {
+            log::warn!("rendering edits failed: {e:#}");
+            let _ = app.emit("edits-progress", renders::Progress { finished: true, ..Default::default() });
+        }
+        retry = false;
     }
 }
 
@@ -535,6 +599,10 @@ pub fn remove_stray_temp_files(data: &DataDir) {
     if n > 0 {
         log::info!("{n} temporary files left by unfinished writes removed");
     }
+    let n = data.clear_stray_render_dirs();
+    if n > 0 {
+        log::info!("{n} folders Argentum rendered into, left by a Shoebox stopped mid-batch, removed");
+    }
 }
 
 /// The folder a catalog move left behind goes to the Recycle Bin (the Trash
@@ -615,6 +683,7 @@ fn scan_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<ScanQueue>, ai: Arc<AiQ
         let _ = app.emit("catalog-changed", ());
         ai.kick();
         lenses.kick();
+        app.state::<AppState>().renders.kick();
     }
 }
 
@@ -653,6 +722,7 @@ fn volume_watcher(app: AppHandle, cat: Arc<Catalog>, scans: Arc<ScanQueue>, lens
                 look_elsewhere(&app, &cat);
                 let _ = app.emit("volumes-changed", ());
                 lenses.kick();
+                app.state::<AppState>().renders.kick();
                 resume_changes(app.clone(), cat.clone());
             }
             Ok(false) => {}
@@ -763,15 +833,20 @@ fn serve_full(cat: &Catalog, path: &str, query: &str) -> tauri::http::Response<V
     }
 }
 
-/// Serves `/thumb/<id>`, `/preview/<id>` and `/face/<id>` from the data folder.
+/// Serves `/thumb/<id>`, `/preview/<id>` (edited when the photo is),
+/// `/original/<id>` (its own preview), `/edited/<id>/<version>` and
+/// `/face/<id>` from the data folder.
 fn serve_image(cat: &Catalog, path: &str) -> tauri::http::Response<Vec<u8>> {
     let mut parts = path.trim_start_matches('/').split('/');
     let kind = parts.next();
     let id = parts.next().and_then(|s| s.parse::<i64>().ok());
     let data = &cat.data;
     let file = match (kind, id) {
-        (Some("thumb"), Some(id)) => Some(data.thumb_path(id)),
-        (Some("preview"), Some(id)) => Some(data.preview_path(id)),
+        // An edited photo shows what Argentum made of it (see renders.rs).
+        (Some("thumb"), Some(id)) => renders::shown(cat, id, Picture::Thumb).ok(),
+        (Some("preview"), Some(id)) => renders::shown(cat, id, Picture::Preview).ok(),
+        (Some("original"), Some(id)) => Some(data.preview_path(id)),
+        (Some("edited"), Some(id)) => parts.next().and_then(|v| renders::version(cat, id, v, Picture::Preview)),
         (Some("face"), Some(id)) => Some(data.face_path(id)),
         _ => None,
     };
@@ -839,6 +914,7 @@ pub fn run() {
     let measure = Arc::new(MeasureQueue::default());
     let closer = Arc::new(CloserQueue::default());
     let ai = Arc::new(AiQueue::default());
+    let render_queue = Arc::new(RenderQueue::default());
     let model_queue = Arc::new(ModelQueue::default());
     let lens_kick = Arc::new(Kick::default());
     let update_status = Arc::new(Mutex::new(None));
@@ -883,6 +959,7 @@ pub fn run() {
             measure: measure.clone(),
             closer: closer.clone(),
             ai: ai.clone(),
+            renders: render_queue.clone(),
             moving: Arc::default(),
             move_cancel: Arc::default(),
             updates: update_status.clone(),
@@ -898,6 +975,11 @@ pub fn run() {
             std::thread::Builder::new().name("ai".into()).spawn(move || ai_worker(handle, c, i, f, qi, u, a))?;
             // Describe whatever isn't yet, from the start.
             ai.kick();
+            let handle = app.handle().clone();
+            let (c, r) = (cat.clone(), render_queue.clone());
+            std::thread::Builder::new().name("renders".into()).spawn(move || render_worker(handle, c, r))?;
+            // Edits not rendered yet (or that failed before), from the start.
+            render_queue.kick();
             let handle = app.handle().clone();
             let (c, qi, mq) = (cat.clone(), quality.clone(), measure.clone());
             std::thread::Builder::new().name("measure".into()).spawn(move || measure_worker(handle, c, qi, mq))?;
@@ -937,6 +1019,9 @@ pub fn run() {
             commands::open_file,
             commands::open_in_argentum,
             commands::check_argentum_edits,
+            commands::edit_rendering,
+            commands::cancel_edit_renders,
+            commands::start_edit_renders,
             commands::argentum_found,
             commands::argentum_chosen,
             commands::open_argentum_page,
@@ -1034,6 +1119,20 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stop_holds_through_scans_plug_ins_and_looks_until_started_again() {
+        let q = RenderQueue::default();
+        let kicked = |q: &RenderQueue| std::mem::take(&mut *q.kick.kicked.lock().unwrap());
+        q.kick();
+        assert!(kicked(&q));
+        q.stop();
+        assert!(q.cancel.load(Ordering::SeqCst), "what is being rendered stops");
+        q.kick(); // a scan, a plug-in, Settings or the viewer asking
+        assert!(!kicked(&q) && q.is_stopped());
+        q.start();
+        assert!(kicked(&q) && !q.is_stopped());
+    }
 
     #[test]
     fn an_index_is_waited_for_until_read_then_says_if_reading_failed() {

@@ -592,7 +592,7 @@ pub async fn open_in_argentum(state: State<'_, AppState>, photo_id: i64) -> Res<
 /// edit changed. Returns how many photos changed.
 #[tauri::command]
 pub async fn check_argentum_edits(app: AppHandle, state: State<'_, AppState>) -> Res<u64> {
-    let cat = state.cat.clone();
+    let (cat, renders) = (state.cat.clone(), state.renders.clone());
     // Asked on every return to the window: one at a time, never piled up,
     // and only when a folder handed over is on a disk plugged in.
     static CHECKING: AtomicBool = AtomicBool::new(false);
@@ -604,8 +604,42 @@ pub async fn check_argentum_edits(app: AppHandle, state: State<'_, AppState>) ->
     let changed = changed?;
     if changed > 0 {
         let _ = app.emit("catalog-changed", ());
+        // What the new edits look like.
+        renders.kick();
     }
     Ok(changed)
+}
+
+/// Whether edits are rendered: "stopped" (from the window, until started
+/// again), else whether the Argentum Settings has can render them: "ready",
+/// "outdated" (an update does), "cantStart" or "missing". Asked of Argentum
+/// once per build. Looks for edits to render when it can.
+#[tauri::command]
+pub async fn edit_rendering(state: State<'_, AppState>) -> Res<serde_json::Value> {
+    let (cat, renders) = (state.cat.clone(), state.renders.clone());
+    if renders.is_stopped() {
+        return Ok(serde_json::json!("stopped"));
+    }
+    blocking(move || match crate::renders::argentum(&cat) {
+        Ok(_) => {
+            renders.kick();
+            Ok(serde_json::json!(crate::renders::Support::Ready))
+        }
+        Err(support) => Ok(serde_json::json!(support)),
+    })
+    .await
+}
+
+/// Stops rendering edits, until [`start_edit_renders`] or a restart.
+#[tauri::command]
+pub fn cancel_edit_renders(state: State<'_, AppState>) {
+    state.renders.stop();
+}
+
+/// Renders the edits that wait, after a Stop.
+#[tauri::command]
+pub fn start_edit_renders(state: State<'_, AppState>) {
+    state.renders.start();
 }
 
 /// The Argentum photos open in, as Settings has it now.

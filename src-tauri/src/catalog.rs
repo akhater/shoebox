@@ -613,8 +613,10 @@ impl Catalog {
             .filter_map(|f| self.data.root.join(f).metadata().ok())
             .map(|m| m.len())
             .sum();
-        let (_, preview_bytes) = self.data.usage("previews");
-        let (_, thumb_bytes) = self.data.usage("thumbs");
+        // Edited pictures count with the previews and thumbnails they stand in for.
+        let bytes = |sub: &str| self.data.usage(sub).1;
+        let preview_bytes = bytes("previews") + bytes(paths::EDITED_PREVIEWS);
+        let thumb_bytes = bytes("thumbs") + bytes(paths::EDITED_THUMBS);
         Ok(Stats {
             photos,
             raw,
@@ -1217,7 +1219,7 @@ impl Catalog {
                 &format!(
                     "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
                             exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown, p.turn,
-                            MAX(COALESCE(p.sideways, 0), 0), p.focus, p.private, p.taken_original, p.stack
+                            MAX(COALESCE(p.sideways, 0), 0), p.focus, p.private, p.taken_original, p.stack, p.edited
                        FROM photos p WHERE id = ?1 AND {}",
                     self.shown_sql("p")
                 ),
@@ -1250,6 +1252,7 @@ impl Catalog {
                             turn: r.get(18)?,
                             sideways: r.get(19)?,
                             private: r.get::<_, i64>(21)? == 1,
+                            edited: r.get::<_, Option<Vec<u8>>>(24)?.as_deref().map(crate::renders::version_of),
                             focus: None,
                             stack: None,
                             problems: Vec::new(),
@@ -1441,7 +1444,9 @@ impl Catalog {
             }
         }
         let ignore = self.data.root.join(".kopiaignore");
-        if !ignore.exists() {
+        // One Shoebox wrote is brought up to date; one edited by hand is left as it is.
+        let old = std::fs::read_to_string(&ignore).ok();
+        if old.as_deref().is_none_or(|o| o != KOPIA_IGNORE && o.starts_with("# Written by Shoebox")) {
             self.data.write(&ignore, KOPIA_IGNORE.as_bytes())?;
         }
         let bytes = files.iter().filter_map(|f| dir.join(f).metadata().ok()).map(|m| m.len()).sum();
@@ -1559,11 +1564,18 @@ impl Catalog {
         {
             bail!("Unknown file {file_id}");
         }
+        self.located(vid, &rel, &name)
+    }
+
+    /// Full path of file `name` in folder `rel` of disk `vid`, when it is plugged
+    /// in, whether or not its photo is hidden: for work whose copies are sealed
+    /// without a password (previews, edited pictures).
+    pub(crate) fn located(&self, vid: i64, rel: &str, name: &str) -> Result<String> {
         let mount = self.mount_of(vid).ok_or_else(|| anyhow!("That disk is not plugged in"))?;
-        if self.is_unreachable(vid, &rel) {
+        if self.is_unreachable(vid, rel) {
             bail!("That folder isn't where it was on the disk");
         }
-        Ok(volumes::file_path(&mount, &rel, &name))
+        Ok(volumes::file_path(&mount, rel, name))
     }
 }
 
@@ -1748,6 +1760,7 @@ const KOPIA_IGNORE: &str = "# Written by Shoebox. For Kopia (or any tool reading
 /*.db-journal\r
 *.tmp\r
 /logs/\r
+/rendering/\r
 ";
 
 #[derive(Serialize)]
@@ -2564,6 +2577,8 @@ pub struct PhotoDetail {
     pub sideways: i64,
     /// A private photo (shown only while they are unlocked).
     pub private: bool,
+    /// The edited version shown in place of its own pictures (see renders.rs).
+    pub edited: Option<String>,
     /// Where the camera focused, as the photo is shown; None when its file doesn't say.
     pub focus: Option<crate::focus::Focus>,
     /// Its place in a focus stack, when it is a frame of one (see stacks.rs).
