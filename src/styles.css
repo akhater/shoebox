@@ -3685,6 +3685,34 @@ button.link:hover {
 .badge.private.next-to-marked {
   right: 34px;
 }
+/* Edited in Argentum: its mark (sliders, or a film can for a film look), top right, left of
+   the marked and private badges; with the number of versions when it keeps several. */
+.edit-badge {
+  position: absolute;
+  top: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border-radius: 11px;
+  background: rgba(10, 10, 12, 0.72);
+  color: #e9e9ec;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 13px;
+}
+.edit-badge.counted {
+  padding-right: 7px;
+}
+/* A copy's Argentum edits, in the viewer's Location. */
+.loc-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text);
+}
 .nav-item .nav-lock {
   margin-right: 8px;
   padding: 0 7px;

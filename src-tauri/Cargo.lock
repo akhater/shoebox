@@ -34,6 +34,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agdata"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4887,6 +4896,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "shoebox"
 version = "26.45.2"
 dependencies = [
+ "agdata",
  "anyhow",
  "argon2",
  "blake3",

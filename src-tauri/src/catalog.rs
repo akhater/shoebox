@@ -45,6 +45,8 @@ pub struct Catalog {
     kept_facets: Kept<Facets>,
     /// The private photos' key while they are unlocked (see private.rs).
     pub vault: crate::private::Vault,
+    /// Folders of photos handed to Argentum, and when (see edits.rs).
+    pub(crate) handed_to_argentum: Mutex<HashMap<PathBuf, std::time::Instant>>,
 }
 
 impl Catalog {
@@ -73,6 +75,7 @@ impl Catalog {
             kept_lists: Kept::new(3),
             kept_facets: Kept::new(8),
             vault: Default::default(),
+            handed_to_argentum: Mutex::default(),
         };
         cat.refresh_volumes()?;
         cat.refresh_roots()?;
@@ -180,6 +183,20 @@ impl Catalog {
 
     pub fn mount_of(&self, volume_id: i64) -> Option<String> {
         self.online.read().unwrap().get(&volume_id).cloned()
+    }
+
+    /// The disk and folder (as the catalog keeps it) of `path`, on a disk
+    /// plugged in now.
+    pub fn folder_at(&self, path: &Path) -> Option<(i64, String)> {
+        let full = path.to_string_lossy();
+        let within = |mount: &str| {
+            let mount = mount.trim_end_matches(['\\', '/']);
+            full.get(..mount.len()).is_some_and(|start| start.eq_ignore_ascii_case(mount))
+                && full[mount.len()..].chars().next().is_none_or(|c| c == '\\' || c == '/')
+        };
+        let online = self.online.read().unwrap();
+        let (id, mount) = online.iter().filter(|(_, m)| within(m)).max_by_key(|(_, m)| m.len())?;
+        Some((*id, volumes::rel_of(mount, path)))
     }
 
     pub fn online_ids(&self) -> Vec<i64> {
@@ -812,7 +829,8 @@ impl Catalog {
             "SELECT p.id, COALESCE(p.taken_ts, 0), {state},
                     COALESCE(p.thumb_w, 0), COALESCE(p.thumb_h, 0), p.preview_rev, p.preview_state, p.marked,
                     COALESCE((SELECT {EXT_SQL} FROM files f WHERE f.photo_id = p.id ORDER BY f.state LIMIT 1), ''),
-                    p.kind = 'raw', {fresh}, MAX(COALESCE(p.sideways, 0), 0), p.private, COALESCE(p.stack, 0)
+                    p.kind = 'raw', {fresh}, MAX(COALESCE(p.sideways, 0), 0), p.private, COALESCE(p.stack, 0),
+                    p.edit_kind, p.edit_versions
                FROM photos p
               WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {}
                 AND (?10 IS NULL OR p.id IN (SELECT value FROM json_each(?10)))
@@ -839,6 +857,8 @@ impl Catalog {
             out.sideways.push(r.get(11)?);
             out.private.push(r.get(12)?);
             out.stack.push(r.get(13)?);
+            out.edit.push(r.get(14)?);
+            out.edits.push(r.get(15)?);
         }
         Ok(out)
     }
@@ -973,6 +993,24 @@ impl Catalog {
             } else {
                 Vec::new()
             },
+            edits: {
+                // Counted with every other filter, not its own.
+                let others = Filters { edits: Vec::new(), ..filters.clone() };
+                let sql = format!(
+                    "SELECT CASE p.edit_kind WHEN {} THEN 'edited' WHEN {} THEN 'film' ELSE 'notEdited' END AS v,
+                            COUNT(*)
+                       FROM photos p WHERE {filter} AND (?1 = ?1 AND ?2 = ?2) AND {} GROUP BY v ORDER BY v",
+                    crate::edits::EDIT,
+                    crate::edits::FILM,
+                    self.filters_sql(&others, &state)
+                );
+                let [d, c, l, t, s, pe, tg] = others.params(None);
+                db.prepare(&sql)?
+                    .query_map(params![p1, p2, d, c, l, t, s, pe, tg], |r| {
+                        Ok(FacetValue { value: r.get(0)?, count: r.get(1)? })
+                    })?
+                    .collect::<rusqlite::Result<_>>()?
+            },
             people,
             tags,
         })
@@ -1076,6 +1114,8 @@ impl Catalog {
                 out.fresh.push(all.fresh[i]);
                 out.sideways.push(all.sideways[i]);
                 out.private.push(all.private[i]);
+                out.edit.push(all.edit[i]);
+                out.edits.push(all.edits[i]);
             }
         }
         Ok(out)
@@ -1262,9 +1302,15 @@ impl Catalog {
                     volume_label: r.get(7)?,
                     path,
                     folder: rel,
+                    edits: Vec::new(),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
+        for (file, edit) in crate::edits::of_photo(&db, id)? {
+            if let Some(f) = d.files.iter_mut().find(|f| f.id == file) {
+                f.edits.push(edit);
+            }
+        }
         Ok(d)
     }
 
@@ -1897,6 +1943,9 @@ pub struct Filters {
     /// "private" and/or "notPrivate": only while a private space is open
     /// (otherwise there is nothing private to tell apart, and it is left out).
     pub private: Vec<String>,
+    /// Argentum's mark, any of "edited" (an edit, no film look), "film" and
+    /// "notEdited".
+    pub edits: Vec<String>,
 }
 
 impl Default for Filters {
@@ -1912,6 +1961,7 @@ impl Default for Filters {
             tags: Vec::new(),
             tags_match: Match::All,
             private: Vec::new(),
+            edits: Vec::new(),
         }
     }
 }
@@ -1993,8 +2043,27 @@ fn filters_sql(f: &Filters, state: &str) -> String {
              AND {EXT_SQL} IN (SELECT value FROM json_each(?6))))
      AND (json_array_length(?7) = 0 OR {status} IN (SELECT value FROM json_each(?7)))
      AND (json_array_length(?8) = 0 OR {people})
-     AND (json_array_length(?9) = 0 OR {tags})"
+     AND (json_array_length(?9) = 0 OR {tags}){}",
+        edits_sql(&f.edits)
     )
+}
+
+/// The Argentum mark filter's condition (on photo alias `p`), to add with
+/// " AND"; empty when nothing is picked.
+fn edits_sql(picked: &[String]) -> String {
+    let kinds: Vec<String> = picked
+        .iter()
+        .filter_map(|v| match v.as_str() {
+            "notEdited" => Some(crate::edits::NONE),
+            "edited" => Some(crate::edits::EDIT),
+            "film" => Some(crate::edits::FILM),
+            _ => None,
+        })
+        .map(|k| k.to_string())
+        .collect();
+    // Edited photos only: said so, the index of edited photos finds them.
+    let edited = if picked.iter().any(|v| v == "notEdited") { "" } else { "p.edit_kind > 0 AND " };
+    if kinds.is_empty() { String::new() } else { format!(" AND {edited}p.edit_kind IN ({})", kinds.join(", ")) }
 }
 
 /// A photo has any, or all, of the ids in JSON parameter `?n`. `rows` picks
@@ -2048,6 +2117,8 @@ pub struct Facets {
     pub status: Vec<FacetValue>,
     /// "private" and "notPrivate", while a private space is open (none otherwise).
     pub private: Vec<FacetValue>,
+    /// "edited", "film" and "notEdited", those with photos.
+    pub edits: Vec<FacetValue>,
     /// Named people first, then unnamed ones seen in 2+ photos; never ignored strangers.
     pub people: Vec<PersonValue>,
     /// Tags on the photos shown, most used first.
@@ -2337,6 +2408,10 @@ pub struct PhotoList {
     pub sideways: Vec<i64>,
     /// 1 = a private photo (listed only while they are unlocked).
     pub private: Vec<i64>,
+    /// Its Argentum mark (see edits.rs): 0 none, 1 an edit, 2 a film look.
+    pub edit: Vec<i64>,
+    /// How many different edits Argentum keeps of it (its own, its virtual copies').
+    pub edits: Vec<i64>,
     /// The focus stack each photo is a frame of (its first frame's id), 0 for none.
     pub stack: Vec<i64>,
     /// Once [`PhotoList::stacked`]: how many frames each tile stands for (1
@@ -2380,6 +2455,8 @@ impl PhotoList {
             flags: if self.flags.len() == keep.len() { kept(self.flags, &keep) } else { self.flags },
             sideways: kept(self.sideways, &keep),
             private: kept(self.private, &keep),
+            edit: kept(self.edit, &keep),
+            edits: kept(self.edits, &keep),
             stack: kept(self.stack, &keep),
             frames: Vec::new(),
             members: HashMap::new(),
@@ -2510,4 +2587,6 @@ pub struct FileLoc {
     pub path: String,
     /// Its folder on the disk, as `Scope::Folder` takes it (with `volume_id`): "Go to folder".
     pub folder: String,
+    /// The edits Argentum keeps beside it (see edits.rs).
+    pub edits: Vec<crate::edits::FileEdit>,
 }

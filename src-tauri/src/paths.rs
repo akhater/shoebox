@@ -1050,7 +1050,9 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut bad = Vec::new();
         // The crates in this workspace are scanned too.
-        for entry in ["src", "focus-points/src"].iter().flat_map(|d| walkdir::WalkDir::new(root.join(d))).flatten() {
+        for entry in
+            ["src", "focus-points/src", "agdata/src"].iter().flat_map(|d| walkdir::WalkDir::new(root.join(d))).flatten()
+        {
             let p = entry.path();
             if p.extension().is_none_or(|e| e != "rs") || p.ends_with("paths.rs") || p.ends_with("organize.rs") {
                 continue;

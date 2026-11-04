@@ -16,6 +16,7 @@ mod damaged_files;
 mod date_pages;
 mod dates;
 mod days;
+mod edits;
 mod faces_by_date;
 mod faces_saved;
 mod failed_photos;

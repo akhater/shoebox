@@ -39,25 +39,35 @@
 //!                                scope of its folder ("Go to folder") for list:
 //!                                {"kind":"folder","volumeId":3,"relPath":"<folder>"}
 //!                                "problems": what Cull found wrong with it, once measured (blurry,
-//!                                focus missed...): a camera that confirmed focus says nothing of shake
+//!                                focus missed...): a camera that confirmed focus says nothing of shake.
+//!                                Each copy's "edits": the Argentum edits kept beside it (the photo's
+//!                                own, "copy": null, and its virtual copies'; "film": a film look on)
 //!   shoebox-cli argentum [id]    where Argentum is ("found", null when it isn't on this computer);
 //!                                with a photo's id, opens it there, as the window's Edit in
 //!                                Argentum does: "state" says what became of it: "opened" ("path":
 //!                                the copy), "noArgentum", "unplugged" ("disks" to plug in) or "gone"
+//!   shoebox-cli edits-check <folder>   looks again at the Argentum edits in one folder of the
+//!                                catalog, as the window does when the user comes back from
+//!                                Argentum (a scan does it for every folder): "read" = sidecars
+//!                                read (new or changed), "changed" = photos whose mark or edit changed
 //!   shoebox-cli backup           consistent copies of the databases in backup\ (run it
 //!                                before each Kopia snapshot; see .kopiaignore)
 //!   shoebox-cli list [oldest|newest|name|added] [limit] [filters] [scope]   photos in grid order
 //!                                (JSON); scope = JSON as the window's, e.g. a person's photos found
 //!                                since the user last looked: {"kind":"person","id":42,"newOnly":true}.
 //!                                As in the grid, a focus stack is one entry ("frames": its photos);
-//!                                {"kind":"stack","id":<its first frame>} lists them one by one
+//!                                {"kind":"stack","id":<its first frame>} lists them one by one.
+//!                                "edit": Argentum's mark ("edit", "film" or null), "editVersions":
+//!                                how many different edits it keeps of the photo
 //!   shoebox-cli facets [filters]  what each filter offers, with counts (JSON)
 //!   shoebox-cli days [filters]    photos taken each day, as the calendar shows them (JSON)
 //!       filters = JSON, any of {"dates":["2026-09-26"],"cameras":[..],"lenses":[..],
 //!                               "types":["cr3"],"status":["online","offline","missing"],
 //!                               "people":[42,43],"peopleMatch":"any"|"all" (default any;
 //!                               all = only photos with them together),
-//!                               "tags":[3,7],"tagsMatch":"all"|"any" (default all)}
+//!                               "tags":[3,7],"tagsMatch":"all"|"any" (default all),
+//!                               "edits":["edited","film","notEdited"] (Argentum's mark; edited =
+//!                               an edit without a film look)}
 //!
 //! People (JSON out):
 //!   shoebox-cli people [name] [--new]   everyone, or whoever's name matches, best first, as
@@ -405,6 +415,10 @@ fn main() -> anyhow::Result<()> {
             Some(id) => println!("{}", serde_json::to_string_pretty(&argentum::open(&cat, id.parse()?)?)?),
             None => println!("{}", serde_json::json!({ "found": argentum::find(&cat.settings().argentum_path) })),
         },
+        Some("edits-check") => {
+            let folder = args.get(1).ok_or_else(|| anyhow::anyhow!("edits-check <folder>"))?;
+            println!("{}", serde_json::to_string_pretty(&shoebox_lib::edits::check_folder(&cat, Path::new(folder))?)?);
+        }
         Some("backup") => {
             // Consistent copies of the databases in backup\ - Kopia's before-snapshot action.
             println!("{}", serde_json::to_string_pretty(&cat.backup()?)?);
@@ -769,6 +783,7 @@ fn main() -> anyhow::Result<()> {
                 let taken =
                     d.taken_ts.and_then(|t| chrono::DateTime::from_timestamp(t, 0)).map(|t| t.naive_utc().to_string());
                 let state = STATES[list.state[i].clamp(0, 2) as usize];
+                let edit = [None, Some("edit"), Some("film")].get(list.edit[i] as usize).copied().flatten();
                 out.push(serde_json::json!({
                     "id": id,
                     "taken": taken,
@@ -781,6 +796,8 @@ fn main() -> anyhow::Result<()> {
                     // frames this entry stands for when it stands for several.
                     "stack": (list.stack[i] != 0).then_some(list.stack[i]),
                     "frames": list.members.get(id),
+                    "edit": edit,
+                    "editVersions": list.edits[i],
                 }));
             }
             println!(

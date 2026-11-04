@@ -15,6 +15,7 @@ import {
 import { buildLayout, firstVisible, type Row, type Tile } from "../layout";
 import { TimelineRail } from "./TimelineRail";
 import { turnedStyle } from "./TurnControl";
+import { EditMark, editTitle } from "./EditMark";
 
 const GAP = 4;
 const PAD = 20;
@@ -593,6 +594,13 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                         <LockKeyhole size={13} />
                       </span>
                     )}
+                    {(list.edit?.[t.index] ?? 0) > 0 && (
+                      <EditBadge
+                        film={list.edit![t.index] === 2}
+                        versions={list.edits?.[t.index] ?? 1}
+                        after={(marked ? 1 : 0) + (list.private?.[t.index] === 1 ? 1 : 0)}
+                      />
+                    )}
                     {p.showProblems && problems.length > 0 && !marked && (
                       <span
                         className={`badge problem ${list.fresh[t.index] === 1 ? "after-new" : ""}`}
@@ -635,3 +643,14 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
     </div>
   );
 });
+
+/** Argentum's mark, top right, left of the marked and private badges (`after` of them):
+ *  how many versions when it keeps several. */
+function EditBadge({ film, versions, after }: { film: boolean; versions: number; after: number }) {
+  return (
+    <span className={`edit-badge ${versions > 1 ? "counted" : ""}`} style={{ right: 6 + 28 * after }} title={editTitle(film, versions)}>
+      <EditMark film={film} size={13} />
+      {versions > 1 && fmtNum(versions)}
+    </span>
+  );
+}

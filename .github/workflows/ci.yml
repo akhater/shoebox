@@ -62,7 +62,7 @@ jobs:
 
       - name: cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # Includes the guards behind Shoebox's promises: no code outside paths.rs
       # and organize.rs can write a file, and nothing writes outside its own
@@ -111,7 +111,7 @@ jobs:
 
       - name: cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
         working-directory: src-tauri
@@ -151,7 +151,7 @@ jobs:
 
       - name: cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
         working-directory: src-tauri
@@ -184,4 +184,27 @@ jobs:
           else
             echo "Shoebox and Argentum both use rawler ${mine:0:9}."
           fi
+          exit 0
+
+  # src-tauri/agdata tells whether a photo was edited the way Argentum does,
+  # proven against Argentum's code as it was then. This warns when the parts of
+  # Argentum that rule depends on have changed since; it never fails.
+  argentum-edit-rule:
+    name: Argentum edit rule
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare with Argentum's main branch
+        run: |
+          set +e
+          files=$(bash src-tauri/agdata/argentum-drift.sh)
+          status=$?
+          echo "$files"
+          case $status in
+            0) echo "Argentum's edit rule is the one agdata was checked against." ;;
+            1) echo "::warning title=Argentum edit rule::Argentum files that src-tauri/agdata follows have changed: $(echo $files). Run its differential check again (src-tauri/agdata/README.md), then update the hashes in argentum-drift.sh." ;;
+            *) echo "::warning title=Argentum edit rule::Argentum files that src-tauri/agdata follows were moved or renamed: $(echo $files)." ;;
+          esac
           exit 0

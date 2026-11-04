@@ -77,7 +77,11 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
 - **Edit in Argentum.** Press E to open a photo in
   [Argentum](https://github.com/akhater/argentum/releases/latest), the RAW
   editor, on Windows, macOS and Linux. If the photo's drive is unplugged,
-  Shoebox says which drive to connect.
+  Shoebox says which drive to connect. Photos edited there carry Argentum's
+  mark in the grid (sliders, or a film can for a film look, with the number of
+  versions when there are several), the Edits filter finds them, and the
+  details say which copy holds the edit. Shoebox reads Argentum's files only:
+  when they are new or changed, and again when you come back from Argentum.
 - **Scriptable.** Everything the window does is also available from
   `shoebox-cli`, with JSON output, for scripts and AI agents.
 
@@ -213,6 +217,7 @@ shoebox-cli people-check         # likely mix-ups among named people
 shoebox-cli turn right 42        # a quarter turn clockwise, in Shoebox only
 shoebox-cli sideways             # photos that look sideways or upside down
 shoebox-cli argentum 42          # open a photo in Argentum
+shoebox-cli list newest 50 '{"edits":["edited","film"]}'   # photos edited in Argentum
 shoebox-cli focus "D:\Photos\IMG_0001.CR3"   # where the camera focused, as Shoebox reads it
 shoebox-cli cull '{}' '{"kind":"root","id":1}'   # a folder as Cull shows it: bursts, problems, suggestions
 shoebox-cli models               # which AI models are installed

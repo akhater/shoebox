@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod cull;
 pub mod dates;
 pub mod db;
+pub mod edits;
 pub mod embedded;
 pub mod faces;
 pub mod focus;
@@ -935,6 +936,7 @@ pub fn run() {
             commands::reveal_file,
             commands::open_file,
             commands::open_in_argentum,
+            commands::check_argentum_edits,
             commands::argentum_found,
             commands::argentum_chosen,
             commands::open_argentum_page,

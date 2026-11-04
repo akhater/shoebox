@@ -26,6 +26,7 @@ import {
   type Match,
   type Person,
 } from "../api";
+import { EditMark } from "./EditMark";
 
 /** The filters that tick values (not the any / all switches). */
 type ListKey = Exclude<keyof Filters, "peopleMatch" | "tagsMatch">;
@@ -42,6 +43,7 @@ interface Props {
 
 const STATUS_LABEL: Record<string, string> = { online: "Plugged in", offline: "Unplugged", missing: "Missing" };
 const PRIVATE_LABEL: Record<string, string> = { private: "Private", notPrivate: "Not private" };
+const EDITS_LABEL: Record<string, string> = { edited: "Edited", film: "Film look", notEdited: "Not edited" };
 
 /** Ticked values first stay listed even when nothing matches them any more. */
 function withPicked(values: FacetValue[], picked: string[]): FacetValue[] {
@@ -113,6 +115,7 @@ export function FilterBar({ facets, filters, onChange, people, lead }: Props) {
             : `${v.length} types`,
     status: (v: string[]) => v.map((x) => STATUS_LABEL[x] ?? x).join(", "),
     private: (v: string[]) => v.map((x) => PRIVATE_LABEL[x] ?? x).join(", "),
+    edits: (v: string[]) => v.map((x) => EDITS_LABEL[x] ?? x).join(", "),
   };
 
   const chip = (id: ListKey, label: string, icon: ReactNode, panel: ReactNode) => {
@@ -256,6 +259,19 @@ export function FilterBar({ facets, filters, onChange, people, lead }: Props) {
             picked={filters.private}
             label={(v) => PRIVATE_LABEL[v] ?? v}
             onPick={(v) => set("private", v as Filters["private"])}
+          />,
+        )}
+      {/* Argentum's marks: offered once some photo here is edited (or the filter is on). */}
+      {((facets?.edits ?? []).some((v) => v.value !== "notEdited" && v.count > 0) || filters.edits.length > 0) &&
+        chip(
+          "edits",
+          "Edits",
+          <EditMark film={false} size={14} />,
+          <Checklist
+            values={withPicked(facets?.edits ?? [], filters.edits)}
+            picked={filters.edits}
+            label={(v) => EDITS_LABEL[v] ?? v}
+            onPick={(v) => set("edits", v as Filters["edits"])}
           />,
         )}
       {filtersOn(filters) && (

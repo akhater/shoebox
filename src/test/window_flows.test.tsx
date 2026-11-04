@@ -1615,6 +1615,63 @@ describe("the Private filter", () => {
   });
 });
 
+describe("Argentum's marks", () => {
+  const badge = (host: HTMLElement, id: number) => tile(host, id).querySelector(".edit-badge")?.getAttribute("title");
+  const chips = (host: HTMLElement) => [...host.querySelectorAll(".filter-chip")].map((c) => c.textContent?.trim());
+  const focusBack = async () => {
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await wait(100);
+  };
+
+  test("an edited photo shows its mark, and the Edits filter is offered once some photo is edited", async () => {
+    const be = fakeBackend();
+    let host = await renderApp();
+    expect(chips(host)).not.toContain("Edits");
+    expect(badge(host, 101)).toBeUndefined();
+
+    be.edited.set(101, 1);
+    be.edited.set(102, 2);
+    host = await renderApp();
+    expect(badge(host, 101)).toBe("Edited in Argentum");
+    expect(badge(host, 102)).toBe("Edited in Argentum, with a film look");
+    expect(badge(host, 103)).toBeUndefined();
+
+    await click(byText(host, ".filter-chip", "Edits"));
+    await click(byText(host, ".filter-panel label", /^Film look/).querySelector("input")!);
+    await wait(300);
+    expect(gridIds(host)).toEqual([102]);
+    await click(byText(host, ".filter-panel label", /^Edited/).querySelector("input")!);
+    await wait(300);
+    expect(gridIds(host)).toEqual([101, 102]);
+  });
+
+  test("back from Argentum, the photos handed to it are looked at again, and the grid reloads only on a change", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    const checks = () => be.calls.filter((c) => c.cmd === "check_argentum_edits").length;
+    await focusBack();
+    expect(checks()).toBe(0); // nothing handed to Argentum yet
+
+    await click(tile(host, 101));
+    await wait(30);
+    await click(byText(host, ".selection-bar button", "Edit in Argentum"));
+    await wait(30);
+    be.editInArgentum(101, 2);
+    await focusBack();
+    await wait(700); // the window reloads a moment after the catalog changed
+    expect(checks()).toBe(1);
+    expect(badge(host, 101)).toBe("Edited in Argentum, with a film look");
+
+    // Back again with nothing changed: only the look, nothing reloads.
+    const from = be.calls.length;
+    await focusBack();
+    await wait(700);
+    expect(be.cmdsSince(from)).toEqual(["check_argentum_edits"]);
+  });
+});
+
 describe("a source whose photos live somewhere else now", () => {
   const found = { rootId: 30, path: "C:\\Photos\\Trip", disk: "New laptop (C:)", checked: 4, found: 4, problem: null };
 

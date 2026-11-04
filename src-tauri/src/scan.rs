@@ -7,10 +7,14 @@
 //!    (that's how moves and copies keep their photo); unknown content is read
 //!    and gets its preview and thumbnail.
 //!
+//! Argentum sidecars listed on the way are read when new or changed (see
+//! edits.rs); those gone are forgotten with step 2's rule.
+//!
 //! Files are only ever opened for reading.
 
 use crate::catalog::Catalog;
 use crate::db::{self, FILE_MISSING, FILE_PRESENT, PREVIEW_FAILED, PREVIEW_OK, PREVIEW_PENDING, under_sql};
+use crate::edits;
 use crate::focus;
 use crate::formats::{self, Kind};
 use crate::imaging::{self, Meta};
@@ -64,6 +68,10 @@ pub struct Report {
     /// Known photos read again (regenerated previews, edited files, retried failures).
     pub reread: u64,
     pub errors: u64,
+    /// Argentum sidecars read (new or changed since last read).
+    pub edits_read: u64,
+    /// Photos whose Argentum mark or edit changed.
+    pub edits_changed: u64,
     /// Photos and folders left out because their names can't be kept in the
     /// catalog on this system (see [`keepable`]). They are not in the catalog,
     /// so nothing recorded is touched by leaving them out.
@@ -133,6 +141,8 @@ pub fn scan_root(
     let mut errored: Vec<String> = busy.iter().filter(|b| db::is_under(b, &root.rel_path)).cloned().collect();
     let mut batch: Vec<Seen> = Vec::new();
     let mut jobs: Vec<Job> = Vec::new();
+    // Argentum sidecars, by folder.
+    let mut sidecars: Vec<(String, edits::Listed)> = Vec::new();
     let mut last_emit = Instant::now();
     // Never catalog Shoebox's own previews, wherever its catalog folder lives
     // (spelled as given, and with any links followed).
@@ -170,6 +180,18 @@ pub fn scan_root(
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         if formats::kind_of(&name).is_none() {
+            if keepable(entry.file_name()) && agdata::parse_sidecar_name(&name).is_some() {
+                let parent = entry.path().parent().unwrap_or(&base);
+                match entry.metadata() {
+                    Ok(md) => {
+                        sidecars.extend(edits::Listed::of(&name, &md).map(|l| (volumes::rel_of(&mount, parent), l)))
+                    }
+                    Err(err) => {
+                        log::warn!("scan: can't stat {}: {err}", entry.path().display());
+                        errored.push(volumes::rel_of(&mount, parent));
+                    }
+                }
+            }
             continue;
         }
         // A photo that couldn't be opened again from what is stored of it is
@@ -212,11 +234,14 @@ pub fn scan_root(
     }
     record(cat, root.volume_id, &mount, scan_id, regenerate, &mut batch, &mut folder_ids, &mut jobs, &mut report)?;
     progress.found = report.found;
+    record_edits(cat, &mount, &folder_ids, sidecars, scan_id, &mut report)?;
 
     // 2. Missing - only after a complete walk of a folder that is still there.
     let still_there = cat.mount_of(root.volume_id).as_deref() == Some(mount.as_str()) && base.is_dir();
     if !report.cancelled && still_there {
         report.missing = mark_missing(&cat.db(), root.volume_id, &root.rel_path, scan_id, &errored)?;
+        report.edits_changed +=
+            edits::forget_unseen(&cat.db(), root.volume_id, &root.rel_path, true, scan_id, &errored)?;
     }
 
     // 3. Read.
@@ -452,7 +477,7 @@ fn read_all(
 /// The number a scan stamps on every file it sees: the time in milliseconds, but never the same as an earlier
 /// scan's. A file not stamped by the latest scan was not there for it (see `mark_missing`), so two scans of a small
 /// folder that finish within one millisecond must not share a stamp, or a deleted file would still look seen.
-fn next_scan_id() -> i64 {
+pub fn next_scan_id() -> i64 {
     static LAST: Mutex<i64> = Mutex::new(0);
     let now = chrono::Utc::now().timestamp_millis();
     let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -567,12 +592,16 @@ fn record(
                 report.new_files += 1;
             }
             Some((id, Some(pid), size, mtime, state, preview)) if size == s.size as i64 && mtime == s.mtime => {
-                tx.execute(
-                    "UPDATE files SET seen_scan = ?1, state = ?2 WHERE id = ?3",
-                    params![scan_id, FILE_PRESENT, id],
-                )?;
+                // The state only when it changes: setting it wakes the triggers that follow a
+                // file's state (an edited photo's mark), on every file of every scan.
                 if state == FILE_MISSING {
+                    tx.execute(
+                        "UPDATE files SET seen_scan = ?1, state = ?2 WHERE id = ?3",
+                        params![scan_id, FILE_PRESENT, id],
+                    )?;
                     report.restored += 1;
+                } else {
+                    tx.execute("UPDATE files SET seen_scan = ?1 WHERE id = ?2", params![scan_id, id])?;
                 }
                 report.unchanged += 1;
                 // Interrupted last time: finish the preview. Failed last time: try again.
@@ -591,6 +620,26 @@ fn record(
         }
     }
     tx.commit()?;
+    Ok(())
+}
+
+/// Records the Argentum sidecars listed (by folder), in folders holding photos.
+fn record_edits(
+    cat: &Catalog,
+    mount: &str,
+    folder_ids: &HashMap<String, i64>,
+    mut sidecars: Vec<(String, edits::Listed)>,
+    scan_id: i64,
+    report: &mut Report,
+) -> Result<()> {
+    sidecars.sort_by(|a, b| a.0.cmp(&b.0));
+    for folder in sidecars.chunk_by(|a, b| a.0 == b.0) {
+        let Some(&folder_id) = folder_ids.get(&folder[0].0) else { continue };
+        let listed: Vec<edits::Listed> = folder.iter().map(|(_, l)| l.clone()).collect();
+        let checked = edits::record(cat, folder_id, Path::new(&volumes::join(mount, &folder[0].0)), &listed, scan_id)?;
+        report.edits_read += checked.read;
+        report.edits_changed += checked.changed;
+    }
     Ok(())
 }
 
