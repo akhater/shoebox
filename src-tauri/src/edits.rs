@@ -316,8 +316,10 @@ pub fn of_photo(db: &Connection, photo: i64) -> Result<Vec<(i64, FileEdit)>> {
         )?
         .query_map([photo], |r| {
             let copy: String = r.get(1)?;
-            let (now, rendered, failed): (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) =
-                (r.get(3)?, r.get(4)?, r.get(5)?);
+            // Fingerprints: the edit's now, the one rendered, the one that failed.
+            let now: Option<Vec<u8>> = r.get(3)?;
+            let rendered: Option<Vec<u8>> = r.get(4)?;
+            let failed: Option<Vec<u8>> = r.get(5)?;
             let failed = failed.is_some() && failed == now;
             Ok((
                 r.get(0)?,
