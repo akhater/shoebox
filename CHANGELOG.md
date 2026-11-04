@@ -4,6 +4,25 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.45.2 - unreleased
 
+### Added
+
+- **Photos edited in Argentum are marked.** A thumbnail shows a small mark
+  when the photo has an edit in Argentum: sliders for an edit, a film roll
+  for a film look, with the number of versions when a virtual copy holds
+  another edit. The new Edits filter picks Edited, Film look or Not edited,
+  and the photo's details say which file holds the edit. A scan reads
+  Argentum's sidecars beside the photos, only those new or changed since the
+  last scan, and never one kept only in the cloud. Coming back to Shoebox
+  after editing reads again just the folders handed to Argentum. A sidecar
+  removed clears the mark only after a complete scan of a folder that could
+  be read; an unplugged disk or a missing photo keeps its mark. Headless:
+  `shoebox-cli list` gives each photo's mark and takes the `edits` filter,
+  `photo` lists the edits of each file, and `edits-check <folder>` reads a
+  folder again.
+- **`agdata` crate (MIT).** Tells from an Argentum sidecar whether a photo
+  is edited, and how, as Argentum decides it, with a fingerprint that
+  changes only when the edit does.
+
 ## 26.45.1 - 2026-11-03
 
 ### Added
