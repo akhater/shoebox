@@ -16,19 +16,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const EDIT: &str = r#"{"version":1,"rating":0,"adjustments":{"exposure":0.5}}"#;
+pub(crate) const EDIT: &str = r#"{"version":1,"rating":0,"adjustments":{"exposure":0.5}}"#;
 const FILM: &str = r#"{"version":1,"rating":0,"adjustments":{"lutPath":"provider-look",
     "agProviderLook":{"camera":"c","look":"l"}}}"#;
-const NO_EDIT: &str = r#"{"version":1,"rating":3,"adjustments":{}}"#;
+pub(crate) const NO_EDIT: &str = r#"{"version":1,"rating":3,"adjustments":{}}"#;
 
 /// A disk ("disk") with a source folder, Photos, holding IMG_0..3.JPG.
-struct World {
-    base: PathBuf,
-    data: DataDir,
+pub(crate) struct World {
+    pub(crate) base: PathBuf,
+    pub(crate) data: DataDir,
 }
 
 impl World {
-    fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         let base = std::env::temp_dir().join(format!("shoebox-edits-{name}"));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("disk").join("Photos")).unwrap();
@@ -45,16 +45,16 @@ impl World {
         w
     }
 
-    fn photos(&self) -> PathBuf {
+    pub(crate) fn photos(&self) -> PathBuf {
         self.base.join("disk").join("Photos")
     }
 
-    fn write(&self, name: &str, text: &str) {
+    pub(crate) fn write(&self, name: &str, text: &str) {
         std::fs::write(self.photos().join(name), text).unwrap();
     }
 
     /// Opens the catalog as a start does, its disk plugged in or not.
-    fn open(&self, plugged: bool) -> Catalog {
+    pub(crate) fn open(&self, plugged: bool) -> Catalog {
         let cat = Catalog::open(self.data.clone()).unwrap();
         cat.plug_in_test_disk("Disk", &self.base.join("disk")).unwrap();
         if !plugged {
@@ -64,7 +64,7 @@ impl World {
     }
 }
 
-fn scan(cat: &Catalog) -> Report {
+pub(crate) fn scan(cat: &Catalog) -> Report {
     let root = cat.root_ids().unwrap()[0];
     let report = scan_root(cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
     assert_eq!(report.errors, 0, "{report:?}");
@@ -84,7 +84,7 @@ fn mark(cat: &Catalog, file: &str) -> (i64, i64) {
 }
 
 /// Waits for the clock to move on a second, so a rewritten file's date differs.
-fn tick() {
+pub(crate) fn tick() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
 }
 
@@ -372,10 +372,8 @@ fn the_grid_filters_and_details_show_the_mark() {
     );
 
     let files = cat.photo_detail(id("IMG_1.JPG")).unwrap().files;
-    assert_eq!(
-        files[0].edits,
-        [edits::FileEdit { copy: None, film: false }, edits::FileEdit { copy: Some("a1b2c3".into()), film: true }]
-    );
+    let marks: Vec<_> = files[0].edits.iter().map(|e| (e.copy.as_deref(), e.film, e.waiting)).collect();
+    assert_eq!(marks, [(None, false, true), (Some("a1b2c3"), true, true)], "waiting for Argentum to render them");
 }
 
 #[test]

@@ -44,6 +44,7 @@ import {
   fmtBytes,
   fmtDateKey,
   type AiProgress,
+  type EditsProgress,
   fmtNum,
   type Browse,
   type DeleteReport,
@@ -392,6 +393,7 @@ export default function App() {
   const [typed, setTyped] = useState("");
   const [query, setQuery] = useState("");
   const [aiProgress, setAiProgress] = useState<AiProgress | null>(null);
+  const [editsProgress, setEditsProgress] = useState<EditsProgress | null>(null);
   const [showPossible, setShowPossible] = useState(false);
   // "people" shows the People view instead of the photo grid; "cull", Cull on the grid's photos.
   const [view, setView] = useState<View>("photos");
@@ -527,6 +529,8 @@ export default function App() {
   const timer = useRef<number | undefined>(undefined);
   // When People was last reloaded while faces are being found.
   const facesShown = useRef(0);
+  // Edited pictures Argentum rendered: when the view last showed them, and how many had changed then.
+  const editsShown = useRef({ at: 0, changed: 0 });
   // A refresh asked for by background work (a scan, faces found) never starts
   // while the last one is still answering: on a big catalog they would pile
   // up. It runs once that one is done.
@@ -623,6 +627,17 @@ export default function App() {
             .then(setPeopleList)
             .catch(() => {});
         }
+      }),
+      listen<EditsProgress>("edits-progress", (e) => {
+        const p = e.payload;
+        setEditsProgress(p.finished || p.total === 0 ? null : p);
+        // The photos shown get their edited pictures as they come (throttled), and once done.
+        const shown = editsShown.current;
+        if (p.changed > shown.changed && (p.finished || Date.now() - shown.at > 3000)) {
+          editsShown.current = { at: Date.now(), changed: p.changed };
+          loadView();
+        }
+        if (p.finished) editsShown.current = { at: 0, changed: 0 };
       }),
       listen<Progress>("scan-progress", (e) => {
         lastRootName.current = e.payload.rootName;
@@ -2367,6 +2382,8 @@ export default function App() {
           overview={overview}
           progress={progress}
           aiProgress={aiProgress}
+          editsProgress={editsProgress}
+          onStopEdits={() => run(api.cancelEditRenders())}
           queued={queued.length}
           message={message}
           onCancel={() => run(api.cancelScan())}

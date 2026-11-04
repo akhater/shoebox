@@ -3713,6 +3713,11 @@ button.link:hover {
   font-size: 12px;
   color: var(--text);
 }
+.loc-edit-note {
+  margin: 2px 0 0 20px;
+  font-size: 12px;
+  color: var(--muted);
+}
 .nav-item .nav-lock {
   margin-right: 8px;
   padding: 0 7px;

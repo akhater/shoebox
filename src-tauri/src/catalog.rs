@@ -1217,7 +1217,7 @@ impl Catalog {
                 &format!(
                     "SELECT id, kind, taken_ts, taken_exif, make, model, lens, width, height, iso, fnumber,
                             exposure, focal, preview_state, preview_rev, error, p.camera_shown, p.lens_shown, p.turn,
-                            MAX(COALESCE(p.sideways, 0), 0), p.focus, p.private, p.taken_original, p.stack
+                            MAX(COALESCE(p.sideways, 0), 0), p.focus, p.private, p.taken_original, p.stack, p.edited
                        FROM photos p WHERE id = ?1 AND {}",
                     self.shown_sql("p")
                 ),
@@ -1250,6 +1250,7 @@ impl Catalog {
                             turn: r.get(18)?,
                             sideways: r.get(19)?,
                             private: r.get::<_, i64>(21)? == 1,
+                            edited: r.get::<_, Option<Vec<u8>>>(24)?.as_deref().map(crate::renders::version_of),
                             focus: None,
                             stack: None,
                             problems: Vec::new(),
@@ -1559,11 +1560,18 @@ impl Catalog {
         {
             bail!("Unknown file {file_id}");
         }
+        self.located(vid, &rel, &name)
+    }
+
+    /// Full path of file `name` in folder `rel` of disk `vid`, when it is plugged
+    /// in, whether or not its photo is hidden: for work whose copies are sealed
+    /// without a password (previews, edited pictures).
+    pub(crate) fn located(&self, vid: i64, rel: &str, name: &str) -> Result<String> {
         let mount = self.mount_of(vid).ok_or_else(|| anyhow!("That disk is not plugged in"))?;
-        if self.is_unreachable(vid, &rel) {
+        if self.is_unreachable(vid, rel) {
             bail!("That folder isn't where it was on the disk");
         }
-        Ok(volumes::file_path(&mount, &rel, &name))
+        Ok(volumes::file_path(&mount, rel, name))
     }
 }
 
@@ -2564,6 +2572,8 @@ pub struct PhotoDetail {
     pub sideways: i64,
     /// A private photo (shown only while they are unlocked).
     pub private: bool,
+    /// The edited version shown in place of its own pictures (see renders.rs).
+    pub edited: Option<String>,
     /// Where the camera focused, as the photo is shown; None when its file doesn't say.
     pub focus: Option<crate::focus::Focus>,
     /// Its place in a focus stack, when it is a frame of one (see stacks.rs).

@@ -28,15 +28,18 @@ import {
   api,
   BIN,
   BLUR_PROBLEMS,
+  editedUrl,
   faceUrl,
   fmtBytes,
   fmtDay,
   fmtDeleted,
   fmtNum,
   fullUrl,
+  originalUrl,
   people,
   previewUrl,
   thumbUrl,
+  type EditRendering,
   type FileLoc,
   type Focus,
   type MissingPhoto,
@@ -47,7 +50,7 @@ import {
 } from "../api";
 import { FILE_MANAGER } from "../paths";
 import { useRemembered } from "../remembered";
-import { EditMark, editLine } from "./EditMark";
+import { EditMark, editLine, editedVersions, renderLine } from "./EditMark";
 import { FocusIcon, FocusPoints, FocusSummary, hasFocusPoints } from "./FocusPoints";
 import { TagEditor } from "./Tags";
 import { TurnControl, turnedStyle, usePreviewHandlers } from "./TurnControl";
@@ -176,6 +179,14 @@ export function Viewer({
   const [previewLong, setPreviewLong] = useState(0);
   const [previewSize, setPreviewSize] = useState<{ w: number; h: number } | null>(null);
   const [sharp, setSharp] = useState<string | null>(null);
+  // An edited photo shows what Argentum made of it: `version` undefined = as
+  // it shows everywhere (its edit), null = its own pictures, else that version.
+  const [version, setVersion] = useState<string | null | undefined>(undefined);
+  const edited = detail?.id === id ? (detail.edited ?? null) : undefined; // undefined: not known yet
+  const shownVersion = version === undefined ? edited : version;
+  // Sharper pictures, focus points and face boxes are the original's.
+  const showsOriginal = shownVersion === null || (shownVersion === undefined && !((list.edit?.[index] ?? 0) > 0));
+  const sharpHere = reachable && showsOriginal;
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const [full, setFull] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
@@ -284,6 +295,7 @@ export function Viewer({
   const showing = usePreviewHandlers(previewTurn);
 
   // Another photo, or this one turned (a new revision): its pictures again.
+  useEffect(() => setVersion(undefined), [id]);
   useEffect(() => {
     setSharp(null);
     setZoom(null);
@@ -296,7 +308,7 @@ export function Viewer({
   // Once the preview shows, fetch the sharp one if the screen deserves more.
   useEffect(() => {
     const el = stage.current;
-    if (!reachable || !previewLong || !el) return;
+    if (!sharpHere || !previewLong || !el) return;
     const want = Math.round(Math.max(el.clientWidth, el.clientHeight) * window.devicePixelRatio);
     if (want <= previewLong * 1.1) return;
     let live = true;
@@ -312,11 +324,11 @@ export function Viewer({
       window.clearTimeout(t);
       img.onload = null;
     };
-  }, [id, rev, reachable, previewLong]);
+  }, [id, rev, sharpHere, previewLong]);
 
   // Zoomed in: the full-size original.
   useEffect(() => {
-    if (!zoom || !reachable || full) return;
+    if (!zoom || !sharpHere || full) return;
     let live = true;
     const url = fullUrl(id, 0, rev);
     const img = new Image();
@@ -326,7 +338,7 @@ export function Viewer({
       live = false;
       img.onload = null;
     };
-  }, [zoom, reachable, full, id, rev]);
+  }, [zoom, sharpHere, full, id, rev]);
 
   useEffect(() => {
     if (!hint) return;
@@ -335,7 +347,8 @@ export function Viewer({
   }, [hint]);
 
   const zoomAt = (z: Zoom) => {
-    if (!reachable) {
+    // An edited version zooms into its own preview, which needs no disk.
+    if (!reachable && showsOriginal) {
       setHint(`Shoebox's own copy is ${previewLong || "1080"} px. Plug the disk in to zoom into the original.`);
       return;
     }
@@ -390,12 +403,16 @@ export function Viewer({
         else close();
       } else if ((e.key === "v" || e.key === "V") && suggested && onShowTurned) {
         onShowTurned(!showTurned);
+      } else if (e.key === "\\") {
+        toggleEdited();
       } else if (e.key === "z" || e.key === "Z") {
         if (zoom) setZoom(null);
         else zoomAt(focusCentre ?? { fx: 0.5, fy: 0.5 });
       } else if (e.key === "t" || e.key === "T") {
         e.preventDefault(); // don't type the "t"
         tagBox.current?.focus();
+      } else if (/^[rRfF]$/.test(e.key) && !showsOriginal && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        setHint("Shown as edited in Argentum: press \\ for the original, to turn it or see its focus points.");
       } else if ((e.key === "r" || e.key === "R") && !e.ctrlKey && !e.metaKey && !e.altKey) {
         turnNow(e.shiftKey ? -1 : 1);
       } else if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -415,12 +432,35 @@ export function Viewer({
   });
 
   const act = (p: Promise<void>) => p.catch((e) => setError(String(e)));
-  const spotted = faces.find((f) => f.id === spot) ?? null;
+  const spotted = showsOriginal ? (faces.find((f) => f.id === spot) ?? null) : null;
   const d = detail?.id === id ? detail : null;
+  const versions = d ? editedVersions(d.files) : [];
+  // Whether Argentum can render the edits still to show: asked only then.
+  const [rendering, setRendering] = useState<EditRendering | null>(null);
+  const waits = !!d?.files.some((f) => f.edits?.some((e) => e.waiting));
+  useEffect(() => {
+    if (!waits) return;
+    let live = true;
+    api
+      .editRendering()
+      .then((r) => live && setRendering(r))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [waits]);
+  const picture =
+    version === undefined ? previewUrl(id, rev) : version === null ? originalUrl(id, rev) : editedUrl(id, version);
+  // Back and forth between the photo's own pictures and its edit (\).
+  const toggleEdited = () => {
+    if (!versions.length) return;
+    setZoom(null);
+    setVersion(showsOriginal ? (edited ?? versions[0].version) : null);
+  };
   // Only over the picture they were read for (a turn makes a new one).
   const focus = d && d.previewRev === rev ? d.focus : null;
   const pointsHere = hasFocusPoints(focus);
-  const drawFocus = showFocus && loaded && pointsHere && focus ? focus : null;
+  const drawFocus = showFocus && loaded && pointsHere && focus && showsOriginal ? focus : null;
   const noFocusWords = d?.focus?.mode === "Manual focus" ? "Manual focus" : "Focus not recorded";
   // With the points shown, Z zooms where the camera focused (where sharpness is checked first).
   const focusPoint = drawFocus?.points.find((p) => p.state === "inFocus") ?? drawFocus?.points.find((p) => p.state === "chosen");
@@ -456,10 +496,10 @@ export function Viewer({
       <div className="viewer-stage" ref={stage} onClick={close}>
         {list.preview[index] === 1 && zoom ? (
           <ZoomedPhoto
-            src={full ?? sharp ?? previewUrl(id, rev)}
-            fullLong={d ? Math.max(d.width ?? 0, d.height ?? 0) : 0}
+            src={showsOriginal ? (full ?? sharp ?? previewUrl(id, rev)) : picture}
+            fullLong={!showsOriginal ? previewLong : d ? Math.max(d.width ?? 0, d.height ?? 0) : 0}
             zoom={zoom}
-            sharp={!!full}
+            sharp={!!full || !showsOriginal}
             spot={spotted}
             focus={drawFocus}
             onExit={() => setZoom(null)}
@@ -474,7 +514,7 @@ export function Viewer({
             />
             <img
               className="viewer-img"
-              src={previewUrl(id, rev)}
+              src={picture}
               alt=""
               onLoad={(e) => {
                 const { naturalWidth: w, naturalHeight: h } = e.currentTarget;
@@ -488,9 +528,9 @@ export function Viewer({
                 }
               }}
               onClick={onPhotoClick}
-              title={reachable ? "Click to zoom to 100% (Z)" : undefined}
+              title={sharpHere || !showsOriginal ? "Click to zoom to 100% (Z)" : undefined}
             />
-            {sharp && <img className="viewer-img sharp" src={sharp} alt="" onClick={onPhotoClick} title="Click to zoom to 100% (Z)" />}
+            {sharp && showsOriginal && <img className="viewer-img sharp" src={sharp} alt="" onClick={onPhotoClick} title="Click to zoom to 100% (Z)" />}
             {drawFocus && previewSize && (
               <FittedFrame stage={stage} size={previewSize}>
                 <FocusPoints focus={drawFocus} faded={!!spotted} />
@@ -523,7 +563,8 @@ export function Viewer({
             <ChevronRight size={28} />
           </button>
         )}
-        {list.preview[index] === 1 && !zoom && (
+        {/* Turning and focus points are the original's: not offered over an edit. */}
+        {list.preview[index] === 1 && !zoom && showsOriginal && (
           proposal ? (
             <div className="turn-decision" onClick={(e) => e.stopPropagation()}>
               <button className="btn small primary" onClick={() => turnNow("suggested")}>
@@ -560,7 +601,7 @@ export function Viewer({
             <SlidersHorizontal size={16} /> Edit in Argentum
           </button>
         )}
-        {list.preview[index] === 1 && (
+        {list.preview[index] === 1 && showsOriginal && (
           <button
             className={`focus-toggle ${showFocus && d && !pointsHere ? "unrecorded" : ""}`}
             aria-label="Focus points"
@@ -583,6 +624,24 @@ export function Viewer({
             {showFocus && d && !pointsHere ? noFocusWords : "Focus points"}
           </button>
         )}
+        {versions.length > 0 && !(proposal !== 0 && onShowTurned) && (
+          <div className="view-switch" role="group" aria-label="Show" onClick={(e) => e.stopPropagation()}>
+            <span className="view-switch-label">Show</span>
+            <button className={showsOriginal ? "on" : ""} onClick={() => setVersion(null)} title="The photo as it came from the camera (\)">
+              Original
+            </button>
+            {versions.map((v) => (
+              <button
+                key={v.version}
+                className={!showsOriginal && (shownVersion ?? versions[0].version) === v.version ? "on" : ""}
+                onClick={() => setVersion(v.version)}
+                title={v.label === "Edited" ? "As edited in Argentum (\\)" : "This virtual copy, as edited in Argentum"}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+        )}
         {proposal !== 0 && onShowTurned && !zoom && (
           <div className="view-switch" role="group" aria-label="Show" onClick={(e) => e.stopPropagation()}>
             <span className="view-switch-label">Show</span>
@@ -603,7 +662,7 @@ export function Viewer({
             Preview: {turnWords(turnView.q)}. Click to turn it; nothing is turned yet.
           </span>
         )}
-        {zoom && <span className="viewer-badge">{full ? "100%" : "Loading full size…"}</span>}
+        {zoom && <span className="viewer-badge">{!showsOriginal ? "Edited · 100%" : full ? "100%" : "Loading full size…"}</span>}
         {hint && <span className="viewer-hint">{hint}</span>}
       </div>
       <Filmstrip
@@ -819,6 +878,7 @@ export function Viewer({
               {d.files.map((listed) => {
                 // Gone from every disk: a copy still listed as plugged in is gone from its folder.
                 const f = missing && listed.state === "online" ? { ...listed, state: "missing" as const } : listed;
+                const note = f.edits?.length ? renderLine(f.edits, rendering, f.state === "online") : null;
                 return (
                 <li key={f.id}>
                   <div className="loc-head">
@@ -835,6 +895,7 @@ export function Viewer({
                       {editLine(f.edits!)}
                     </div>
                   )}
+                  {note && <div className="loc-edit-note">{note}</div>}
                   <div className="loc-actions">
                     <button
                       className="btn small"

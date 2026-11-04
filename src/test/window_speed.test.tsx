@@ -7,7 +7,7 @@
 import { emit } from "@tauri-apps/api/event";
 import { act } from "react";
 import { describe, expect, test, vi } from "vitest";
-import type { AiProgress, Progress } from "../api";
+import type { AiProgress, EditsProgress, Progress } from "../api";
 import { ALL, fakeBackend, photosOf, ROOTS } from "./backend";
 import { choose, click, gridIds, gridStack, renderApp, searchBox, sidebarItem, sortSelect, subtitle, title, type, wait, walk } from "./ui";
 
@@ -212,6 +212,32 @@ describe("background work refreshes only what its event changed", () => {
     await send("catalog-changed", null);
     await wait(600);
     expect(be.cmdsSince(from).sort()).toEqual(["browse", "facets", "get_overview", "list_photos", "people"]);
+  });
+
+  test("edits rendered reload the shown photos only when pictures changed, at most every 3 s", async () => {
+    const be = fakeBackend();
+    await renderApp();
+    await wait(100);
+    const edits = (p: Partial<EditsProgress> = {}): EditsProgress => ({ done: 0, total: 16, changed: 0, finished: false, ...p });
+
+    // A look that finds nothing to render (every return to the window) asks for nothing.
+    let from = be.calls.length;
+    await send("edits-progress", edits({ total: 0, finished: true }));
+    await wait(100);
+    expect(be.cmdsSince(from)).toEqual([]);
+
+    from = be.calls.length;
+    await send("edits-progress", edits());
+    await send("edits-progress", edits({ done: 8, changed: 8 }));
+    await wait(100);
+    expect(be.cmdsSince(from).sort()).toEqual(["facets", "list_photos"]);
+    from = be.calls.length;
+    await send("edits-progress", edits({ done: 16, changed: 9 }));
+    await wait(100);
+    expect(be.cmdsSince(from)).toEqual([]);
+    await send("edits-progress", edits({ done: 16, changed: 9, finished: true }));
+    await wait(100);
+    expect(be.cmdsSince(from).sort()).toEqual(["facets", "list_photos"]);
   });
 
   test("a scan's refreshes never pile up: the next one waits for the last to answer", async () => {

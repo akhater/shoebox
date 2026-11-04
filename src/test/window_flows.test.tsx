@@ -1647,6 +1647,44 @@ describe("Argentum's marks", () => {
     expect(gridIds(host)).toEqual([101, 102]);
   });
 
+  test("an edited photo opens as Argentum rendered it; Original, or \\, shows the photo's own", async () => {
+    const be = fakeBackend();
+    be.edited.set(101, 1);
+    be.rendered.set(101, "00000000000000aa");
+    const host = await renderApp();
+    await doubleClick(tile(host, 101));
+    await wait(100);
+    const shown = () => viewer(host)!.querySelector(".viewer-img")!.getAttribute("src");
+    const picked = () => viewer(host)!.querySelector(".view-switch button.on")?.textContent;
+    expect(shown()).toMatch(/\/preview\/101\?r=/); // as everywhere: its edit
+    const versions = [...viewer(host)!.querySelectorAll(".view-switch button")].map((b) => b.textContent);
+    expect(versions).toEqual(["Original", "Edited"]);
+    expect(picked()).toBe("Edited");
+
+    await click(byText(viewer(host)!, ".view-switch button", "Original"));
+    expect(shown()).toMatch(/\/original\/101\?r=/);
+    expect(viewer(host)).not.toBeNull(); // the switch doesn't close the viewer
+    await key(viewer(host)!, "\\");
+    expect(shown()).toMatch(/\/edited\/101\/00000000000000aa$/);
+    expect(picked()).toBe("Edited");
+
+    // A photo not edited has nothing to switch.
+    await key(viewer(host)!, "ArrowRight");
+    await wait(100);
+    expect(viewer(host)!.querySelector(".view-switch")).toBeNull();
+  });
+
+  test("an edit Argentum hasn't rendered says why it doesn't show yet", async () => {
+    const be = fakeBackend();
+    be.edited.set(101, 1);
+    be.renders("outdated");
+    const host = await renderApp();
+    await doubleClick(tile(host, 101));
+    await wait(100);
+    expect(viewer(host)!.querySelector(".view-switch")).toBeNull();
+    expect(viewer(host)!.querySelector(".loc-edit-note")?.textContent).toBe("Update Argentum to show edits");
+  });
+
   test("back from Argentum, the photos handed to it are looked at again, and the grid reloads only on a change", async () => {
     const be = fakeBackend();
     const host = await renderApp();

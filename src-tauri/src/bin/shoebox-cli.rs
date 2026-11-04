@@ -41,7 +41,16 @@
 //!                                "problems": what Cull found wrong with it, once measured (blurry,
 //!                                focus missed...): a camera that confirmed focus says nothing of shake.
 //!                                Each copy's "edits": the Argentum edits kept beside it (the photo's
-//!                                own, "copy": null, and its virtual copies'; "film": a film look on)
+//!                                own, "copy": null, and its virtual copies'; "film": a film look on;
+//!                                "version": its edited pictures, null until Argentum rendered it;
+//!                                "waiting": a newer edit is still to render; "error": why Argentum
+//!                                couldn't render it). "edited": the version shown in its place
+//!   shoebox-cli render-edits [--photo <id>]   has Argentum render the edits not rendered yet
+//!                                (or only one photo's), as the window does after a scan, retrying
+//!                                those that failed: {"started","rendered","failed","waiting","changed"};
+//!                                "waiting" = edits on disks not plugged in, "changed" = photos whose
+//!                                pictures shown changed. Without an Argentum
+//!                                that can: {"argentum":"missing"|"outdated"}
 //!   shoebox-cli argentum [id]    where Argentum is ("found", null when it isn't on this computer);
 //!                                with a photo's id, opens it there, as the window's Edit in
 //!                                Argentum does: "state" says what became of it: "opened" ("path":
@@ -415,6 +424,25 @@ fn main() -> anyhow::Result<()> {
             Some(id) => println!("{}", serde_json::to_string_pretty(&argentum::open(&cat, id.parse()?)?)?),
             None => println!("{}", serde_json::json!({ "found": argentum::find(&cat.settings().argentum_path) })),
         },
+        Some("render-edits") => {
+            let photo = match args.get(1).map(String::as_str) {
+                Some("--photo") => {
+                    Some(args.get(2).ok_or_else(|| anyhow::anyhow!("render-edits --photo <id>"))?.parse()?)
+                }
+                Some(other) => anyhow::bail!("render-edits: unknown {other:?} (--photo <id>)"),
+                None => None,
+            };
+            match shoebox_lib::renders::argentum(&cat) {
+                Ok(exporter) => {
+                    let options = shoebox_lib::renders::Options { photo, retry: true };
+                    let progress = |p: &shoebox_lib::renders::Progress| eprint!("\r  rendered {}/{}", p.done, p.total);
+                    let report = shoebox_lib::renders::render_pending(&cat, &exporter, &options, &cancel, &progress)?;
+                    eprintln!();
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                Err(support) => println!("{}", serde_json::json!({ "argentum": support })),
+            }
+        }
         Some("edits-check") => {
             let folder = args.get(1).ok_or_else(|| anyhow::anyhow!("edits-check <folder>"))?;
             println!("{}", serde_json::to_string_pretty(&shoebox_lib::edits::check_folder(&cat, Path::new(folder))?)?);

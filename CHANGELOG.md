@@ -6,6 +6,19 @@ Newest first. Same format and versioning as Argentum.
 
 ### Added
 
+- **Photos edited in Argentum show as edited.** Argentum renders each edit
+  in the background (its headless export, one start per batch of photos)
+  and the grid, filmstrip and viewer show the result instead of the
+  original. The viewer's Show switch (or `\`) goes back and forth between
+  Original and Edited, and each virtual copy is a version of its own. An
+  edit is rendered again only when it changes; one undone shows the
+  original again. Only photos on plugged-in disks are rendered: the others
+  wait, and keep showing their last edited pictures. Needs an Argentum with
+  `export --files` and `--long-edge`; with an older one, Settings and the
+  photo's details say to update it, and the mark still shows. Edited
+  pictures are named by their edit, so a backup copies only new ones.
+  Headless: `shoebox-cli render-edits [--photo <id>]`, and `photo` gives
+  each edit's version, or why it isn't rendered yet.
 - **Photos edited in Argentum are marked.** A thumbnail shows a small mark
   when the photo has an edit in Argentum: sliders for an edit, a film roll
   for a film look, with the number of versions when a virtual copy holds

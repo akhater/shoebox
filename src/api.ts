@@ -288,7 +288,32 @@ export interface FileLoc {
   /** Its folder on the disk, as a folder scope takes it (with volumeId). */
   folder: string;
   /** The edits Argentum keeps beside it: the photo's own (copy null) and its virtual copies'. */
-  edits?: { copy: string | null; film: boolean }[];
+  edits?: FileEdit[];
+}
+
+/** An edit Argentum keeps beside a file, and what Shoebox shows of it. */
+export interface FileEdit {
+  /** The virtual copy it is the edit of; null for the photo's own. */
+  copy: string | null;
+  film: boolean;
+  /** Its edited pictures (`editedUrl`); null until Argentum rendered it. */
+  version: string | null;
+  /** A newer edit than `version` is still to render. */
+  waiting: boolean;
+  /** Why Argentum couldn't render it. */
+  error: string | null;
+}
+
+/** Whether the Argentum in Settings can render what edits look like. */
+export type EditRendering = "ready" | "outdated" | "missing";
+
+/** Argentum rendering edits in the background: photos done of those to render. */
+export interface EditsProgress {
+  done: number;
+  total: number;
+  /** Photos whose pictures shown changed so far. */
+  changed: number;
+  finished: boolean;
 }
 
 export interface PhotoDetail {
@@ -314,6 +339,8 @@ export interface PhotoDetail {
   previewState: number;
   previewRev: number;
   error: string | null;
+  /** The edited version shown in place of its own pictures (see `editedUrl`); null when not edited. */
+  edited?: string | null;
   /** Quarter turns clockwise you turned it, on top of what its file says. */
   turn: number;
   /** Quarter turns clockwise the upright model suggests (0 = none). */
@@ -556,6 +583,9 @@ export const api = {
   openInArgentum: (photoId: number) => invoke<Handoff>("open_in_argentum", { photoId }),
   /** Looks again at the edits of the photos handed to Argentum; how many photos changed. */
   checkArgentumEdits: () => invoke<number>("check_argentum_edits"),
+  /** Whether Argentum can render what edits look like (and has it look for some when it can). */
+  editRendering: () => invoke<EditRendering>("edit_rendering"),
+  cancelEditRenders: () => invoke<void>("cancel_edit_renders"),
   /** The Argentum photos open in, with `chosen` as the setting. */
   argentumFound: (chosen: string) => invoke<string | null>("argentum_found", { chosen }),
   /** The program `path` names, when it is Argentum. */
@@ -763,6 +793,10 @@ const BASE = pictureBase(navigator.userAgent);
 
 export const thumbUrl = (id: number, rev: number) => `${BASE}/thumb/${id}?r=${rev}`;
 export const previewUrl = (id: number, rev: number) => `${BASE}/preview/${id}?r=${rev}`;
+/** Thumbnails and previews of an edited photo are its edited ones; this is its own preview. */
+export const originalUrl = (id: number, rev: number) => `${BASE}/original/${id}?r=${rev}`;
+/** The preview of one edited version of a photo (`FileEdit.version`), unchanging. */
+export const editedUrl = (id: number, version: string) => `${BASE}/edited/${id}/${version}`;
 /** The photo read from its original (disk plugged in) at this long edge; 0 = full size. `rev`
  *  is its preview's: a turned photo is asked for again, turned. */
 export const fullUrl = (id: number, long: number, rev: number) => `${BASE}/full/${id}?long=${long}&r=${rev}`;

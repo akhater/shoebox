@@ -124,6 +124,55 @@ impl DataDir {
         shard(&self.root.join("faces"), face_id)
     }
 
+    /// The preview or thumbnail (`thumb`) of an edited version of a photo
+    /// (see renders.rs), named by its edit (`version`): a new edit is a new
+    /// file, so a backup copies only what's new.
+    pub fn edited_path(&self, photo_id: i64, version: &str, thumb: bool) -> PathBuf {
+        let base = self.root.join(if thumb { "edited-thumbs" } else { "edited-previews" });
+        base.join(format!("{:02x}", photo_id & 0xff)).join(format!("{photo_id}-{version}.jpg"))
+    }
+
+    /// Every edited version kept, as (photo, version), sealed or not, in order.
+    /// Known by its preview, written last.
+    pub fn edited_versions(&self) -> Vec<(i64, String)> {
+        versions_in(&self.root.join("edited-previews"), 2)
+    }
+
+    /// The edited versions of one photo kept, sealed or not.
+    pub fn edited_versions_of(&self, photo_id: i64) -> Vec<String> {
+        let shard = self.edited_path(photo_id, "", false).parent().map(Path::to_path_buf).unwrap_or_default();
+        versions_in(&shard, 1).into_iter().filter(|(p, _)| *p == photo_id).map(|(_, v)| v).collect()
+    }
+
+    /// The folder Argentum renders a batch into, empty: one per Shoebox
+    /// running (the window and the CLI can render at once). Inside the
+    /// catalog: Argentum writes there, never beside a photo. Those left by a
+    /// Shoebox stopped mid-batch go once nothing changed in them for a while.
+    pub fn fresh_render_dir(&self) -> io::Result<PathBuf> {
+        let all = self.root.join(RENDER_DIR);
+        for left in std::fs::read_dir(&all).into_iter().flatten().flatten() {
+            if unchanged_for(&left.path(), STRAY_AFTER) {
+                let _ = std::fs::remove_dir_all(left.path());
+            }
+        }
+        self.clear_render_dir()?;
+        let dir = all.join(std::process::id().to_string());
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// Removes this Shoebox's [`DataDir::fresh_render_dir`] and all in it.
+    pub fn clear_render_dir(&self) -> io::Result<()> {
+        let all = self.root.join(RENDER_DIR);
+        match std::fs::remove_dir_all(all.join(std::process::id().to_string())) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        // The last one out takes the folder along.
+        let _ = std::fs::remove_dir(all);
+        Ok(())
+    }
+
     /// Where a private photo's copy at `path` (preview, thumbnail, face
     /// picture) is kept sealed instead (see private.rs).
     pub fn sealed_path(path: &Path) -> PathBuf {
@@ -228,7 +277,7 @@ impl DataDir {
                 e.depth() != 1
                     || !matches!(
                         e.file_name().to_str(),
-                        Some("models" | POINTER_FILE | MOVE_JOURNAL | MOVE_LOCK | OPS_DIR)
+                        Some("models" | POINTER_FILE | MOVE_JOURNAL | MOVE_LOCK | OPS_DIR | RENDER_DIR)
                     )
             })
             .flatten()
@@ -627,6 +676,10 @@ pub fn remember_data_dir(root: &Path, left_behind: Option<&Path>) -> io::Result<
 /// Where the locks of folder operations live, in the catalog folder.
 const OPS_DIR: &str = "ops";
 
+/// Where Argentum renders edited photos for Shoebox (see renders.rs): a
+/// folder per Shoebox running, emptied after each batch.
+const RENDER_DIR: &str = "rendering";
+
 /// Held for as long as a folder move, rename or delete runs (organize.rs): a
 /// lock on `ops\<id>.lock` in the catalog folder. The system lets go of it
 /// when the process ends, however it ends, so an operation whose lock is free
@@ -820,6 +873,25 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     written.and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// The edited versions (photo, version) of the files `depth` folders down `dir`.
+fn versions_in(dir: &Path, depth: usize) -> Vec<(i64, String)> {
+    let mut found: Vec<(i64, String)> = walkdir::WalkDir::new(dir)
+        .min_depth(depth)
+        .max_depth(depth)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?;
+            let stem = name.strip_suffix(".jpg").or_else(|| name.strip_suffix(".sealed"))?;
+            let (photo, version) = stem.split_once('-')?;
+            Some((photo.parse().ok()?, version.to_string()))
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    found
 }
 
 /// 256 sub-folders so no single folder holds 100k files.

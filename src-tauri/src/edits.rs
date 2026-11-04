@@ -310,12 +310,25 @@ pub fn check_handed_over(cat: &Catalog, now: Instant) -> Result<u64> {
 pub fn of_photo(db: &Connection, photo: i64) -> Result<Vec<(i64, FileEdit)>> {
     let edits = db
         .prepare(
-            "SELECT e.file_id, e.copy_id, e.kind FROM files f JOIN edits e ON e.file_id = f.id
+            "SELECT e.file_id, e.copy_id, e.kind, e.fingerprint, e.rendered, e.render_failed, e.render_error
+               FROM files f JOIN edits e ON e.file_id = f.id
               WHERE f.photo_id = ?1 AND e.kind > 0 ORDER BY e.file_id, e.copy_id",
         )?
         .query_map([photo], |r| {
             let copy: String = r.get(1)?;
-            Ok((r.get(0)?, FileEdit { copy: (!copy.is_empty()).then_some(copy), film: r.get::<_, i64>(2)? == FILM }))
+            let (now, rendered, failed): (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) =
+                (r.get(3)?, r.get(4)?, r.get(5)?);
+            let failed = failed.is_some() && failed == now;
+            Ok((
+                r.get(0)?,
+                FileEdit {
+                    copy: (!copy.is_empty()).then_some(copy),
+                    film: r.get::<_, i64>(2)? == FILM,
+                    version: rendered.as_deref().map(crate::renders::version_of),
+                    waiting: rendered != now && !failed,
+                    error: if failed { r.get(6)? } else { None },
+                },
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(edits)
@@ -329,4 +342,11 @@ pub struct FileEdit {
     pub copy: Option<String>,
     /// A film look is on.
     pub film: bool,
+    /// The version its edited pictures are kept as (see renders.rs); None
+    /// until Argentum rendered it.
+    pub version: Option<String>,
+    /// A newer edit than `version` waits to be rendered.
+    pub waiting: bool,
+    /// Why Argentum couldn't render this edit.
+    pub error: Option<String>,
 }
