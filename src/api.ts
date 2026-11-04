@@ -304,8 +304,9 @@ export interface FileEdit {
   error: string | null;
 }
 
-/** Whether the Argentum in Settings can render what edits look like. */
-export type EditRendering = "ready" | "outdated" | "missing";
+/** Whether edits are rendered: stopped from the window (until started again), else whether
+ *  the Argentum in Settings can render them. */
+export type EditRendering = "ready" | "outdated" | "missing" | "cantStart" | "stopped";
 
 /** Argentum rendering edits in the background: photos done of those to render. */
 export interface EditsProgress {
@@ -585,7 +586,9 @@ export const api = {
   checkArgentumEdits: () => invoke<number>("check_argentum_edits"),
   /** Whether Argentum can render what edits look like (and has it look for some when it can). */
   editRendering: () => invoke<EditRendering>("edit_rendering"),
+  /** Stops rendering edits until `startEditRenders` (or a restart): scans and plug-ins don't undo it. */
   cancelEditRenders: () => invoke<void>("cancel_edit_renders"),
+  startEditRenders: () => invoke<void>("start_edit_renders"),
   /** The Argentum photos open in, with `chosen` as the setting. */
   argentumFound: (chosen: string) => invoke<string | null>("argentum_found", { chosen }),
   /** The program `path` names, when it is Argentum. */

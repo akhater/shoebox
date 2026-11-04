@@ -613,8 +613,10 @@ impl Catalog {
             .filter_map(|f| self.data.root.join(f).metadata().ok())
             .map(|m| m.len())
             .sum();
-        let (_, preview_bytes) = self.data.usage("previews");
-        let (_, thumb_bytes) = self.data.usage("thumbs");
+        // Edited pictures count with the previews and thumbnails they stand in for.
+        let bytes = |sub: &str| self.data.usage(sub).1;
+        let preview_bytes = bytes("previews") + bytes(paths::EDITED_PREVIEWS);
+        let thumb_bytes = bytes("thumbs") + bytes(paths::EDITED_THUMBS);
         Ok(Stats {
             photos,
             raw,
@@ -1442,7 +1444,9 @@ impl Catalog {
             }
         }
         let ignore = self.data.root.join(".kopiaignore");
-        if !ignore.exists() {
+        // One Shoebox wrote is brought up to date; one edited by hand is left as it is.
+        let old = std::fs::read_to_string(&ignore).ok();
+        if old.as_deref().is_none_or(|o| o != KOPIA_IGNORE && o.starts_with("# Written by Shoebox")) {
             self.data.write(&ignore, KOPIA_IGNORE.as_bytes())?;
         }
         let bytes = files.iter().filter_map(|f| dir.join(f).metadata().ok()).map(|m| m.len()).sum();
@@ -1756,6 +1760,7 @@ const KOPIA_IGNORE: &str = "# Written by Shoebox. For Kopia (or any tool reading
 /*.db-journal\r
 *.tmp\r
 /logs/\r
+/rendering/\r
 ";
 
 #[derive(Serialize)]

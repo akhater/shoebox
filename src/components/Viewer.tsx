@@ -179,11 +179,14 @@ export function Viewer({
   const [previewLong, setPreviewLong] = useState(0);
   const [previewSize, setPreviewSize] = useState<{ w: number; h: number } | null>(null);
   const [sharp, setSharp] = useState<string | null>(null);
-  // An edited photo shows what Argentum made of it: `version` undefined = as
-  // it shows everywhere (its edit), null = its own pictures, else that version.
-  const [version, setVersion] = useState<string | null | undefined>(undefined);
+  // An edited photo shows what Argentum made of it: `chosen` undefined = as
+  // it shows everywhere (its edit), null = its own pictures, else the key of a
+  // version (kept when that edit is rendered again: its new picture shows).
+  const [chosen, setChosen] = useState<string | null | undefined>(undefined);
   const edited = detail?.id === id ? (detail.edited ?? null) : undefined; // undefined: not known yet
-  const shownVersion = version === undefined ? edited : version;
+  const versions = detail?.id === id ? editedVersions(detail.files) : [];
+  const shownVersion =
+    chosen === undefined ? edited : chosen === null ? null : (versions.find((v) => v.key === chosen)?.version ?? edited);
   // Sharper pictures, focus points and face boxes are the original's.
   const showsOriginal = shownVersion === null || (shownVersion === undefined && !((list.edit?.[index] ?? 0) > 0));
   const sharpHere = reachable && showsOriginal;
@@ -295,7 +298,7 @@ export function Viewer({
   const showing = usePreviewHandlers(previewTurn);
 
   // Another photo, or this one turned (a new revision): its pictures again.
-  useEffect(() => setVersion(undefined), [id]);
+  useEffect(() => setChosen(undefined), [id]);
   useEffect(() => {
     setSharp(null);
     setZoom(null);
@@ -434,7 +437,6 @@ export function Viewer({
   const act = (p: Promise<void>) => p.catch((e) => setError(String(e)));
   const spotted = showsOriginal ? (faces.find((f) => f.id === spot) ?? null) : null;
   const d = detail?.id === id ? detail : null;
-  const versions = d ? editedVersions(d.files) : [];
   // Whether Argentum can render the edits still to show: asked only then.
   const [rendering, setRendering] = useState<EditRendering | null>(null);
   const waits = !!d?.files.some((f) => f.edits?.some((e) => e.waiting));
@@ -450,12 +452,12 @@ export function Viewer({
     };
   }, [waits]);
   const picture =
-    version === undefined ? previewUrl(id, rev) : version === null ? originalUrl(id, rev) : editedUrl(id, version);
+    chosen === null ? originalUrl(id, rev) : chosen && shownVersion ? editedUrl(id, shownVersion) : previewUrl(id, rev);
   // Back and forth between the photo's own pictures and its edit (\).
   const toggleEdited = () => {
     if (!versions.length) return;
     setZoom(null);
-    setVersion(showsOriginal ? (edited ?? versions[0].version) : null);
+    setChosen(showsOriginal ? (versions.find((v) => v.version === edited) ?? versions[0]).key : null);
   };
   // Only over the picture they were read for (a turn makes a new one).
   const focus = d && d.previewRev === rev ? d.focus : null;
@@ -627,15 +629,15 @@ export function Viewer({
         {versions.length > 0 && !(proposal !== 0 && onShowTurned) && (
           <div className="view-switch" role="group" aria-label="Show" onClick={(e) => e.stopPropagation()}>
             <span className="view-switch-label">Show</span>
-            <button className={showsOriginal ? "on" : ""} onClick={() => setVersion(null)} title="The photo as it came from the camera (\)">
+            <button className={showsOriginal ? "on" : ""} onClick={() => setChosen(null)} title="The photo as it came from the camera (\)">
               Original
             </button>
             {versions.map((v) => (
               <button
-                key={v.version}
+                key={v.key}
                 className={!showsOriginal && (shownVersion ?? versions[0].version) === v.version ? "on" : ""}
-                onClick={() => setVersion(v.version)}
-                title={v.label === "Edited" ? "As edited in Argentum (\\)" : "This virtual copy, as edited in Argentum"}
+                onClick={() => setChosen(v.key)}
+                title={v.label.startsWith("Edited") ? "As edited in Argentum (\\)" : "This virtual copy, as edited in Argentum"}
               >
                 {v.label}
               </button>
@@ -895,7 +897,20 @@ export function Viewer({
                       {editLine(f.edits!)}
                     </div>
                   )}
-                  {note && <div className="loc-edit-note">{note}</div>}
+                  {note && (
+                    <div className="loc-edit-note">
+                      {note}
+                      {rendering === "stopped" && (
+                        <button
+                          className="btn small ghost"
+                          onClick={() => act(api.startEditRenders().then(() => setRendering("ready")))}
+                          title="Start rendering edits again, for every photo"
+                        >
+                          Render now
+                        </button>
+                      )}
+                    </div>
+                  )}
                   <div className="loc-actions">
                     <button
                       className="btn small"

@@ -610,26 +610,36 @@ pub async fn check_argentum_edits(app: AppHandle, state: State<'_, AppState>) ->
     Ok(changed)
 }
 
-/// Whether the Argentum Settings has can render what edits look like:
-/// "ready", "outdated" (an update does) or "missing". Asked of Argentum
+/// Whether edits are rendered: "stopped" (from the window, until started
+/// again), else whether the Argentum Settings has can render them: "ready",
+/// "outdated" (an update does), "cantStart" or "missing". Asked of Argentum
 /// once per build. Looks for edits to render when it can.
 #[tauri::command]
-pub async fn edit_rendering(state: State<'_, AppState>) -> Res<crate::renders::Support> {
+pub async fn edit_rendering(state: State<'_, AppState>) -> Res<serde_json::Value> {
     let (cat, renders) = (state.cat.clone(), state.renders.clone());
+    if renders.is_stopped() {
+        return Ok(serde_json::json!("stopped"));
+    }
     blocking(move || match crate::renders::argentum(&cat) {
         Ok(_) => {
             renders.kick();
-            Ok(crate::renders::Support::Ready)
+            Ok(serde_json::json!(crate::renders::Support::Ready))
         }
-        Err(support) => Ok(support),
+        Err(support) => Ok(serde_json::json!(support)),
     })
     .await
 }
 
-/// Stops rendering edits; what is left is rendered at the next look.
+/// Stops rendering edits, until [`start_edit_renders`] or a restart.
 #[tauri::command]
 pub fn cancel_edit_renders(state: State<'_, AppState>) {
-    state.renders.cancel.store(true, Ordering::Relaxed);
+    state.renders.stop();
+}
+
+/// Renders the edits that wait, after a Stop.
+#[tauri::command]
+pub fn start_edit_renders(state: State<'_, AppState>) {
+    state.renders.start();
 }
 
 /// The Argentum photos open in, as Settings has it now.

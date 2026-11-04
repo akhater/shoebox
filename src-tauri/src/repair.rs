@@ -4,13 +4,14 @@
 //! they take a file's place now ([`crate::paths`]), so this finds what
 //! happened before that, or a failing disk.
 //!
-//! Looked into: the previews, thumbnails and face pictures written since the
-//! last check, or all of them the first time; at start, only once the PC has
-//! restarted since that check (until it does, nothing written can be lost).
-//! Missing ones are noticed too. A thumbnail or face picture is made again
-//! from its photo's preview. A photo whose preview is damaged or missing is
-//! read again from its original, like one left half-read: at once when its
-//! disk is plugged in, otherwise when it is.
+//! Looked into: the previews, thumbnails, face pictures and edited pictures
+//! written since the last check, or all of them the first time; at start,
+//! only once the PC has restarted since that check (until it does, nothing
+//! written can be lost). Missing ones are noticed too. A thumbnail or face
+//! picture is made again from its photo's preview; a damaged edited picture
+//! is removed, and Argentum renders it again. A photo whose preview is
+//! damaged or missing is read again from its original, like one left
+//! half-read: at once when its disk is plugged in, otherwise when it is.
 
 use crate::catalog::Catalog;
 use crate::db::{FILE_PRESENT, PREVIEW_OK, PREVIEW_PENDING};
@@ -42,6 +43,8 @@ pub struct Checkup {
     /// Face pictures whose photo's preview is damaged too: cut by a later
     /// check, once the photo has been read again.
     pub faces_waiting: u64,
+    /// Edited pictures damaged, removed: Argentum renders them again (see renders.rs).
+    pub edits_to_render_again: u64,
     pub seconds: f64,
 }
 
@@ -173,18 +176,47 @@ pub fn check_files(cat: &Catalog, all: bool) -> Result<Checkup> {
         c.faces_waiting = (cuttable.len() as u64 - c.faces_cut_again) + waiting.len() as u64;
     }
 
+    // Edited pictures: a damaged one goes with the rest of its version, and is rendered again.
+    for sub in [crate::paths::EDITED_PREVIEWS, crate::paths::EDITED_THUMBS] {
+        for e in WalkDir::new(cat.data.root.join(sub)).min_depth(2).max_depth(2).into_iter().flatten() {
+            let name = e.file_name().to_string_lossy();
+            let stem = name.strip_suffix(".jpg").or_else(|| name.strip_suffix(".sealed"));
+            let Some((photo, version)) = stem.and_then(|s| s.split_once('-')) else { continue };
+            let Ok(photo) = photo.parse::<i64>() else { continue };
+            let modified = e.metadata().ok().and_then(|m| m.modified().ok());
+            let secs =
+                modified.and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(i64::MAX, |d| d.as_secs() as i64);
+            if since.is_some_and(|s| secs < s) {
+                continue;
+            }
+            c.checked += 1;
+            if whole_copy(e.path()) == Some(false) {
+                for thumb in [true, false] {
+                    cat.remove_copy(&cat.data.edited_path(photo, version, thumb))?;
+                }
+                c.edits_to_render_again += 1;
+            }
+        }
+    }
+
     cat.db()
         .execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)", params![CHECKED_KEY, began.to_string()])?;
     c.seconds = started.elapsed().as_secs_f64();
-    if !c.to_read_again.is_empty() || c.thumbs_made_again > 0 || c.faces_cut_again > 0 || c.faces_waiting > 0 {
+    if !c.to_read_again.is_empty()
+        || c.thumbs_made_again > 0
+        || c.faces_cut_again > 0
+        || c.faces_waiting > 0
+        || c.edits_to_render_again > 0
+    {
         log::warn!(
             "saved files checked: {} photos with a damaged or missing preview to read again (disks {:?}), \
-             {} thumbnails made again, {} face pictures cut again, {} waiting for their preview",
+             {} thumbnails made again, {} face pictures cut again, {} waiting for their preview,              {} edited pictures to render again",
             c.to_read_again.len(),
             c.disks,
             c.thumbs_made_again,
             c.faces_cut_again,
-            c.faces_waiting
+            c.faces_waiting,
+            c.edits_to_render_again
         );
     }
     log::info!("saved files checked: {} files in {:.1} s", c.checked, c.seconds);

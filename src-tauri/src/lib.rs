@@ -316,16 +316,38 @@ impl Kick {
     }
 }
 
-/// Wakes the worker that has Argentum render what edits look like.
+/// Wakes the worker that has Argentum render what edits look like. A Stop
+/// holds until rendering is started again, or Shoebox restarts: a scan, a
+/// plug-in or a look at a photo doesn't undo it.
 #[derive(Default)]
 pub struct RenderQueue {
     kick: Kick,
-    pub cancel: AtomicBool,
+    cancel: AtomicBool,
+    stopped: AtomicBool,
 }
 
 impl RenderQueue {
+    /// There may be edits to render: nothing happens while stopped.
     pub fn kick(&self) {
+        if !self.is_stopped() {
+            self.kick.kick();
+        }
+    }
+
+    /// Stops what is being rendered, and rendering until [`RenderQueue::start`].
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Renders again what waits, asked for by the user.
+    pub fn start(&self) {
+        self.stopped.store(false, Ordering::SeqCst);
         self.kick.kick();
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 }
 
@@ -338,7 +360,10 @@ fn render_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<RenderQueue>) {
     let mut retry = true;
     loop {
         q.kick.wait();
-        q.cancel.store(false, Ordering::Relaxed);
+        if q.is_stopped() {
+            continue;
+        }
+        q.cancel.store(false, Ordering::SeqCst);
         let Ok(argentum) = renders::argentum(&cat) else { continue };
         let progress = |p: &renders::Progress| {
             let _ = app.emit("edits-progress", p);
@@ -573,6 +598,10 @@ pub fn remove_stray_temp_files(data: &DataDir) {
     let n = data.remove_stray_temp_files();
     if n > 0 {
         log::info!("{n} temporary files left by unfinished writes removed");
+    }
+    let n = data.clear_stray_render_dirs();
+    if n > 0 {
+        log::info!("{n} folders Argentum rendered into, left by a Shoebox stopped mid-batch, removed");
     }
 }
 
@@ -992,6 +1021,7 @@ pub fn run() {
             commands::check_argentum_edits,
             commands::edit_rendering,
             commands::cancel_edit_renders,
+            commands::start_edit_renders,
             commands::argentum_found,
             commands::argentum_chosen,
             commands::open_argentum_page,
@@ -1089,6 +1119,20 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stop_holds_through_scans_plug_ins_and_looks_until_started_again() {
+        let q = RenderQueue::default();
+        let kicked = |q: &RenderQueue| std::mem::take(&mut *q.kick.kicked.lock().unwrap());
+        q.kick();
+        assert!(kicked(&q));
+        q.stop();
+        assert!(q.cancel.load(Ordering::SeqCst), "what is being rendered stops");
+        q.kick(); // a scan, a plug-in, Settings or the viewer asking
+        assert!(!kicked(&q) && q.is_stopped());
+        q.start();
+        assert!(kicked(&q) && !q.is_stopped());
+    }
 
     #[test]
     fn an_index_is_waited_for_until_read_then_says_if_reading_failed() {

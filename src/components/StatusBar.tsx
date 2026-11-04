@@ -118,7 +118,7 @@ export function StatusBar({
         <span className="bar">
           <span style={{ width: `${(editsProgress.done / Math.max(1, editsProgress.total)) * 100}%` }} />
         </span>
-        <button className="btn small ghost" onClick={onStopEdits} title={`Stop: the ${fmtNum(left)} left are rendered at the next scan or start`}>
+        <button className="btn small ghost" onClick={onStopEdits} title={`Stop: the ${fmtNum(left)} left wait, through scans and plug-ins, until you start rendering again (Settings > Argentum, or a photo's details) or restart Shoebox`}>
           <X size={14} /> Stop
         </button>
       </footer>

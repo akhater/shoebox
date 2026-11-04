@@ -15,6 +15,7 @@ use shoebox_lib::edits::FileEdit;
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::private;
 use shoebox_lib::renders::{self, Exporter, Options, Picture, Report, Support};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +30,8 @@ const BROKEN: &str = r#"{"version":1,"rating":0,"adjustments":{"exposure":0.7,"n
 /// Run with the other tests it finds no `--` and does nothing. `mode`: `new`
 /// (renders each photo asked for, its picture inverted; one whose edit says
 /// "fail-me" fails), `old` (an Argentum from before `--files`), `slow` (takes
-/// a minute before rendering).
+/// a minute before rendering), `noisy` (prints an endless line and bytes that
+/// aren't text first), `escape` (answers with the photo itself as its output).
 #[test]
 fn fake_argentum() {
     let args: Vec<String> = std::env::args().collect();
@@ -51,6 +53,11 @@ fn fake_argentum() {
         std::thread::sleep(Duration::from_secs(60));
     }
     std::fs::create_dir_all(&out).unwrap();
+    if mode == "noisy" {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&vec![b'x'; 200_000]).unwrap();
+        stdout.write_all(b"\n\xff\xfe not text {\"ok\":tru\n").unwrap();
+    }
     let mut failed = false;
     for (n, line) in std::fs::read_to_string(list).unwrap().lines().enumerate() {
         let (photo, copy) = match line.split_once("?vc=") {
@@ -67,7 +74,8 @@ fn fake_argentum() {
                 img.invert();
                 let file = out.join(format!("{n}_edited.jpg"));
                 img.thumbnail(long, long).to_rgb8().save(&file).unwrap();
-                serde_json::json!({ "source": photo, "copy": copy, "output": file, "ok": true })
+                let output = if mode == "escape" { PathBuf::from(photo) } else { file };
+                serde_json::json!({ "source": photo, "copy": copy, "output": output, "ok": true })
             }
             _ => {
                 failed = true;
@@ -312,4 +320,58 @@ fn a_private_photo_keeps_its_edited_pictures_sealed() {
             assert!(!path.exists() && DataDir::sealed_path(&path).is_file(), "{path:?} sealed");
         }
     }
+}
+
+#[test]
+fn argentum_taking_too_long_is_stopped_and_its_photos_tried_again_later() {
+    let w = World::new("render-timeout");
+    w.write("IMG_0.JPG.agdata", EDIT);
+    let cat = w.open(true);
+    scan(&cat);
+    let slow = argentum("slow").limited(Duration::from_secs(1), Duration::from_secs(1));
+    let started = Instant::now();
+    let options = Options { photo: None, retry: false };
+    let r = renders::render_pending(&cat, &slow, &options, &AtomicBool::new(false), &|_| {}).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(20), "stopped, not waited for");
+    assert_eq!((r.rendered, r.failed), (0, 1));
+    let p = photo(&cat, "IMG_0.JPG");
+    assert_eq!(edits(&cat, p)[0].error.as_deref(), Some("Argentum took too long and was stopped"));
+    assert_eq!(render(&cat, true).rendered, 1, "tried again when asked");
+}
+
+#[test]
+fn a_folder_with_spaces_and_letters_beyond_ascii_reaches_argentum_and_back() {
+    let w = World::new("render Été ünï cødé 写真");
+    w.write("IMG_0.JPG.agdata", EDIT);
+    w.write("IMG_0.JPG.a1b2c3.agdata", EDIT_2);
+    let cat = w.open(true);
+    scan(&cat);
+    let r = render(&cat, false);
+    assert_eq!((r.rendered, r.failed), (2, 0));
+    let p = photo(&cat, "IMG_0.JPG");
+    assert!(edits(&cat, p).iter().all(|e| e.version.is_some()));
+}
+
+#[test]
+fn an_answer_naming_a_file_outside_argentums_folder_is_refused() {
+    let w = World::new("render-escape");
+    w.write("IMG_0.JPG.agdata", EDIT);
+    let cat = w.open(true);
+    scan(&cat);
+    let r = render_with(&cat, "escape", Options { photo: None, retry: false }, &AtomicBool::new(false));
+    assert_eq!((r.rendered, r.failed), (0, 1));
+    let p = photo(&cat, "IMG_0.JPG");
+    assert!(edits(&cat, p)[0].error.as_deref().unwrap().contains("outside its folder"));
+    assert_eq!(shown(&cat, p, Picture::Thumb), w.data.thumb_path(p), "the photo itself was never taken as its edit");
+    assert!(w.photos().join("IMG_0.JPG").is_file(), "nor touched");
+}
+
+#[test]
+fn output_that_isnt_an_answer_is_passed_over() {
+    let w = World::new("render-noisy");
+    w.write("IMG_0.JPG.agdata", EDIT);
+    let cat = w.open(true);
+    scan(&cat);
+    let r = render_with(&cat, "noisy", Options { photo: None, retry: false }, &AtomicBool::new(false));
+    assert_eq!((r.rendered, r.failed), (1, 0), "an endless line and bytes that aren't text hold nothing back");
 }

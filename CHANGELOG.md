@@ -13,7 +13,9 @@ Newest first. Same format and versioning as Argentum.
   Original and Edited, and each virtual copy is a version of its own. An
   edit is rendered again only when it changes; one undone shows the
   original again. Only photos on plugged-in disks are rendered: the others
-  wait, and keep showing their last edited pictures. Needs an Argentum with
+  wait, and keep showing their last edited pictures. Stop, in the status
+  bar, holds until rendering is started again (Settings, or a photo's
+  details) or Shoebox restarts. Needs an Argentum with
   `export --files` and `--long-edge`; with an older one, Settings and the
   photo's details say to update it, and the mark still shows. Edited
   pictures are named by their edit, so a backup copies only new ones.

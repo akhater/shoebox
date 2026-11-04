@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Long edge of an edited preview, px: the viewer shows it as it is.
@@ -41,6 +42,8 @@ pub enum Support {
     Missing,
     /// From before its headless export took lists of photos and a size.
     Outdated,
+    /// There, but it couldn't be started (asked again next time).
+    CantStart,
     Ready,
 }
 
@@ -99,18 +102,26 @@ fn is_version(v: &str) -> bool {
 pub struct Exporter {
     program: PathBuf,
     before: Vec<String>,
+    /// How long it may take to start, then per photo, before it is stopped.
+    limits: (Duration, Duration),
 }
 
 impl Exporter {
     /// Argentum at `exe`, as [`crate::argentum::find`] gives it.
     pub fn new(exe: &Path) -> Self {
-        Self { program: crate::argentum::executable(exe), before: Vec::new() }
+        Self { program: crate::argentum::executable(exe), before: Vec::new(), limits: (START_LIMIT, PHOTO_LIMIT) }
     }
 
     /// A program standing in for Argentum, started with `before` ahead of
     /// the arguments Argentum gets.
     pub fn wrapped(program: &Path, before: &[&str]) -> Self {
-        Self { program: program.to_path_buf(), before: before.iter().map(|s| s.to_string()).collect() }
+        let before = before.iter().map(|s| s.to_string()).collect();
+        Self { program: program.to_path_buf(), before, limits: (START_LIMIT, PHOTO_LIMIT) }
+    }
+
+    /// Stopped after `start` and `per_photo` of its batch instead.
+    pub fn limited(self, start: Duration, per_photo: Duration) -> Self {
+        Self { limits: (start, per_photo), ..self }
     }
 
     fn command(&self) -> Command {
@@ -134,74 +145,180 @@ impl Exporter {
     pub fn probe(&self) -> Support {
         let mut cmd = self.command();
         cmd.args(["export", "--files"]);
-        match run(cmd, START_LIMIT, &AtomicBool::new(false)) {
+        match run(cmd, self.limits.0, &AtomicBool::new(false), &mut |_| {}) {
             Ok(ran) if ran.stderr.contains("--files") => Support::Ready,
             Ok(_) => Support::Outdated,
             Err(e) => {
                 log::warn!("asking {} what it can do: {e:#}", self.program.display());
-                Support::Outdated
+                Support::CantStart
             }
         }
     }
 }
 
 /// Argentum as Settings has it, when it can render edits; otherwise why not.
-/// Asked once per program and build (a new one is asked again).
+/// Asked once per program and build (a new one is asked again); one that
+/// couldn't start is asked again each time.
 pub fn argentum(cat: &Catalog) -> Result<Exporter, Support> {
     static ASKED: Mutex<Option<(PathBuf, Option<SystemTime>, Support)>> = Mutex::new(None);
     let Some(exe) = crate::argentum::find(&cat.settings().argentum_path) else { return Err(Support::Missing) };
     let exporter = Exporter::new(&exe);
     let build = exporter.program.metadata().and_then(|m| m.modified()).ok();
-    let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
-    let support = match &*asked {
-        Some((program, b, support)) if *program == exporter.program && *b == build => *support,
-        _ => {
-            let support = exporter.probe();
-            log::info!("{} renders edits: {support:?}", exporter.program.display());
-            *asked = Some((exporter.program.clone(), build, support));
-            support
-        }
+    let known = match &*ASKED.lock().unwrap_or_else(|e| e.into_inner()) {
+        Some((program, b, support)) if *program == exporter.program && *b == build => Some(*support),
+        _ => None,
     };
+    // Asked with nothing held: it can take seconds.
+    let support = known.unwrap_or_else(|| {
+        let support = exporter.probe();
+        log::info!("{} renders edits: {support:?}", exporter.program.display());
+        if support != Support::CantStart {
+            *ASKED.lock().unwrap_or_else(|e| e.into_inner()) = Some((exporter.program.clone(), build, support));
+        }
+        support
+    });
     if support == Support::Ready { Ok(exporter) } else { Err(support) }
 }
 
-/// What a program started printed, and how it ended.
+/// A line of a program's output kept at most this long (a longer one is no
+/// answer), this much of its output in all, and of its errors the last part.
+const LINE_CAP: u64 = 64 * 1024;
+const OUTPUT_CAP: u64 = 16 * 1024 * 1024;
+const ERRORS_KEPT: usize = 16 * 1024;
+/// How long what a program printed is still waited for once it ended (or was
+/// stopped): a process it started can keep its output open forever.
+const DRAIN_FOR: Duration = Duration::from_secs(2);
+
+/// How a program started ended.
 struct Ran {
-    stdout: Vec<String>,
+    /// The end of what it said on stderr.
     stderr: String,
     /// Stopped before it ended: asked to (`cancel`), or it took too long.
     stopped: bool,
 }
 
-/// Runs `cmd` to its end, or stops it after `limit` or once `cancel` is set.
-fn run(mut cmd: Command, limit: Duration, cancel: &AtomicBool) -> Result<Ran> {
+/// Runs `cmd` to its end, or stops it after `limit` or once `cancel` is set,
+/// handing each line it prints to `on_line` as it comes.
+fn run(mut cmd: Command, limit: Duration, cancel: &AtomicBool, on_line: &mut dyn FnMut(&str)) -> Result<Ran> {
     let mut child = cmd.spawn().with_context(|| format!("Couldn't start {}", cmd.get_program().display()))?;
+    ends_with_shoebox(&child);
     let (out, err) = (child.stdout.take(), child.stderr.take());
-    // Both read as they come: a full pipe would hold the program up.
-    let stdout = std::thread::spawn(move || out.map(|o| BufReader::new(o).lines().map_while(Result::ok).collect()));
-    let stderr = std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(mut e) = err {
-            let _ = e.read_to_string(&mut text);
-        }
-        text
-    });
+    // Both read as they come (a full pipe would hold the program up), on
+    // threads never waited for: they end when the output closes.
+    let (lines, rx) = mpsc::channel();
+    if let Some(out) = out {
+        std::thread::spawn(move || read_lines(out, &lines));
+    }
+    let stderr = Arc::new(Mutex::new(String::new()));
+    if let Some(err) = err {
+        let kept = stderr.clone();
+        std::thread::spawn(move || keep_tail(err, &kept));
+    }
     let started = Instant::now();
-    let stopped = loop {
-        if child.try_wait()?.is_some() {
-            break false;
+    let (mut ended, mut stopped, mut reading) = (None::<Instant>, false, true);
+    loop {
+        if reading {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(line) => {
+                    on_line(&line);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => reading = false,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
         }
-        if cancel.load(Ordering::Relaxed) || started.elapsed() > limit {
-            let _ = child.kill();
-            let _ = child.wait();
-            break true;
+        match ended {
+            Some(at) if !reading || at.elapsed() > DRAIN_FOR => break,
+            Some(_) => {}
+            None if child.try_wait()?.is_some() => ended = Some(Instant::now()),
+            None if cancel.load(Ordering::Relaxed) || started.elapsed() > limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                (ended, stopped) = (Some(Instant::now()), true);
+            }
+            None if !reading => std::thread::sleep(Duration::from_millis(50)),
+            None => {}
         }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    let stdout = stdout.join().ok().flatten().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
-    Ok(Ran { stdout, stderr, stopped })
+    }
+    let stderr = stderr.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Ok(Ran { stderr, stopped })
 }
+
+/// Hands each line of `out` to `lines`, decoded as well as it can be: a line
+/// longer than [`LINE_CAP`] is skipped, and past [`OUTPUT_CAP`] nothing is kept.
+fn read_lines(out: impl Read, lines: &mpsc::Sender<String>) {
+    let mut reader = BufReader::new(out);
+    let (mut total, mut line) = (0, Vec::new());
+    loop {
+        line.clear();
+        let Ok(n) = reader.by_ref().take(LINE_CAP).read_until(b'\n', &mut line) else { return };
+        if n == 0 {
+            return;
+        }
+        total += n as u64;
+        if n as u64 == LINE_CAP && !line.ends_with(b"\n") {
+            // Too long: the rest of it goes too.
+            loop {
+                line.clear();
+                match reader.by_ref().take(LINE_CAP).read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => total += n as u64,
+                }
+                if line.ends_with(b"\n") {
+                    break;
+                }
+            }
+            continue;
+        }
+        if total <= OUTPUT_CAP && lines.send(String::from_utf8_lossy(&line).trim_end().to_string()).is_err() {
+            return;
+        }
+    }
+}
+
+/// Keeps the last [`ERRORS_KEPT`] bytes of `err` in `kept`, as they come.
+fn keep_tail(mut err: impl Read, kept: &Mutex<String>) {
+    let mut buf = [0u8; 4096];
+    while let Ok(n @ 1..) = err.read(&mut buf) {
+        let mut kept = kept.lock().unwrap_or_else(|e| e.into_inner());
+        kept.push_str(&String::from_utf8_lossy(&buf[..n]));
+        if kept.len() > ERRORS_KEPT {
+            let cut = kept.len() - ERRORS_KEPT;
+            let cut = (cut..kept.len()).find(|&i| kept.is_char_boundary(i)).unwrap_or(kept.len());
+            kept.drain(..cut);
+        }
+    }
+}
+
+/// Argentum goes when Shoebox does, however it ends: on Windows, in a job
+/// that the system ends with Shoebox's last handle to it.
+#[cfg(windows)]
+fn ends_with_shoebox(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+    /// The job, as a number: held open for as long as Shoebox runs.
+    static JOB: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let job = JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(None, None).ok()?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&raw const limits).cast(), size).ok()?;
+        Some(job.0 as usize)
+    });
+    let Some(job) = job else { return log::warn!("Argentum may outlive Shoebox: no job to put it in") };
+    if let Err(e) = unsafe { AssignProcessToJobObject(HANDLE(*job as *mut _), HANDLE(child.as_raw_handle())) } {
+        log::warn!("Argentum may outlive Shoebox: {e}");
+    }
+}
+
+/// Elsewhere not yet: Argentum finishes its batch on its own.
+#[cfg(not(windows))]
+fn ends_with_shoebox(_: &std::process::Child) {}
 
 /// One line of Argentum's answer: a photo (and copy) asked for, and its file or why not.
 #[derive(Deserialize)]
@@ -226,6 +343,10 @@ struct Job {
 impl Job {
     fn version(&self) -> String {
         version_of(&self.fingerprint)
+    }
+
+    fn copy_id(&self) -> Option<&str> {
+        (!self.copy.is_empty()).then_some(self.copy.as_str())
     }
 
     /// How Argentum's list names it.
@@ -308,7 +429,9 @@ pub fn render_pending(
     Ok(report)
 }
 
-/// Has Argentum render one batch, in a folder of Shoebox's own, and keeps what it made.
+/// Has Argentum render one batch, in a folder of Shoebox's own. Each picture
+/// is kept as soon as Argentum says it is made (sealed at once for a private
+/// photo), and those it couldn't make are recorded.
 fn render_batch(
     cat: &Catalog,
     argentum: &Exporter,
@@ -316,38 +439,32 @@ fn render_batch(
     cancel: &AtomicBool,
     report: &mut Report,
 ) -> Result<()> {
-    let dir = cat.data.fresh_render_dir()?;
-    let list = dir.join("list.txt");
+    let dir = cat.data.render_dir()?;
+    let (list, out) = (dir.path.join("list.txt"), dir.path.join("out"));
     let names: String = batch.iter().map(|group| group[0].listed() + "\n").collect();
     cat.data.write(&list, names.as_bytes())?;
     let mut cmd = argentum.command();
-    cmd.arg("export").arg("--files").arg(&list).arg("--output").arg(dir.join("out"));
+    cmd.arg("export").arg("--files").arg(&list).arg("--output").arg(&out);
     cmd.args(["--format", "jpeg", "--quality", "90", "--long-edge", &LONG_EDGE.to_string()]);
-    let kept = run(cmd, START_LIMIT + PHOTO_LIMIT * batch.len() as u32, cancel).and_then(|ran| {
-        let cancelled = ran.stopped && cancel.load(Ordering::Relaxed);
-        keep(cat, batch, &ran, cancelled, report)
-    });
-    cat.data.clear_render_dir()?;
-    kept
-}
-
-/// Keeps the pictures Argentum made of a batch, and records those it couldn't.
-fn keep(cat: &Catalog, batch: &[Vec<Job>], ran: &Ran, cancelled: bool, report: &mut Report) -> Result<()> {
-    let answers: HashMap<(String, Option<String>), Answer> = ran
-        .stdout
-        .iter()
-        .filter_map(|line| serde_json::from_str::<Answer>(line).ok())
-        .map(|a| ((a.source.clone(), a.copy.clone()), a))
-        .collect();
-    for group in batch {
-        let job = &group[0];
-        let copy = (!job.copy.is_empty()).then(|| job.copy.clone());
-        let failure = match answers.get(&(job.path.clone(), copy)) {
-            Some(Answer { ok: true, output: Some(file), .. }) => match store(cat, group, file) {
-                Ok(()) => None,
-                Err(e) => Some(format!("{e:#}")),
-            },
-            Some(a) => Some(a.error.clone().unwrap_or_else(|| "Argentum couldn't render it".into())),
+    let asked: HashMap<(&str, Option<&str>), usize> =
+        batch.iter().enumerate().map(|(i, group)| ((group[0].path.as_str(), group[0].copy_id()), i)).collect();
+    // Each one's answer: None kept, else why not.
+    let mut answers: Vec<Option<Option<String>>> = vec![None; batch.len()];
+    let (start, per_photo) = argentum.limits;
+    let ran = run(cmd, start + per_photo * batch.len() as u32, cancel, &mut |line| {
+        let Ok(a) = serde_json::from_str::<Answer>(line) else { return };
+        let Some(&i) = asked.get(&(a.source.as_str(), a.copy.as_deref())) else { return };
+        if answers[i].is_none() {
+            answers[i] = Some(match (a.ok, &a.output) {
+                (true, Some(file)) => keep(cat, &batch[i], file, &out).err().map(|e| format!("{e:#}")),
+                _ => Some(a.error.unwrap_or_else(|| "Argentum couldn't render it".into())),
+            });
+        }
+    })?;
+    let cancelled = ran.stopped && cancel.load(Ordering::Relaxed);
+    for (group, answer) in batch.iter().zip(answers) {
+        let failure = match answer {
+            Some(failure) => failure,
             None if cancelled => continue,
             None if ran.stopped => Some("Argentum took too long and was stopped".into()),
             None => Some(match ran.stderr.lines().rev().find(|l| !l.trim().is_empty()) {
@@ -358,9 +475,9 @@ fn keep(cat: &Catalog, batch: &[Vec<Job>], ran: &Ran, cancelled: bool, report: &
         match failure {
             None => report.rendered += 1,
             // Its disk went meanwhile: it waits, nothing failed.
-            Some(_) if !Path::new(&job.path).is_file() => report.waiting += 1,
+            Some(_) if !Path::new(&group[0].path).is_file() => report.waiting += 1,
             Some(error) => {
-                log::warn!("Argentum couldn't render {}: {error}", job.listed());
+                log::warn!("Argentum couldn't render {}: {error}", group[0].listed());
                 report.failed += 1;
                 let db = cat.db();
                 for j in group {
@@ -373,6 +490,19 @@ fn keep(cat: &Catalog, batch: &[Vec<Job>], ran: &Ran, cancelled: bool, report: &
         }
     }
     Ok(())
+}
+
+/// Keeps `file`, the picture Argentum says it made of `group`'s edit, once
+/// it is sure to be in this batch's folder `out`: Argentum's answer is no
+/// reason to read anything else. Its copy goes at once.
+fn keep(cat: &Catalog, group: &[Job], file: &Path, out: &Path) -> Result<()> {
+    let inside = file.canonicalize().ok().zip(out.canonicalize().ok()).is_some_and(|(f, o)| f.starts_with(o));
+    if !inside {
+        anyhow::bail!("Argentum's answer names a file outside its folder: {}", file.display());
+    }
+    let kept = store(cat, group, file);
+    cat.data.remove(file)?;
+    kept
 }
 
 /// Keeps Argentum's picture `file` as the edited preview and thumbnail of

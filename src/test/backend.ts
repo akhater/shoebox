@@ -80,7 +80,9 @@ export function fakeBackend() {
   /** The version Argentum rendered of an edited photo's edit; one without waits for it. */
   const rendered = new Map<number, string>();
   /** Whether the Argentum installed renders edits. */
-  let rendering: "ready" | "outdated" | "missing" = "ready";
+  let rendering: "ready" | "outdated" | "missing" | "cantStart" = "ready";
+  /** Stopped from the status bar, until started again. */
+  let stoppedRenders = false;
   /** How photos were turned, and their previews' revisions (a turn makes a new one). */
   const turns = new Map<number, number>();
   const revs = new Map<number, number>();
@@ -734,8 +736,12 @@ export function fakeBackend() {
         return changed;
       }
       case "edit_rendering":
-        return rendering;
+        return stoppedRenders ? "stopped" : rendering;
       case "cancel_edit_renders":
+        stoppedRenders = true;
+        return null;
+      case "start_edit_renders":
+        stoppedRenders = false;
         return null;
       case "argentum_found":
         return (a.chosen as string) || installedArgentum;

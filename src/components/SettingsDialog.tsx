@@ -406,6 +406,27 @@ export function SettingsDialog({
                   </button>
                 </div>
               )}
+              {rendering === "cantStart" && argentum && (
+                <div className="row argentum-update">
+                  <span className="warn-text grow">Argentum couldn't start, so edited photos show with their mark only.</span>
+                </div>
+              )}
+              {rendering === "stopped" && (
+                <div className="row argentum-update">
+                  <span className="grow">Rendering edits is stopped until you start it again.</span>
+                  <button
+                    className="btn small"
+                    onClick={() =>
+                      api
+                        .startEditRenders()
+                        .then(() => setRendering("ready"))
+                        .catch((e) => setError(String(e)))
+                    }
+                  >
+                    Render edits
+                  </button>
+                </div>
+              )}
             </div>
             <div className="field">
               <span className="field-label">Updates</span>

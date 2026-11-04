@@ -33,24 +33,34 @@ export function editLine(edits: { copy: string | null; film: boolean }[]) {
   return edits.some((x) => x.film) ? `${what} · film look` : what;
 }
 
-/** An edited version of a photo the viewer can show: its own edit's, or a virtual copy's. */
+/** An edited version of a photo the viewer can show: its own edit's, or a virtual copy's.
+ *  `key` stays the same when the edit is rendered again (a new `version`). */
 export interface EditedVersion {
+  key: string;
   version: string;
   label: string;
 }
 
-/** The versions Argentum rendered of a photo, its own edit first, then each virtual copy's. */
-export function editedVersions(files: { edits?: FileEdit[] }[]): EditedVersion[] {
-  const edits = files.flatMap((f) => f.edits ?? []).filter((e) => e.version != null);
-  const own = edits.filter((e) => e.copy == null);
-  const copies = [...new Set(edits.filter((e) => e.copy != null).map((e) => e.copy!))].sort();
-  const out: EditedVersion[] = [];
-  const add = (version: string, label: string) => {
-    if (!out.some((v) => v.version === version)) out.push({ version, label });
-  };
-  own.forEach((e) => add(e.version!, "Edited"));
-  copies.forEach((copy, i) => add(edits.find((e) => e.copy === copy)!.version!, copies.length > 1 ? `Copy ${i + 1}` : "Copy"));
-  return out;
+/** The versions Argentum rendered of a photo: its own edit first, then each virtual copy's.
+ *  The same edit beside two copies of the photo is one version; two different ones are told
+ *  apart by their disk. */
+export function editedVersions(files: { id: number; volumeLabel: string; edits?: FileEdit[] }[]): EditedVersion[] {
+  const found = files.flatMap((f) => (f.edits ?? []).filter((e) => e.version != null).map((e) => ({ e, f })));
+  const unique = found.filter((x, i) => found.findIndex((y) => y.e.version === x.e.version) === i);
+  const copies = [...new Set(unique.flatMap((x) => (x.e.copy == null ? [] : [x.e.copy])))].sort();
+  const named = unique.map(({ e, f }) => {
+    const base = e.copy == null ? "Edited" : copies.length > 1 ? `Copy ${copies.indexOf(e.copy) + 1}` : "Copy";
+    const twins = unique.filter((x) => x.e.copy === e.copy).length > 1;
+    return { key: `${e.copy ?? ""}@${f.id}`, version: e.version!, label: twins ? `${base} · ${f.volumeLabel}` : base, copy: e.copy };
+  });
+  const rank = (copy: string | null) => (copy == null ? -1 : copies.indexOf(copy));
+  named.sort((a, b) => rank(a.copy) - rank(b.copy));
+  // Still alike (two copies on disks of the same name): numbered.
+  return named.map(({ key, version, label }, i) => ({
+    key,
+    version,
+    label: named.filter((x) => x.label === label).length > 1 ? `${label} (${named.slice(0, i + 1).filter((x) => x.label === label).length})` : label,
+  }));
 }
 
 /** What is left to show of a copy's edits, in words; null when every one shows. */
@@ -60,6 +70,8 @@ export function renderLine(edits: FileEdit[], rendering: EditRendering | null, p
   if (!edits.some((e) => e.waiting)) return null;
   if (rendering === "outdated") return "Update Argentum to show edits";
   if (rendering === "missing") return "Argentum isn't on this computer: its edits show once it is";
+  if (rendering === "cantStart") return "Argentum couldn't start: its edits show once it does";
+  if (rendering === "stopped") return "Rendering edits is stopped";
   if (!plugged) return "The edit shows once its disk is plugged in";
   return rendering === "ready" ? "Argentum is rendering the edit…" : null;
 }

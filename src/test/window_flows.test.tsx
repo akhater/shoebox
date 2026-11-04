@@ -4,6 +4,7 @@
 import { emit } from "@tauri-apps/api/event";
 import { act } from "react";
 import { describe, expect, test } from "vitest";
+import { editedVersions } from "../components/EditMark";
 import { ALL, type FakeBackend, fakeBackend, photosOf, SEARCH } from "./backend";
 import {
   backButton,
@@ -1683,6 +1684,39 @@ describe("Argentum's marks", () => {
     await wait(100);
     expect(viewer(host)!.querySelector(".view-switch")).toBeNull();
     expect(viewer(host)!.querySelector(".loc-edit-note")?.textContent).toBe("Update Argentum to show edits");
+  });
+
+  test("Stop holds through a look at a photo, which offers to start rendering again", async () => {
+    const be = fakeBackend();
+    be.edited.set(101, 1);
+    const host = await renderApp();
+    await act(async () => {
+      await emit("edits-progress", { done: 0, total: 8, changed: 0, finished: false });
+    });
+    await wait(50);
+    await click(byText(host, ".statusbar button", /Stop/));
+    await wait(50);
+    const asked = (cmd: string) => be.calls.filter((c) => c.cmd === cmd).length;
+    expect(asked("cancel_edit_renders")).toBe(1);
+
+    await doubleClick(tile(host, 101));
+    await wait(100);
+    const note = () => viewer(host)!.querySelector(".loc-edit-note")!;
+    expect(note().textContent).toMatch(/^Rendering edits is stopped/);
+    expect(asked("start_edit_renders")).toBe(0);
+    await click(byText(note(), "button", "Render now"));
+    await wait(50);
+    expect(asked("start_edit_renders")).toBe(1);
+    expect(note().textContent).toBe("Argentum is rendering the edit…");
+  });
+
+  test("two copies of a photo, each with an edit of its own, are two versions told apart by disk", () => {
+    const edit = (version: string, copy: string | null = null) => ({ copy, film: false, version, waiting: false, error: null });
+    const files = [
+      { id: 1, volumeLabel: "Trips", edits: [edit("aaaaaaaaaaaaaaaa"), edit("cccccccccccccccc", "a1b2c3")] },
+      { id: 2, volumeLabel: "Backup", edits: [edit("bbbbbbbbbbbbbbbb"), edit("cccccccccccccccc", "a1b2c3")] },
+    ];
+    expect(editedVersions(files).map((v) => v.label)).toEqual(["Edited · Trips", "Edited · Backup", "Copy"]);
   });
 
   test("back from Argentum, the photos handed to it are looked at again, and the grid reloads only on a change", async () => {

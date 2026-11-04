@@ -50,7 +50,7 @@
 //!                                those that failed: {"started","rendered","failed","waiting","changed"};
 //!                                "waiting" = edits on disks not plugged in, "changed" = photos whose
 //!                                pictures shown changed. Without an Argentum
-//!                                that can: {"argentum":"missing"|"outdated"}
+//!                                that can: {"argentum":"missing"|"outdated"|"cantStart"}
 //!   shoebox-cli argentum [id]    where Argentum is ("found", null when it isn't on this computer);
 //!                                with a photo's id, opens it there, as the window's Edit in
 //!                                Argentum does: "state" says what became of it: "opened" ("path":

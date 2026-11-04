@@ -90,6 +90,9 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Imaging",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_SystemInformation",
+    "Win32_System_JobObjects",
+    "Win32_Security",
+    "Win32_System_Threading",
 ] }
 # Runs the AI models on any DirectX 12 GPU (Intel Arc, AMD, NVIDIA).
 ort = { version = "=2.0.0-rc.10", features = ["directml"] }
