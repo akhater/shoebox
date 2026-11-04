@@ -477,7 +477,7 @@ fn read_all(
 /// The number a scan stamps on every file it sees: the time in milliseconds, but never the same as an earlier
 /// scan's. A file not stamped by the latest scan was not there for it (see `mark_missing`), so two scans of a small
 /// folder that finish within one millisecond must not share a stamp, or a deleted file would still look seen.
-pub(crate) fn next_scan_id() -> i64 {
+pub fn next_scan_id() -> i64 {
     static LAST: Mutex<i64> = Mutex::new(0);
     let now = chrono::Utc::now().timestamp_millis();
     let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

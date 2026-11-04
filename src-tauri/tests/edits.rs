@@ -11,9 +11,10 @@ use rusqlite::params;
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::edits;
 use shoebox_lib::paths::DataDir;
-use shoebox_lib::scan::{Report, scan_root};
+use shoebox_lib::scan::{Report, next_scan_id, scan_root};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const EDIT: &str = r#"{"version":1,"rating":0,"adjustments":{"exposure":0.5}}"#;
 const FILM: &str = r#"{"version":1,"rating":0,"adjustments":{"lutPath":"provider-look",
@@ -259,10 +260,79 @@ fn the_check_after_editing_looks_only_at_the_folders_handed_to_argentum() {
     let cat = w.open(true);
     scan(&cat);
     w.write("IMG_0.JPG.agdata", EDIT);
-    assert_eq!(edits::check_handed_over(&cat).unwrap(), 0, "nothing handed over yet");
+    let now = Instant::now();
+    assert_eq!(edits::check_handed_over(&cat, now).unwrap(), 0, "nothing handed over yet");
+    assert!(!edits::any_handed_over_here(&cat));
     edits::handed_over(&cat, &w.photos().join("IMG_0.JPG"));
-    assert_eq!(edits::check_handed_over(&cat).unwrap(), 1);
+    assert!(edits::any_handed_over_here(&cat));
+    assert_eq!(edits::check_handed_over(&cat, now).unwrap(), 1);
     assert_eq!(mark(&cat, "IMG_0.JPG"), (1, 1));
+    assert_eq!(edits::check_handed_over(&cat, now).unwrap(), 0);
+    w.write("IMG_1.JPG.agdata", EDIT);
+    assert_eq!(edits::check_handed_over(&cat, now).unwrap(), 1, "still looked at a while after");
+
+    // Long after, a look that finds nothing new lets the folder go: the next scan reads it.
+    let later = now + edits::WATCH_FOR + Duration::from_secs(1);
+    assert_eq!(edits::check_handed_over(&cat, later).unwrap(), 0);
+    w.write("IMG_2.JPG.agdata", EDIT);
+    assert_eq!(edits::check_handed_over(&cat, later).unwrap(), 0);
+    assert!(!edits::any_handed_over_here(&cat));
+}
+
+#[test]
+fn the_check_after_editing_is_not_asked_for_a_disk_unplugged() {
+    let w = World::new("handed-unplugged");
+    scan(&w.open(true));
+    let cat = w.open(false);
+    edits::handed_over(&cat, &w.photos().join("IMG_0.JPG"));
+    assert!(!edits::any_handed_over_here(&cat));
+}
+
+#[test]
+fn a_scan_and_the_check_after_editing_at_once_keep_what_either_saw() {
+    let w = World::new("at-once");
+    w.write("IMG_0.JPG.agdata", EDIT);
+    let cat = w.open(true);
+    scan(&cat);
+    let (disk, folder): (i64, i64) = cat
+        .db()
+        .query_row("SELECT volume_id, id FROM folders WHERE rel_path = 'Photos'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    let listed = |name: &str| edits::Listed::of(name, &std::fs::metadata(w.photos().join(name)).unwrap()).unwrap();
+    // A scan begins and lists the folder...
+    let scan_began = next_scan_id();
+    let scan_listed = [listed("IMG_0.JPG.agdata")];
+    // ...a virtual copy is made in Argentum, and the user comes back to the window...
+    w.write("IMG_0.JPG.a1b2c3.agdata", FILM);
+    assert_eq!(edits::check_folder(&cat, &w.photos()).unwrap().changed, 1);
+    // ...then the scan records what it listed, and forgets what it didn't see.
+    edits::record(&cat, folder, &w.photos(), &scan_listed, scan_began).unwrap();
+    edits::forget_unseen(&cat.db(), disk, "Photos", true, scan_began, &[]).unwrap();
+    assert_eq!(mark(&cat, "IMG_0.JPG"), (2, 2), "the copy the check saw is kept");
+    // A later scan finds the same.
+    scan(&cat);
+    assert_eq!(mark(&cat, "IMG_0.JPG"), (2, 2));
+}
+
+#[test]
+fn a_sidecar_rewritten_within_the_same_second_is_read_again() {
+    let w = World::new("same-second");
+    let cat = w.open(true);
+    scan(&cat);
+    let second = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let write_at = |text: &str, at: SystemTime| {
+        w.write("IMG_0.JPG.agdata", text);
+        let file = std::fs::File::options().write(true).open(w.photos().join("IMG_0.JPG.agdata")).unwrap();
+        file.set_modified(at).unwrap();
+    };
+    write_at(r#"{"version":1,"rating":0,"adjustments":{"exposure":0.5}}"#, second + Duration::from_millis(100));
+    assert_eq!(edits::check_folder(&cat, &w.photos()).unwrap(), edits::Checked { read: 1, changed: 1 });
+    write_at(r#"{"version":1,"rating":0,"adjustments":{"exposure":0.7}}"#, second + Duration::from_millis(600));
+    assert_eq!(
+        edits::check_folder(&cat, &w.photos()).unwrap(),
+        edits::Checked { read: 1, changed: 1 },
+        "same size, same second: another edit"
+    );
 }
 
 #[test]
@@ -309,7 +379,7 @@ fn the_grid_filters_and_details_show_the_mark() {
 }
 
 #[test]
-fn a_photo_missing_loses_its_mark_and_gets_it_back_when_found_again() {
+fn a_photo_missing_keeps_its_mark_as_an_offline_one_does() {
     let w = World::new("missing");
     w.write("IMG_0.JPG.agdata", EDIT);
     let cat = w.open(true);
@@ -318,11 +388,21 @@ fn a_photo_missing_loses_its_mark_and_gets_it_back_when_found_again() {
         cat.db().query_row("SELECT photo_id FROM files WHERE name = 'IMG_0.JPG'", [], |r| r.get(0)).unwrap();
     let kind =
         || -> i64 { cat.db().query_row("SELECT edit_kind FROM photos WHERE id = ?1", [photo], |r| r.get(0)).unwrap() };
-    let away = w.base.join("IMG_0.JPG");
-    std::fs::rename(w.photos().join("IMG_0.JPG"), &away).unwrap();
-    scan(&cat);
-    assert_eq!(kind(), 0, "its only file is gone: nothing of it is edited");
-    std::fs::rename(&away, w.photos().join("IMG_0.JPG")).unwrap();
+    let edited = || {
+        let filters = Filters { edits: vec!["edited".into()], ..Filters::default() };
+        cat.list_photos(&Scope::All, Sort::Name, &filters).unwrap().ids
+    };
+    // Moved away, with its sidecar, where no scan looks.
+    for name in ["IMG_0.JPG", "IMG_0.JPG.agdata"] {
+        std::fs::rename(w.photos().join(name), w.base.join(name)).unwrap();
+    }
+    assert_eq!(scan(&cat).missing, 1);
+    assert_eq!(kind(), 1, "missing, it keeps its last known mark");
+    assert_eq!(edited(), [photo], "and stays under the Edits filter");
+    for name in ["IMG_0.JPG", "IMG_0.JPG.agdata"] {
+        std::fs::rename(w.base.join(name), w.photos().join(name)).unwrap();
+    }
     scan(&cat);
     assert_eq!(kind(), 1);
+    assert_eq!(edited(), [photo]);
 }

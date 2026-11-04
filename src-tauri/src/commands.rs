@@ -593,7 +593,15 @@ pub async fn open_in_argentum(state: State<'_, AppState>, photo_id: i64) -> Res<
 #[tauri::command]
 pub async fn check_argentum_edits(app: AppHandle, state: State<'_, AppState>) -> Res<u64> {
     let cat = state.cat.clone();
-    let changed = in_order(move || crate::edits::check_handed_over(&cat)).await?;
+    // Asked on every return to the window: one at a time, never piled up,
+    // and only when a folder handed over is on a disk plugged in.
+    static CHECKING: AtomicBool = AtomicBool::new(false);
+    if !crate::edits::any_handed_over_here(&cat) || CHECKING.swap(true, Ordering::SeqCst) {
+        return Ok(0);
+    }
+    let changed = in_order(move || crate::edits::check_handed_over(&cat, std::time::Instant::now())).await;
+    CHECKING.store(false, Ordering::SeqCst);
+    let changed = changed?;
     if changed > 0 {
         let _ = app.emit("catalog-changed", ());
     }

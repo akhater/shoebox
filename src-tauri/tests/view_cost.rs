@@ -89,6 +89,8 @@ fn a_view_costs_what_it_shows() {
         tx.execute("UPDATE photos SET sideways = CASE WHEN id % 400 = 7 THEN 1 ELSE 0 END", []).unwrap();
         // A focus stack of 25 frames.
         tx.execute("UPDATE photos SET stack = 10001 WHERE id BETWEEN 10001 AND 10025", []).unwrap();
+        // 50 photos edited in Argentum.
+        tx.execute("UPDATE photos SET edit_kind = 1, edit_versions = 1 WHERE id % 400 = 11", []).unwrap();
         tx.commit().unwrap();
         person
     };
@@ -121,6 +123,21 @@ fn a_view_costs_what_it_shows() {
         if counts * 4 > all_counts {
             slow.push(format!("{what}: its filters took {counts:?}, all photos' {all_counts:?}"));
         }
+    }
+    // The 50 edited photos, picked out of all photos by the Edits filter. Its
+    // own counts are of all photos (counted without it), like the private
+    // filter's; every other filter's are of the 50.
+    let edited = Filters { edits: vec!["edited".into()], ..Filters::default() };
+    let list =
+        quickest(&cat, || assert_eq!(cat.list_photos(&Scope::All, Sort::Oldest, &edited).unwrap().ids.len(), 50));
+    let counts = quickest(&cat, || {
+        cat.facets(&Scope::All, &edited).unwrap();
+    });
+    if list * 4 > all_list {
+        slow.push(format!("the Edits filter: its photos took {list:?}, all photos {all_list:?}"));
+    }
+    if counts * 2 > all_counts {
+        slow.push(format!("the Edits filter: its filters took {counts:?}, all photos' {all_counts:?}"));
     }
     assert!(slow.is_empty(), "views that cost as much as the whole catalog:\n{}", slow.join("\n"));
 }

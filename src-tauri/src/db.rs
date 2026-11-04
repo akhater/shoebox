@@ -420,9 +420,12 @@ fn migrate(conn: &Connection) -> Result<()> {
 }
 
 /// A photo's Argentum mark, worked out again from its files' edits (see
-/// edits.rs), for the photo whose id is `photo` (an SQL expression).
+/// edits.rs), for the photo whose id is `photo` (an SQL expression): the
+/// edits of its files still there, or, when all of them are missing, the last
+/// known ones (a missing photo keeps its mark, as an offline one does).
 fn edit_mark_sql(photo: &str) -> String {
-    let edited = "FROM files f JOIN edits e ON e.file_id = f.id WHERE f.photo_id = photos.id AND f.state = 0";
+    let edited = "FROM files f JOIN edits e ON e.file_id = f.id WHERE f.photo_id = photos.id
+         AND (f.state = 0 OR NOT EXISTS (SELECT 1 FROM files g WHERE g.photo_id = photos.id AND g.state = 0))";
     format!(
         "UPDATE photos SET edit_kind = COALESCE((SELECT MAX(e.kind) {edited}), 0),
                           edit_versions = (SELECT COUNT(DISTINCT e.fingerprint) {edited} AND e.kind > 0)
@@ -435,9 +438,10 @@ fn edit_mark_sql(photo: &str) -> String {
 /// and date it was read at, its mark (0 none, 1 edit, 2 film) and its edit's
 /// fingerprint; `seen`: the scan or check that last saw it. `photos.edit_kind`
 /// and `edit_versions`: the photo's mark (the highest of its files still
-/// there, wherever they are plugged in) and how many different edits it has,
-/// kept by triggers as edits and files change. Few photos are edited: an
-/// index of their own keeps finding them as small as they are.
+/// there, wherever they are plugged in, or of its missing ones when none is)
+/// and how many different edits it has, kept by triggers as edits and files
+/// change. Few photos are edited: an index of their own keeps finding them as
+/// small as they are.
 fn schema_v21() -> String {
     let of_file = |file: &str| edit_mark_sql(&format!("(SELECT photo_id FROM files WHERE id = {file})"));
     format!(
@@ -458,9 +462,12 @@ fn schema_v21() -> String {
         CREATE TRIGGER IF NOT EXISTS edits_removed AFTER DELETE ON edits BEGIN {} END;
         CREATE TRIGGER IF NOT EXISTS files_edits_moved AFTER UPDATE OF photo_id, state ON files
           WHEN (NEW.photo_id IS NOT OLD.photo_id OR NEW.state IS NOT OLD.state)
-           AND EXISTS (SELECT 1 FROM edits WHERE file_id = NEW.id) BEGIN {} {} END;
+           AND EXISTS (SELECT 1 FROM files g JOIN edits e ON e.file_id = g.id
+                        WHERE g.photo_id IN (NEW.photo_id, OLD.photo_id)) BEGIN {} {} END;
         CREATE TRIGGER IF NOT EXISTS files_edits_removed AFTER DELETE ON files
-          WHEN EXISTS (SELECT 1 FROM photos WHERE id = OLD.photo_id AND edit_kind > 0) BEGIN {} END;",
+          WHEN EXISTS (SELECT 1 FROM photos WHERE id = OLD.photo_id AND edit_kind > 0)
+            OR EXISTS (SELECT 1 FROM files g JOIN edits e ON e.file_id = g.id WHERE g.photo_id = OLD.photo_id)
+          BEGIN {} END;",
         of_file("NEW.file_id"),
         of_file("NEW.file_id"),
         of_file("OLD.file_id"),

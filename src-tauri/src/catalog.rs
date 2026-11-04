@@ -45,8 +45,8 @@ pub struct Catalog {
     kept_facets: Kept<Facets>,
     /// The private photos' key while they are unlocked (see private.rs).
     pub vault: crate::private::Vault,
-    /// Folders of photos handed to Argentum since the start (see edits.rs).
-    pub(crate) handed_to_argentum: Mutex<HashSet<PathBuf>>,
+    /// Folders of photos handed to Argentum, and when (see edits.rs).
+    pub(crate) handed_to_argentum: Mutex<HashMap<PathBuf, std::time::Instant>>,
 }
 
 impl Catalog {
