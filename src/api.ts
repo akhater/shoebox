@@ -50,6 +50,8 @@ export interface Filters {
   tagsMatch: Match;
   /** "private" and/or "notPrivate": only while private photos are open. */
   private: ("private" | "notPrivate")[];
+  /** Argentum's mark: "edited" (an edit, no film look), "film" and/or "notEdited". */
+  edits: ("edited" | "film" | "notEdited")[];
 }
 export const NO_FILTERS: Filters = {
   dates: [],
@@ -62,6 +64,7 @@ export const NO_FILTERS: Filters = {
   tags: [],
   tagsMatch: "all",
   private: [],
+  edits: [],
 };
 export const filtersOn = (f: Filters) =>
   f.dates.length +
@@ -71,7 +74,8 @@ export const filtersOn = (f: Filters) =>
     f.status.length +
     f.people.length +
     f.tags.length +
-    f.private.length >
+    f.private.length +
+    f.edits.length >
   0;
 
 /** A tag; `count` = photos with it (in the catalog, or among the photos asked about). */
@@ -109,6 +113,8 @@ export interface Facets {
   tags: Tag[];
   /** "private" and "notPrivate" with counts, while private photos are open (empty otherwise). */
   private: FacetValue[];
+  /** "edited", "film" and "notEdited", those with photos here. */
+  edits: FacetValue[];
 }
 
 /** Grid order: capture time (oldest/newest first, with month headers), file name, recently added. */
@@ -253,6 +259,10 @@ export interface PhotoList {
   sideways: number[];
   /** 1 = a private photo (listed only while its space is open). */
   private: number[];
+  /** Its Argentum mark: 0 none, 1 an edit, 2 a film look (see EDIT_MARK). */
+  edit?: number[];
+  /** How many different edits Argentum keeps of it (its own, its virtual copies'). */
+  edits?: number[];
   /** The focus stack each photo is a frame of (its first frame's id), 0 for none. */
   stack?: number[];
   /** How many frames each tile stands for: a focus stack is one tile in most views (1 for a
@@ -277,6 +287,8 @@ export interface FileLoc {
   path: string;
   /** Its folder on the disk, as a folder scope takes it (with volumeId). */
   folder: string;
+  /** The edits Argentum keeps beside it: the photo's own (copy null) and its virtual copies'. */
+  edits?: { copy: string | null; film: boolean }[];
 }
 
 export interface PhotoDetail {
@@ -542,6 +554,8 @@ export const api = {
   revealFile: (fileId: number) => invoke<void>("reveal_file", { fileId }),
   openFile: (fileId: number) => invoke<void>("open_file", { fileId }),
   openInArgentum: (photoId: number) => invoke<Handoff>("open_in_argentum", { photoId }),
+  /** Looks again at the edits of the photos handed to Argentum; how many photos changed. */
+  checkArgentumEdits: () => invoke<number>("check_argentum_edits"),
   /** The Argentum photos open in, with `chosen` as the setting. */
   argentumFound: (chosen: string) => invoke<string | null>("argentum_found", { chosen }),
   /** The program `path` names, when it is Argentum. */
@@ -1004,6 +1018,8 @@ export function headOf(l: PhotoList, n: number): PhotoList {
     flags: l.flags.slice(0, n),
     sideways: l.sideways.slice(0, n),
     private: l.private.slice(0, n),
+    edit: l.edit?.slice(0, n),
+    edits: l.edits?.slice(0, n),
     stack: l.stack?.slice(0, n),
     frames: l.frames?.slice(0, n),
     members: l.members,

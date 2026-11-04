@@ -22,10 +22,11 @@ let key = status.fingerprint.to_hex(); // re-render when this changes
   is a RAW file: an edit that names no tone rendering is in DNG Standard for a
   RAW and in none for any other photo.
 - **`is_raw` must be Argentum's own answer** for the photo, or the kind can
-  differ: a RAW is a file whose extension (any case) is in Argentum's list of
-  RAW extensions (`RAW_EXTENSIONS` in its `src-tauri/src/formats.rs`), or a
-  `.tif`/`.tiff` that is a camera's RAW. A caller's own idea of "RAW" (another
-  list, or "not a JPEG") is not enough.
+  differ: `agdata::is_raw(file_name)` holds Argentum's list of RAW extensions
+  (a fact of its format support, watched by `argentum-drift.sh`). A
+  `.tif`/`.tiff` that is a camera's RAW is one in Argentum too, which a name
+  alone does not tell. A caller's own idea of "RAW" (another list, or "not a
+  JPEG") is not enough.
 - **Fingerprint.** BLAKE3 of the edit's (`adjustments`) text as the sidecar
   holds it. Rating, tags, flag, the EXIF copy, history and snapshots do not
   count, so Argentum rewriting those leaves it as it was. Argentum writes the

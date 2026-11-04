@@ -4896,6 +4896,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "shoebox"
 version = "26.45.2"
 dependencies = [
+ "agdata",
  "anyhow",
  "argon2",
  "blake3",

@@ -47,6 +47,7 @@ import {
 } from "../api";
 import { FILE_MANAGER } from "../paths";
 import { useRemembered } from "../remembered";
+import { EditMark, editLine } from "./EditMark";
 import { FocusIcon, FocusPoints, FocusSummary, hasFocusPoints } from "./FocusPoints";
 import { TagEditor } from "./Tags";
 import { TurnControl, turnedStyle, usePreviewHandlers } from "./TurnControl";
@@ -828,6 +829,12 @@ export function Viewer({
                   <div className="loc-path" title={f.path}>
                     {f.path}
                   </div>
+                  {(f.edits?.length ?? 0) > 0 && (
+                    <div className="loc-edit" title="Argentum keeps its edits beside this copy">
+                      <EditMark film={f.edits!.some((x) => x.film)} size={14} />
+                      {editLine(f.edits!)}
+                    </div>
+                  )}
                   <div className="loc-actions">
                     <button
                       className="btn small"

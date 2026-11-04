@@ -587,6 +587,19 @@ pub async fn open_in_argentum(state: State<'_, AppState>, photo_id: i64) -> Res<
     blocking(move || crate::argentum::open(&cat, photo_id)).await
 }
 
+/// Looks again at the sidecars of the photos handed to Argentum, as the user
+/// comes back to the window; reloads what shows them only when a mark or an
+/// edit changed. Returns how many photos changed.
+#[tauri::command]
+pub async fn check_argentum_edits(app: AppHandle, state: State<'_, AppState>) -> Res<u64> {
+    let cat = state.cat.clone();
+    let changed = in_order(move || crate::edits::check_handed_over(&cat)).await?;
+    if changed > 0 {
+        let _ = app.emit("catalog-changed", ());
+    }
+    Ok(changed)
+}
+
 /// The Argentum photos open in, as Settings has it now.
 #[tauri::command]
 pub async fn argentum_found(chosen: String) -> Res<Option<String>> {

@@ -1,3 +1,4 @@
+import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
   CandidateDay,
@@ -73,6 +74,9 @@ export function fakeBackend() {
   const inBin = new Set<number>();
   /** Photos the upright model would turn (a test sets them): quarter turns clockwise. */
   const sideways = new Map<number, number>();
+  /** Argentum's marks (1 an edit, 2 a film look), and those made since the window last looked. */
+  const edited = new Map<number, number>();
+  const editedSince = new Map<number, number>();
   /** How photos were turned, and their previews' revisions (a turn makes a new one). */
   const turns = new Map<number, number>();
   const revs = new Map<number, number>();
@@ -311,6 +315,8 @@ export function fakeBackend() {
     flags: ps.map((p) => flagsOf(p.id)),
     sideways: ps.map((p) => sideways.get(p.id) ?? 0),
     private: ps.map((p) => +isPrivate(p.id)),
+    edit: ps.map((p) => edited.get(p.id) ?? 0),
+    edits: ps.map((p) => +edited.has(p.id)),
   });
 
   /**
@@ -389,6 +395,15 @@ export function fakeBackend() {
               { value: "private", count: priv },
               { value: "notPrivate", count: here.length - priv },
             ].filter((v) => v.count > 0),
+      edits: (
+        [
+          ["edited", 1],
+          ["film", 2],
+          ["notEdited", 0],
+        ] as const
+      )
+        .map(([value, kind]) => ({ value, count: here.filter((p) => (edited.get(p.id) ?? 0) === kind).length }))
+        .filter((v) => v.count > 0),
     };
   };
   /** The Private filter, as Shoebox applies it: only while a space is open. */
@@ -396,6 +411,12 @@ export function fakeBackend() {
     const want = f?.private ?? [];
     if (open == null || want.length !== 1) return ps;
     return ps.filter((p) => isPrivate(p.id) === (want[0] === "private"));
+  };
+
+  /** The Edits filter. */
+  const editsFilter = (ps: Photo[], f: Filters | undefined) => {
+    const kinds = (f?.edits ?? []).map((v) => ({ edited: 1, film: 2, notEdited: 0 })[v]);
+    return kinds.length ? ps.filter((p) => kinds.includes(edited.get(p.id) ?? 0)) : ps;
   };
 
   const detail = (id: number): PhotoDetail => {
@@ -514,7 +535,9 @@ export function fakeBackend() {
       case "find_people":
         return people.filter((p) => p.name?.toLowerCase().includes(String(a.query).toLowerCase()));
       case "list_photos":
-        return listOf(sorted(privateFilter(inScope(a.scope as Scope), a.filters as Filters), a.sort as Sort));
+        return listOf(
+          sorted(editsFilter(privateFilter(inScope(a.scope as Scope), a.filters as Filters), a.filters as Filters), a.sort as Sort),
+        );
       case "search_photos": {
         const here = new Set(inScope(a.scope as Scope).map((p) => p.id));
         const found = SEARCH.ids.filter((id) => here.has(id)).map((id) => photos.find((p) => p.id === id)!);
@@ -695,6 +718,13 @@ export function fakeBackend() {
         if (unplugged.has(id)) return { state: "unplugged", disks: [unplugged.get(id)] };
         return { state: "opened", path: `D:\\Photos\\IMG_${id}.CR3` };
       }
+      case "check_argentum_edits": {
+        const changed = [...editedSince].filter(([id, kind]) => edited.get(id) !== kind).length;
+        for (const [id, kind] of editedSince) edited.set(id, kind);
+        editedSince.clear();
+        if (changed) void emit("catalog-changed", null);
+        return changed;
+      }
       case "argentum_found":
         return (a.chosen as string) || installedArgentum;
       case "argentum_chosen":
@@ -785,6 +815,10 @@ export function fakeBackend() {
     filesToDelete: (files: [path: string, role: DeletePlan["files"][number]["role"]][]) => {
       deleteFiles = files.map(([path, role]) => ({ path, size: 2_000_000, role, volumeId: 1 }));
     },
+    /** Photos edited in Argentum, by id: 1 an edit, 2 a film look. */
+    edited,
+    /** Edits a photo in Argentum: the window learns of it when it next looks. */
+    editInArgentum: (id: number, kind: number) => editedSince.set(id, kind),
     /** Argentum isn't on this computer. */
     noArgentum: () => {
       installedArgentum = null;

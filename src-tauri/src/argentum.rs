@@ -1,7 +1,8 @@
 //! Argentum, the editor Shoebox hands photos to. Always a separate program,
 //! started with a photo's path and never linked (its licence would become
 //! Shoebox's). It shows the photo in its open window when it has one. What it
-//! edits it keeps in its own `.agdata` file; Shoebox only says which photo.
+//! edits it keeps in its own `.agdata` file; Shoebox only says which photo,
+//! and looks at that file again when the user comes back (see edits.rs).
 
 use crate::catalog::Catalog;
 use anyhow::{Context, Result};
@@ -130,6 +131,7 @@ pub fn open(cat: &Catalog, photo: i64) -> Result<Handoff> {
     };
     let handoff = file_to_edit(cat, photo)?;
     if let Handoff::Opened { path } = &handoff {
+        crate::edits::handed_over(cat, Path::new(path));
         let mut child = command(&exe, path).spawn().with_context(|| format!("Couldn't start {}", exe.display()))?;
         // Reaped in the background so no finished process lingers.
         std::thread::spawn(move || child.wait());

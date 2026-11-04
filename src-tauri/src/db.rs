@@ -404,7 +404,70 @@ fn migrate(conn: &Connection) -> Result<()> {
         };
         conn.execute_batch(&format!("BEGIN; {columns} {SCHEMA_V20} PRAGMA user_version = 20; COMMIT;"))?;
     }
+    if version < 21 {
+        // Safe to run again on a catalog that already has them (its version set back by hand).
+        let has_edits =
+            conn.prepare("SELECT 1 FROM pragma_table_info('photos') WHERE name = 'edit_kind'")?.exists([])?;
+        let columns = if has_edits {
+            ""
+        } else {
+            "ALTER TABLE photos ADD COLUMN edit_kind INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE photos ADD COLUMN edit_versions INTEGER NOT NULL DEFAULT 0;"
+        };
+        conn.execute_batch(&format!("BEGIN; {columns} {} PRAGMA user_version = 21; COMMIT;", schema_v21()))?;
+    }
     Ok(())
+}
+
+/// A photo's Argentum mark, worked out again from its files' edits (see
+/// edits.rs), for the photo whose id is `photo` (an SQL expression).
+fn edit_mark_sql(photo: &str) -> String {
+    let edited = "FROM files f JOIN edits e ON e.file_id = f.id WHERE f.photo_id = photos.id AND f.state = 0";
+    format!(
+        "UPDATE photos SET edit_kind = COALESCE((SELECT MAX(e.kind) {edited}), 0),
+                          edit_versions = (SELECT COUNT(DISTINCT e.fingerprint) {edited} AND e.kind > 0)
+          WHERE id = {photo};"
+    )
+}
+
+/// Argentum's edits (see edits.rs). `edits`: each sidecar of a file, the
+/// photo's own edit (`copy_id` '') and each virtual copy's, with the size
+/// and date it was read at, its mark (0 none, 1 edit, 2 film) and its edit's
+/// fingerprint; `seen`: the scan or check that last saw it. `photos.edit_kind`
+/// and `edit_versions`: the photo's mark (the highest of its files still
+/// there, wherever they are plugged in) and how many different edits it has,
+/// kept by triggers as edits and files change. Few photos are edited: an
+/// index of their own keeps finding them as small as they are.
+fn schema_v21() -> String {
+    let of_file = |file: &str| edit_mark_sql(&format!("(SELECT photo_id FROM files WHERE id = {file})"));
+    format!(
+        "CREATE TABLE IF NOT EXISTS edits (
+            file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+            copy_id     TEXT    NOT NULL,
+            size        INTEGER NOT NULL,
+            mtime       INTEGER NOT NULL,
+            kind        INTEGER NOT NULL,
+            fingerprint BLOB,
+            seen        INTEGER NOT NULL,
+            PRIMARY KEY (file_id, copy_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS photos_edited ON photos (edit_kind) WHERE edit_kind > 0;
+        CREATE TRIGGER IF NOT EXISTS edits_added AFTER INSERT ON edits BEGIN {} END;
+        CREATE TRIGGER IF NOT EXISTS edits_changed AFTER UPDATE OF kind, fingerprint ON edits
+          WHEN NEW.kind IS NOT OLD.kind OR NEW.fingerprint IS NOT OLD.fingerprint BEGIN {} END;
+        CREATE TRIGGER IF NOT EXISTS edits_removed AFTER DELETE ON edits BEGIN {} END;
+        CREATE TRIGGER IF NOT EXISTS files_edits_moved AFTER UPDATE OF photo_id, state ON files
+          WHEN (NEW.photo_id IS NOT OLD.photo_id OR NEW.state IS NOT OLD.state)
+           AND EXISTS (SELECT 1 FROM edits WHERE file_id = NEW.id) BEGIN {} {} END;
+        CREATE TRIGGER IF NOT EXISTS files_edits_removed AFTER DELETE ON files
+          WHEN EXISTS (SELECT 1 FROM photos WHERE id = OLD.photo_id AND edit_kind > 0) BEGIN {} END;",
+        of_file("NEW.file_id"),
+        of_file("NEW.file_id"),
+        of_file("OLD.file_id"),
+        edit_mark_sql("NEW.photo_id"),
+        edit_mark_sql("OLD.photo_id"),
+        edit_mark_sql("OLD.photo_id"),
+    )
 }
 
 /// Focus stacks (see stacks.rs). `photos.bracket`: the photo is a frame of a

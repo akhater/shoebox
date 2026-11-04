@@ -37,6 +37,7 @@ path = "tests/all.rs"
 tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
+agdata = { path = "agdata" }
 focus-points = { path = "focus-points" }
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2.7.2"

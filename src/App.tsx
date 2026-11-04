@@ -1235,10 +1235,22 @@ export default function App() {
   });
   const startMove = useLatest((ids: number[]) => setMovingPhotos({ ids, start: null }));
 
+  // Back from Argentum: the folders of the photos handed to it are looked at again (those
+  // only), and what shows them reloads only when a mark or an edit changed ("catalog-changed").
+  const handedOver = useRef(false);
+  useEffect(() => {
+    const back = () => {
+      if (handedOver.current) api.checkArgentumEdits().catch(() => {});
+    };
+    window.addEventListener("focus", back);
+    return () => window.removeEventListener("focus", back);
+  }, []);
+
   /** Hands a photo to Argentum. `say` tells what came of it, where the user is looking. */
   const editPhoto = useLatest(async (id: number, say: (text: string, warn?: boolean) => void) => {
     try {
       const r = await api.openInArgentum(id);
+      if (r.state === "opened") handedOver.current = true;
       if (r.state === "noArgentum") setFindingArgentum({ id, say });
       else if (r.state === "opened") say(`Opening ${r.path.split(/[\\/]/).pop()} in Argentum…`);
       else if (r.state === "unplugged") say(`Plug in ${r.disks.join(" or ")} to edit this photo.`, true);
