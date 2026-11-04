@@ -743,6 +743,8 @@ export function fakeBackend() {
       case "start_edit_renders":
         stoppedRenders = false;
         return null;
+      case "show_edits":
+        return null;
       case "argentum_found":
         return (a.chosen as string) || installedArgentum;
       case "argentum_chosen":

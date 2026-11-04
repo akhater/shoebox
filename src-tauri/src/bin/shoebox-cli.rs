@@ -45,8 +45,9 @@
 //!                                "version": its edited pictures, null until Argentum rendered it;
 //!                                "waiting": a newer edit is still to render; "error": why Argentum
 //!                                couldn't render it). "edited": the version shown in its place
-//!   shoebox-cli render-edits [--photo <id>]   has Argentum render the edits not rendered yet
-//!                                (or only one photo's), as the window does after a scan, retrying
+//!   shoebox-cli render-edits [--photo <id> | --folder <folder>]   has Argentum render the edits
+//!                                not rendered yet (or only one photo's, or one folder's: its sidecars
+//!                                read first, as the window does when it shows the folder), retrying
 //!                                those that failed: {"started","rendered","failed","waiting","changed"};
 //!                                "waiting" = edits on disks not plugged in, "changed" = photos whose
 //!                                pictures shown changed. Without an Argentum
@@ -425,16 +426,24 @@ fn main() -> anyhow::Result<()> {
             None => println!("{}", serde_json::json!({ "found": argentum::find(&cat.settings().argentum_path) })),
         },
         Some("render-edits") => {
-            let photo = match args.get(1).map(String::as_str) {
+            let mut options = shoebox_lib::renders::Options { retry: true, ..Default::default() };
+            match args.get(1).map(String::as_str) {
                 Some("--photo") => {
-                    Some(args.get(2).ok_or_else(|| anyhow::anyhow!("render-edits --photo <id>"))?.parse()?)
+                    let id = args.get(2).ok_or_else(|| anyhow::anyhow!("render-edits --photo <id>"))?.parse()?;
+                    options.photos = Some(vec![id]);
                 }
-                Some(other) => anyhow::bail!("render-edits: unknown {other:?} (--photo <id>)"),
-                None => None,
-            };
+                Some("--folder") => {
+                    let folder = args.get(2).ok_or_else(|| anyhow::anyhow!("render-edits --folder <folder>"))?;
+                    let at = cat.folder_at(Path::new(folder));
+                    let at = at.ok_or_else(|| anyhow::anyhow!("{folder} isn't on a disk plugged in"))?;
+                    shoebox_lib::edits::check_folder(&cat, Path::new(folder))?;
+                    options.folder = Some(at);
+                }
+                Some(other) => anyhow::bail!("render-edits: unknown {other:?} (--photo <id> or --folder <folder>)"),
+                None => {}
+            }
             match shoebox_lib::renders::argentum(&cat) {
                 Ok(exporter) => {
-                    let options = shoebox_lib::renders::Options { photo, retry: true };
                     let progress = |p: &shoebox_lib::renders::Progress| eprint!("\r  rendered {}/{}", p.done, p.total);
                     let report = shoebox_lib::renders::render_pending(&cat, &exporter, &options, &cancel, &progress)?;
                     eprintln!();

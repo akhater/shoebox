@@ -16,7 +16,7 @@
 //!
 //! Sidecars are only ever opened for reading.
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, Scope};
 use crate::db::{self, FILE_PRESENT, under_sql};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -268,6 +268,29 @@ pub fn check_folder(cat: &Catalog, folder: &Path) -> Result<Checked> {
     checked.changed += forget(&tx, volume_id, &rel, false, seen, &[])?;
     tx.commit()?;
     Ok(checked)
+}
+
+/// Looks at the sidecars of the folder the window shows (`scope`, a source or
+/// a folder; not those below it), as [`check_folder`] does. Nothing for other
+/// views, or a folder on a disk not plugged in.
+pub fn check_shown(cat: &Catalog, scope: &Scope) -> Result<Checked> {
+    let (volume_id, rel) = match scope {
+        Scope::Folder { volume_id, rel_path } => (*volume_id, rel_path.clone()),
+        Scope::Root { id } => {
+            let root = cat
+                .read()?
+                .query_row("SELECT volume_id, rel_path FROM roots WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            let Some(root) = root else { return Ok(Checked::default()) };
+            root
+        }
+        _ => return Ok(Checked::default()),
+    };
+    match cat.folder_path(volume_id, &rel) {
+        Ok(folder) => check_folder(cat, Path::new(&folder)),
+        // Not plugged in, or not there: nothing read, nothing forgotten.
+        Err(_) => Ok(Checked::default()),
+    }
 }
 
 /// Remembers the folder of `file`, just handed to Argentum: its sidecars are

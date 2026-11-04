@@ -9,7 +9,7 @@ import { act } from "react";
 import { describe, expect, test, vi } from "vitest";
 import type { AiProgress, EditsProgress, Progress } from "../api";
 import { ALL, fakeBackend, photosOf, ROOTS } from "./backend";
-import { choose, click, gridIds, gridStack, renderApp, searchBox, sidebarItem, sortSelect, subtitle, title, type, wait, walk } from "./ui";
+import { choose, click, gridIds, gridStack, renderApp, searchBox, sidebarItem, sortSelect, subtitle, tile, title, type, wait, walk } from "./ui";
 
 // How often the grid and People are drawn.
 const renders = vi.hoisted(() => ({ grid: 0, people: 0 }));
@@ -50,8 +50,10 @@ describe("the window asks only for what changed", () => {
     await click(sidebarItem(host, "Fast"));
     await wait(100);
     expect(gridIds(host)).toEqual(photosOf(20));
-    expect(be.cmdsSince(from).sort()).toEqual(["facets", "list_photos"]);
-    expect(be.calls.slice(from).every((c) => JSON.stringify(c.args.scope) === JSON.stringify(FAST))).toBe(true);
+    // A source: its sidecars are read too, once (see Argentum's marks).
+    expect(be.cmdsSince(from).sort()).toEqual(["facets", "list_photos", "show_edits"]);
+    const scopes = be.calls.slice(from).map((c) => (c.cmd === "show_edits" ? c.args.folder : c.args.scope));
+    expect(scopes.every((s) => JSON.stringify(s) === JSON.stringify(FAST))).toBe(true);
 
     from = be.calls.length;
     await choose(sortSelect(host), "newest");
@@ -214,30 +216,33 @@ describe("background work refreshes only what its event changed", () => {
     expect(be.cmdsSince(from).sort()).toEqual(["browse", "facets", "get_overview", "list_photos", "people"]);
   });
 
-  test("edits rendered reload the shown photos only when pictures changed, at most every 3 s", async () => {
+  test("edits rendered show on their own tiles as they land: nothing is reloaded", async () => {
     const be = fakeBackend();
-    await renderApp();
+    const host = await renderApp();
     await wait(100);
-    const edits = (p: Partial<EditsProgress> = {}): EditsProgress => ({ done: 0, total: 16, changed: 0, finished: false, ...p });
+    const edits = (p: Partial<EditsProgress> = {}): EditsProgress => ({
+      done: 0,
+      total: 4,
+      changed: 0,
+      photos: [],
+      finished: false,
+      ...p,
+    });
+    const src = (id: number) => tile(host, id).querySelector("img")!.getAttribute("src");
 
-    // A look that finds nothing to render (every return to the window) asks for nothing.
-    let from = be.calls.length;
+    // A look that finds nothing to render asks for nothing.
+    const from = be.calls.length;
     await send("edits-progress", edits({ total: 0, finished: true }));
-    await wait(100);
-    expect(be.cmdsSince(from)).toEqual([]);
-
-    from = be.calls.length;
     await send("edits-progress", edits());
-    await send("edits-progress", edits({ done: 8, changed: 8 }));
+    const before = src(101);
+    await send("edits-progress", edits({ done: 2, changed: 1, photos: [{ id: 102, rev: 7, w: 200, h: 100 }] }));
     await wait(100);
-    expect(be.cmdsSince(from).sort()).toEqual(["facets", "list_photos"]);
-    from = be.calls.length;
-    await send("edits-progress", edits({ done: 16, changed: 9 }));
+    expect(src(102)).toMatch(/\/thumb\/102\?r=7$/);
+    expect(src(101)).toBe(before);
+    await send("edits-progress", edits({ done: 4, changed: 2, photos: [{ id: 103, rev: 9, w: 200, h: 100 }], finished: true }));
     await wait(100);
+    expect(src(103)).toMatch(/\/thumb\/103\?r=9$/);
     expect(be.cmdsSince(from)).toEqual([]);
-    await send("edits-progress", edits({ done: 16, changed: 9, finished: true }));
-    await wait(100);
-    expect(be.cmdsSince(from).sort()).toEqual(["facets", "list_photos"]);
   });
 
   test("a scan's refreshes never pile up: the next one waits for the last to answer", async () => {

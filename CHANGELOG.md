@@ -4,6 +4,19 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.45.3 - unreleased
 
+### Fixed
+
+- **Edits render for the photos on screen, and only those.** Argentum
+  renders the edits of the view shown (the photo open in the viewer first,
+  then the grid's in order), two at a time, and each photo shows as edited
+  as soon as its render lands; another view takes over from the last one's.
+  Nothing else in the catalog is rendered. Opening a source or a folder
+  reads its Argentum sidecars at once (never a photo), so edits made before
+  this version show without a rescan. Edited previews and thumbnails are
+  made at the size and quality of Shoebox's own previews, and made again
+  after Save & rebuild previews, as those are. Headless:
+  `shoebox-cli render-edits --folder <folder>`.
+
 ## 26.45.2 - 2026-11-04
 
 ### Added

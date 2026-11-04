@@ -904,7 +904,7 @@ export function Viewer({
                         <button
                           className="btn small ghost"
                           onClick={() => act(api.startEditRenders().then(() => setRendering("ready")))}
-                          title="Start rendering edits again, for every photo"
+                          title="Start rendering edits again, for the photos shown"
                         >
                           Render now
                         </button>

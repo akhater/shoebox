@@ -111,14 +111,14 @@ export function StatusBar({
       <footer className="statusbar busy">
         <LoaderCircle size={14} className="spinning" />
         <span>
-          <b>Argentum is rendering edits</b> · {fmtNum(editsProgress.done)} of {fmtNum(editsProgress.total)} photos
+          <b>Argentum is rendering the edits shown</b> · {fmtNum(editsProgress.done)} of {fmtNum(editsProgress.total)} photos
           <span className="muted"> · each shows as edited once done</span>
         </span>
         <span className="grow" />
         <span className="bar">
           <span style={{ width: `${(editsProgress.done / Math.max(1, editsProgress.total)) * 100}%` }} />
         </span>
-        <button className="btn small ghost" onClick={onStopEdits} title={`Stop: the ${fmtNum(left)} left wait, through scans and plug-ins, until you start rendering again (Settings > Argentum, or a photo's details) or restart Shoebox`}>
+        <button className="btn small ghost" onClick={onStopEdits} title={`Stop: the ${fmtNum(left)} left, and the edits of other views, wait until you start rendering again (Settings > Argentum, or a photo's details) or restart Shoebox`}>
           <X size={14} /> Stop
         </button>
       </footer>

@@ -4,8 +4,13 @@
 //! thumbnail, shown in place of the photo's own. Each edit of a photo is a
 //! version (its own, each virtual copy's), named by the edit's fingerprint.
 //!
-//! An edit is rendered once, and again only when it changes; the last edited
-//! pictures show until the new ones are in. Only photos whose disk is plugged
+//! Rendered only when asked: the window asks for the photos it shows (the
+//! one open in the viewer first, then its view's, in order), the CLI for a
+//! photo or a folder. An edit is rendered once, and again only when it
+//! changes or when its photo's own preview is made again (new preview
+//! settings, see [`stale`]): edited pictures are made as the photo's own are,
+//! same size, quality and thumbnail height. The last edited pictures show
+//! until the new ones are in. Only photos whose disk is plugged
 //! in are rendered (Argentum reads the original); the others wait and keep
 //! what they show (promise 2). An edit undone or gone shows the photo's own
 //! pictures again. An edit Argentum can't render is tried again once it
@@ -17,7 +22,7 @@ use crate::imaging;
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -26,10 +31,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Long edge of an edited preview, px: the viewer shows it as it is.
-pub const LONG_EDGE: u32 = 2048;
-/// Photos per Argentum start: they share its start-up, and progress shows between batches.
-const BATCH: usize = 8;
+/// Photos per Argentum start. Argentum answers only once its whole list is
+/// done, so a batch is kept small: each lands within seconds, and other
+/// photos asked for meanwhile wait at most for the batch under way.
+const BATCH: usize = 2;
 /// How long Argentum may take before it is stopped: to start, then per photo.
 const START_LIMIT: Duration = Duration::from_secs(60);
 const PHOTO_LIMIT: Duration = Duration::from_secs(60);
@@ -76,17 +81,33 @@ pub struct Report {
 pub struct Progress {
     pub done: u64,
     pub total: u64,
-    /// Photos whose pictures shown changed so far: the window shows them again.
+    /// Photos whose pictures shown changed so far.
     pub changed: u64,
+    /// Those that changed since the last progress: the window shows them again.
+    pub photos: Vec<Shown>,
     pub finished: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Options {
-    /// Only this photo's edits.
-    pub photo: Option<i64>,
+/// A photo showing other pictures now, as the window draws it.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct Shown {
+    pub id: i64,
+    pub rev: i64,
+    /// Its thumbnail's size.
+    pub w: i64,
+    pub h: i64,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct Options<'a> {
+    /// Only these photos' edits, rendered in this order.
+    pub photos: Option<Vec<i64>>,
+    /// Only the edits in this folder (disk, folder as the catalog keeps it), not below it.
+    pub folder: Option<(i64, String)>,
     /// Edits Argentum couldn't render are tried again too.
     pub retry: bool,
+    /// Set once other photos are asked for: the look ends after its batch under way.
+    pub newer: Option<&'a AtomicBool>,
 }
 
 /// The name of the version of an edit with this fingerprint.
@@ -365,15 +386,23 @@ fn pending(cat: &Catalog, options: &Options, kept: &[(i64, String)]) -> Result<(
                     fo.rel_path, f.name
                FROM edits e JOIN files f ON f.id = e.file_id JOIN folders fo ON fo.id = f.folder_id
               WHERE e.kind > 0 AND e.fingerprint IS NOT NULL AND f.state = {FILE_PRESENT}
-                AND f.photo_id IS NOT NULL AND (?1 IS NULL OR f.photo_id = ?1)"
+                AND f.photo_id IS NOT NULL"
         ))?
-        .query_map([options.photo], |r| {
+        .query_map([], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
+    // Each photo asked for at its first place.
+    let order: Option<HashMap<i64, usize>> =
+        options.photos.as_ref().map(|p| p.iter().enumerate().rev().map(|(i, &id)| (id, i)).collect());
     let (mut jobs, mut waiting) = (Vec::new(), 0);
     for (file_id, copy, fingerprint, rendered, failed, photo, volume, rel, name) in rows {
-        let there = kept.binary_search(&(photo, version_of(&fingerprint))).is_ok();
+        let asked = order.as_ref().is_none_or(|o| o.contains_key(&photo))
+            && options.folder.as_ref().is_none_or(|(v, r)| *v == volume && *r == rel);
+        if !asked {
+            continue;
+        }
+        let there = fresh(cat, kept, photo, &version_of(&fingerprint));
         let done = rendered.as_ref() == Some(&fingerprint) && there;
         if done || (!options.retry && failed.as_ref() == Some(&fingerprint)) {
             continue;
@@ -383,7 +412,32 @@ fn pending(cat: &Catalog, options: &Options, kept: &[(i64, String)]) -> Result<(
             _ => waiting += 1,
         }
     }
+    if let Some(order) = &order {
+        jobs.sort_by_key(|j| order[&j.photo]);
+    }
     Ok((jobs, waiting))
+}
+
+/// Whether version `version` of `photo` is kept (`kept`, see
+/// [`crate::paths::DataDir::edited_versions`]) and made since the photo's own preview was.
+fn fresh(cat: &Catalog, kept: &[(i64, String)], photo: i64, version: &str) -> bool {
+    kept.binary_search_by(|(p, v)| (*p, v.as_str()).cmp(&(photo, version))).is_ok() && !stale(cat, photo, version)
+}
+
+/// Whether the kept pictures of an edit were made before the photo's own
+/// preview last was (with other preview settings, after a rebuild): they are
+/// made again, as the photo's own were.
+fn stale(cat: &Catalog, photo: i64, version: &str) -> bool {
+    let made = |path: PathBuf| {
+        std::fs::metadata(&path)
+            .or_else(|_| std::fs::metadata(crate::paths::DataDir::sealed_path(&path)))
+            .and_then(|m| m.modified())
+            .ok()
+    };
+    match (made(cat.data.edited_path(photo, version, false)), made(cat.data.preview_path(photo))) {
+        (Some(edited), Some(own)) => edited < own,
+        _ => false,
+    }
 }
 
 /// Renders the edits not rendered yet (see the module's notes) with
@@ -398,32 +452,44 @@ pub fn render_pending(
     let kept = cat.data.edited_versions();
     let (jobs, waiting) = pending(cat, options, &kept)?;
     let mut report = Report { waiting, ..Report::default() };
-    // One render per photo and edit, whichever of its files has it; one
-    // already kept (another file's, a render cut short) needs none.
-    let mut groups: BTreeMap<(i64, String), Vec<Job>> = BTreeMap::new();
+    // One render per photo and edit, whichever of its files has it, in the
+    // order asked; one already kept (another file's, a render cut short) needs none.
+    let mut groups: Vec<Vec<Job>> = Vec::new();
+    let mut at_group: HashMap<(i64, String), usize> = HashMap::new();
     for job in jobs {
-        groups.entry((job.photo, job.version())).or_default().push(job);
+        let i = *at_group.entry((job.photo, job.version())).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[i].push(job);
     }
-    let (ready, todo): (Vec<_>, Vec<_>) = groups.into_iter().partition(|(key, _)| kept.binary_search(key).is_ok());
-    for (_, group) in &ready {
+    let (ready, todo): (Vec<_>, Vec<_>) =
+        groups.into_iter().partition(|g| fresh(cat, &kept, g[0].photo, &g[0].version()));
+    for group in &ready {
         rendered(cat, group)?;
     }
-    report.changed += settle_photos(cat, ready.iter().map(|((photo, _), _)| *photo))?;
-    let todo: Vec<Vec<Job>> = todo.into_iter().map(|(_, group)| group).collect();
     let mut at = Progress { total: todo.len() as u64, ..Progress::default() };
+    at.photos = settle_photos(cat, ready.iter().map(|g| g[0].photo), &[])?;
+    report.changed += at.photos.len() as u64;
+    let newer = || options.newer.is_some_and(|n| n.load(Ordering::SeqCst));
     for batch in todo.chunks(BATCH) {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || newer() {
             break;
         }
-        progress(&at);
-        report.started += 1;
-        render_batch(cat, argentum, batch, cancel, &mut report)?;
-        at.done += batch.len() as u64;
-        // Shown as they come.
-        report.changed += settle_photos(cat, batch.iter().map(|group| group[0].photo))?;
         at.changed = report.changed;
+        progress(&at);
+        at.photos.clear();
+        report.started += 1;
+        let made = render_batch(cat, argentum, batch, cancel, &mut report)?;
+        at.done += batch.len() as u64;
+        // Shown as they come: with the next progress, right away.
+        let shown = settle_photos(cat, batch.iter().map(|group| group[0].photo), &made)?;
+        report.changed += shown.len() as u64;
+        at.photos.extend(shown);
     }
-    report.changed += tidy(cat)?;
+    let tidied = tidy(cat)?;
+    report.changed += tidied.len() as u64;
+    at.photos.extend(tidied);
     at.changed = report.changed;
     progress(&Progress { finished: true, ..at });
     Ok(report)
@@ -431,21 +497,22 @@ pub fn render_pending(
 
 /// Has Argentum render one batch, in a folder of Shoebox's own. Each picture
 /// is kept as soon as Argentum says it is made (sealed at once for a private
-/// photo), and those it couldn't make are recorded.
+/// photo), and those it couldn't make are recorded. Returns the photos it made pictures of.
 fn render_batch(
     cat: &Catalog,
     argentum: &Exporter,
     batch: &[Vec<Job>],
     cancel: &AtomicBool,
     report: &mut Report,
-) -> Result<()> {
+) -> Result<Vec<i64>> {
     let dir = cat.data.render_dir()?;
     let (list, out) = (dir.path.join("list.txt"), dir.path.join("out"));
     let names: String = batch.iter().map(|group| group[0].listed() + "\n").collect();
     cat.data.write(&list, names.as_bytes())?;
     let mut cmd = argentum.command();
     cmd.arg("export").arg("--files").arg(&list).arg("--output").arg(&out);
-    cmd.args(["--format", "jpeg", "--quality", "90", "--long-edge", &LONG_EDGE.to_string()]);
+    // As big as the photos' own previews: Argentum's picture is made into those.
+    cmd.args(["--format", "jpeg", "--quality", "90", "--long-edge", &cat.settings().preview_size.to_string()]);
     let asked: HashMap<(&str, Option<&str>), usize> =
         batch.iter().enumerate().map(|(i, group)| ((group[0].path.as_str(), group[0].copy_id()), i)).collect();
     // Each one's answer: None kept, else why not.
@@ -462,6 +529,7 @@ fn render_batch(
         }
     })?;
     let cancelled = ran.stopped && cancel.load(Ordering::Relaxed);
+    let mut made = Vec::new();
     for (group, answer) in batch.iter().zip(answers) {
         let failure = match answer {
             Some(failure) => failure,
@@ -473,7 +541,10 @@ fn render_batch(
             }),
         };
         match failure {
-            None => report.rendered += 1,
+            None => {
+                report.rendered += 1;
+                made.push(group[0].photo);
+            }
             // Its disk went meanwhile: it waits, nothing failed.
             Some(_) if !Path::new(&group[0].path).is_file() => report.waiting += 1,
             Some(error) => {
@@ -489,7 +560,7 @@ fn render_batch(
             }
         }
     }
-    Ok(())
+    Ok(made)
 }
 
 /// Keeps `file`, the picture Argentum says it made of `group`'s edit, once
@@ -511,7 +582,7 @@ fn store(cat: &Catalog, group: &[Job], file: &Path) -> Result<()> {
     let job = &group[0];
     let img = image::open(file).with_context(|| format!("Argentum's picture can't be read: {}", file.display()))?;
     let s = cat.settings();
-    let r = imaging::render(&img, LONG_EDGE, s.preview_quality, s.thumb_height, 0)?;
+    let r = imaging::render(&img, s.preview_size, s.preview_quality, s.thumb_height, 0)?;
     let v = job.version();
     // The preview last: a version is known by it (see `edited_versions`).
     cat.write_copy(job.photo, &cat.data.edited_path(job.photo, &v, true), &r.thumb)?;
@@ -534,8 +605,8 @@ fn rendered(cat: &Catalog, group: &[Job]) -> Result<()> {
 /// The photos with edited pictures kept that no edit shows any more (its
 /// sidecar gone, its edit undone, the photo gone): settled, so they show
 /// their own pictures again and those are removed. Costs the edits, never
-/// the catalog. Returns how many photos' pictures shown changed.
-fn tidy(cat: &Catalog) -> Result<u64> {
+/// the catalog. Returns the photos whose pictures shown changed.
+fn tidy(cat: &Catalog) -> Result<Vec<Shown>> {
     let kept = cat.data.edited_versions();
     let (shown, undone): (HashSet<(i64, String)>, Vec<i64>) = {
         let db = cat.read()?;
@@ -551,15 +622,16 @@ fn tidy(cat: &Catalog) -> Result<u64> {
             .collect::<rusqlite::Result<_>>()?;
         (shown, undone)
     };
-    settle_photos(cat, kept.into_iter().filter(|k| !shown.contains(k)).map(|(photo, _)| photo).chain(undone))
+    settle_photos(cat, kept.into_iter().filter(|k| !shown.contains(k)).map(|(photo, _)| photo).chain(undone), &[])
 }
 
-/// [`settle`] for each of `photos` (once each). Returns how many changed.
-fn settle_photos(cat: &Catalog, photos: impl IntoIterator<Item = i64>) -> Result<u64> {
+/// [`settle`] for each of `photos` (once each), those in `made` just given
+/// new pictures. Returns those whose pictures shown changed.
+fn settle_photos(cat: &Catalog, photos: impl IntoIterator<Item = i64>, made: &[i64]) -> Result<Vec<Shown>> {
     let photos: BTreeSet<i64> = photos.into_iter().collect();
-    let mut changed = 0;
+    let mut changed = Vec::new();
     for photo in photos {
-        changed += u64::from(settle(cat, photo, &cat.data.edited_versions_of(photo))?);
+        changed.extend(settle(cat, photo, &cat.data.edited_versions_of(photo), made.contains(&photo))?);
     }
     Ok(changed)
 }
@@ -567,8 +639,9 @@ fn settle_photos(cat: &Catalog, photos: impl IntoIterator<Item = i64>) -> Result
 /// Photo `photo`, with edited pictures `kept` (versions): shows its own
 /// edit's, else its first copy's (a missing file's only when no other has
 /// one), else its own pictures; the window gets a new revision when that
-/// changes (returns true). Edits undone forget their pictures.
-fn settle(cat: &Catalog, photo: i64, kept: &[String]) -> Result<bool> {
+/// changes, or its pictures were just made again (`made`); then returns how
+/// it shows now. Edits undone forget their pictures.
+fn settle(cat: &Catalog, photo: i64, kept: &[String], made: bool) -> Result<Option<Shown>> {
     let wanted: Vec<Vec<u8>> = {
         let db = cat.db();
         db.execute(
@@ -588,7 +661,8 @@ fn settle(cat: &Catalog, photo: i64, kept: &[String]) -> Result<bool> {
     let db = cat.db();
     let was: Option<Vec<u8>> =
         db.query_row("SELECT edited FROM photos WHERE id = ?1", [photo], |r| r.get(0)).optional()?.flatten();
-    let changed = was.as_ref() != shown;
+    let changed = was.as_ref() != shown || (made && shown.is_some());
+    let mut now = None;
     if changed {
         // The grid lays out the thumbnail it shows.
         let thumb = match shown {
@@ -601,6 +675,13 @@ fn settle(cat: &Catalog, photo: i64, kept: &[String]) -> Result<bool> {
                     thumb_w = COALESCE(?3, thumb_w), thumb_h = COALESCE(?4, thumb_h) WHERE id = ?1",
             params![photo, shown, w, h],
         )?;
+        now = db
+            .query_row(
+                "SELECT preview_rev, COALESCE(thumb_w, 0), COALESCE(thumb_h, 0) FROM photos WHERE id = ?1",
+                [photo],
+                |r| Ok(Shown { id: photo, rev: r.get(0)?, w: r.get(1)?, h: r.get(2)? }),
+            )
+            .optional()?;
     }
     drop(db);
     // Removed only once nothing shows them.
@@ -609,7 +690,7 @@ fn settle(cat: &Catalog, photo: i64, kept: &[String]) -> Result<bool> {
         cat.remove_copy(&cat.data.edited_path(photo, v, false))?;
         cat.remove_copy(&cat.data.edited_path(photo, v, true))?;
     }
-    Ok(changed)
+    Ok(now)
 }
 
 /// The file of a photo's picture as the window shows it: its edited one when it has one.

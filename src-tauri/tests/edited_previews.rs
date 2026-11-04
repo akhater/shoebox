@@ -14,11 +14,12 @@ use shoebox_lib::catalog::Catalog;
 use shoebox_lib::edits::FileEdit;
 use shoebox_lib::paths::DataDir;
 use shoebox_lib::private;
-use shoebox_lib::renders::{self, Exporter, Options, Picture, Report, Support};
+use shoebox_lib::renders::{self, Exporter, Options, Picture, Progress, Report, Support};
+use shoebox_lib::scan::scan_root;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const EDIT_2: &str = r#"{"version":1,"rating":0,"adjustments":{"exposure":1.5}}"#;
@@ -97,7 +98,7 @@ fn render_with(cat: &Catalog, mode: &str, options: Options, cancel: &AtomicBool)
 }
 
 fn render(cat: &Catalog, retry: bool) -> Report {
-    render_with(cat, "new", Options { photo: None, retry }, &AtomicBool::new(false))
+    render_with(cat, "new", Options { retry, ..Options::default() }, &AtomicBool::new(false))
 }
 
 fn photo(cat: &Catalog, name: &str) -> i64 {
@@ -144,7 +145,7 @@ fn an_edited_photo_shows_what_argentum_made_of_it() {
     assert!(middle(&w.data.thumb_path(p)) < 40 && middle(&thumb) > 215, "Argentum's picture, not the original's");
     let preview = shown(&cat, p, Picture::Preview);
     let (pw, ph) = image::image_dimensions(&preview).unwrap();
-    assert!(pw.max(ph) <= renders::LONG_EDGE);
+    assert!(pw.max(ph) <= cat.settings().preview_size);
     assert!(rev(&cat, p) > before, "a new revision: the window asks for the new pictures");
     assert_eq!(edits(&cat, p)[0].version, Some(version(&thumb)));
 
@@ -240,7 +241,7 @@ fn an_unplugged_disk_waits_and_keeps_its_edited_pictures() {
     let cat = w.open(true);
     scan(&cat);
     let (a, b) = (photo(&cat, "IMG_0.JPG"), photo(&cat, "IMG_1.JPG"));
-    let only_a = Options { photo: Some(a), retry: false };
+    let only_a = Options { photos: Some(vec![a]), ..Options::default() };
     assert_eq!(render_with(&cat, "new", only_a, &AtomicBool::new(false)).rendered, 1);
     let edited = shown(&cat, a, Picture::Thumb);
     drop(cat);
@@ -262,7 +263,7 @@ fn each_virtual_copy_is_a_version_of_its_own() {
     let cat = w.open(true);
     scan(&cat);
     let r = render(&cat, false);
-    assert_eq!((r.started, r.rendered), (1, 3), "one start for all of them");
+    assert_eq!((r.started, r.rendered), (2, 3), "two to a start");
     let (a, b) = (photo(&cat, "IMG_0.JPG"), photo(&cat, "IMG_1.JPG"));
     let versions: Vec<String> = edits(&cat, a).into_iter().map(|e| e.version.unwrap()).collect();
     assert_eq!(versions.len(), 2);
@@ -295,7 +296,7 @@ fn a_stop_ends_argentum_and_counts_nothing_as_failed() {
         c.store(true, Ordering::Relaxed);
     });
     let started = Instant::now();
-    let r = render_with(&cat, "slow", Options { photo: None, retry: false }, &cancel);
+    let r = render_with(&cat, "slow", Options::default(), &cancel);
     assert!(started.elapsed() < Duration::from_secs(20), "Argentum is stopped, not waited for");
     assert_eq!((r.rendered, r.failed), (0, 0));
     assert_eq!(render(&cat, false).rendered, 1, "rendered at the next look");
@@ -309,7 +310,7 @@ fn a_private_photo_keeps_its_edited_pictures_sealed() {
     let cat = w.open(true);
     scan(&cat);
     let (a, b) = (photo(&cat, "IMG_0.JPG"), photo(&cat, "IMG_1.JPG"));
-    let only_b = Options { photo: Some(b), retry: false };
+    let only_b = Options { photos: Some(vec![b]), ..Options::default() };
     render_with(&cat, "new", only_b, &AtomicBool::new(false));
     private::hide_with_password(&cat, "correct horse", &[a, b], true).unwrap();
     render(&cat, false);
@@ -330,7 +331,7 @@ fn argentum_taking_too_long_is_stopped_and_its_photos_tried_again_later() {
     scan(&cat);
     let slow = argentum("slow").limited(Duration::from_secs(1), Duration::from_secs(1));
     let started = Instant::now();
-    let options = Options { photo: None, retry: false };
+    let options = Options::default();
     let r = renders::render_pending(&cat, &slow, &options, &AtomicBool::new(false), &|_| {}).unwrap();
     assert!(started.elapsed() < Duration::from_secs(20), "stopped, not waited for");
     assert_eq!((r.rendered, r.failed), (0, 1));
@@ -358,7 +359,7 @@ fn an_answer_naming_a_file_outside_argentums_folder_is_refused() {
     w.write("IMG_0.JPG.agdata", EDIT);
     let cat = w.open(true);
     scan(&cat);
-    let r = render_with(&cat, "escape", Options { photo: None, retry: false }, &AtomicBool::new(false));
+    let r = render_with(&cat, "escape", Options::default(), &AtomicBool::new(false));
     assert_eq!((r.rendered, r.failed), (0, 1));
     let p = photo(&cat, "IMG_0.JPG");
     assert!(edits(&cat, p)[0].error.as_deref().unwrap().contains("outside its folder"));
@@ -372,6 +373,112 @@ fn output_that_isnt_an_answer_is_passed_over() {
     w.write("IMG_0.JPG.agdata", EDIT);
     let cat = w.open(true);
     scan(&cat);
-    let r = render_with(&cat, "noisy", Options { photo: None, retry: false }, &AtomicBool::new(false));
+    let r = render_with(&cat, "noisy", Options::default(), &AtomicBool::new(false));
     assert_eq!((r.rendered, r.failed), (1, 0), "an endless line and bytes that aren't text hold nothing back");
+}
+
+/// Renders as the window has it done, keeping each progress it would get.
+fn render_seen(cat: &Catalog, options: Options) -> (Report, Vec<Progress>) {
+    let seen = Mutex::new(Vec::new());
+    let keep = |p: &Progress| seen.lock().unwrap().push(p.clone());
+    let r = renders::render_pending(cat, &argentum("new"), &options, &AtomicBool::new(false), &keep).unwrap();
+    (r, seen.into_inner().unwrap())
+}
+
+/// The photos each progress says now show other pictures, as they land.
+fn landed(seen: &[Progress]) -> Vec<Vec<i64>> {
+    seen.iter().filter(|p| !p.photos.is_empty()).map(|p| p.photos.iter().map(|s| s.id).collect()).collect()
+}
+
+#[test]
+fn only_the_photos_asked_for_are_rendered_in_that_order_each_shown_as_it_lands() {
+    let w = World::new("render-asked");
+    for i in 0..4 {
+        w.write(&format!("IMG_{i}.JPG.agdata"), EDIT);
+    }
+    let cat = w.open(true);
+    scan(&cat);
+    let [a, b, c, d] = ["IMG_0.JPG", "IMG_1.JPG", "IMG_2.JPG", "IMG_3.JPG"].map(|n| photo(&cat, n));
+    let (r, seen) = render_seen(&cat, Options { photos: Some(vec![d, b, a]), ..Options::default() });
+    assert_eq!((r.started, r.rendered), (2, 3), "two to a start");
+    let mut first = vec![d, b];
+    first.sort();
+    assert_eq!(landed(&seen), [first, vec![a]], "the first asked for first");
+    assert!(!seen.iter().find(|p| !p.photos.is_empty()).unwrap().finished, "shown as it lands, not at the end");
+    for s in seen.iter().flat_map(|p| &p.photos) {
+        assert_eq!(s.rev, rev(&cat, s.id), "what the window shows it with");
+    }
+    assert_eq!(shown(&cat, c, Picture::Thumb), w.data.thumb_path(c), "a photo not asked for isn't rendered");
+}
+
+#[test]
+fn other_photos_asked_for_end_the_look_after_its_batch() {
+    let w = World::new("render-newer");
+    for i in 0..4 {
+        w.write(&format!("IMG_{i}.JPG.agdata"), EDIT);
+    }
+    let cat = w.open(true);
+    scan(&cat);
+    let ids = ["IMG_0.JPG", "IMG_1.JPG", "IMG_2.JPG", "IMG_3.JPG"].map(|n| photo(&cat, n)).to_vec();
+    let newer = AtomicBool::new(false);
+    let options = Options { photos: Some(ids), newer: Some(&newer), ..Options::default() };
+    let seen = Mutex::new(Vec::new());
+    let asked_again = |p: &Progress| {
+        newer.store(true, Ordering::SeqCst);
+        seen.lock().unwrap().push(p.clone());
+    };
+    let r = renders::render_pending(&cat, &argentum("new"), &options, &AtomicBool::new(false), &asked_again).unwrap();
+    assert_eq!((r.started, r.rendered), (1, 2), "the batch under way finishes, no other starts");
+    let seen = seen.into_inner().unwrap();
+    assert!(seen.last().unwrap().finished);
+    assert_eq!(landed(&seen).concat().len(), 2, "what it rendered still shows");
+}
+
+#[test]
+fn a_folder_asked_for_renders_its_own_edits_only() {
+    let w = World::new("render-folder");
+    w.write("IMG_0.JPG.agdata", EDIT);
+    let sub = w.photos().join("Sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    crate::kill_safe_organize::jpeg(&sub.join("IMG_9.JPG"), 9);
+    std::fs::write(sub.join("IMG_9.JPG.agdata"), EDIT).unwrap();
+    let cat = w.open(true);
+    scan(&cat);
+    let disk: i64 = cat.db().query_row("SELECT id FROM volumes", [], |r| r.get(0)).unwrap();
+    let folder = Options { folder: Some((disk, "Photos".into())), ..Options::default() };
+    assert_eq!(render_with(&cat, "new", folder, &AtomicBool::new(false)).rendered, 1);
+    let below = photo(&cat, "IMG_9.JPG");
+    assert_eq!(shown(&cat, below, Picture::Thumb), w.data.thumb_path(below), "not the folder below");
+}
+
+#[test]
+fn edited_pictures_follow_the_preview_settings_as_the_photos_own_do() {
+    let w = World::new("render-size");
+    let big = image::RgbImage::from_fn(1600, 1200, |x, y| image::Rgb([20, (x % 256) as u8, (y % 256) as u8]));
+    big.save(w.photos().join("IMG_0.JPG")).unwrap();
+    w.write("IMG_0.JPG.agdata", EDIT);
+    let cat = w.open(true);
+    scan(&cat);
+    let p = photo(&cat, "IMG_0.JPG");
+    render(&cat, false);
+    let size = |path: &Path| image::image_dimensions(path).unwrap();
+    let (preview, thumb) = (shown(&cat, p, Picture::Preview), shown(&cat, p, Picture::Thumb));
+    assert_eq!(size(&preview), size(&w.data.preview_path(p)), "as big as the photo's own preview");
+    assert_eq!(size(&thumb), size(&w.data.thumb_path(p)), "and thumbnail");
+
+    // Smaller: nothing changes until the previews are rebuilt, then the edit is rendered again.
+    let mut s = cat.settings();
+    (s.preview_size, s.thumb_height) = (480, 160);
+    cat.save_settings(s).unwrap();
+    assert_eq!(render(&cat, false), Report::default(), "not before the previews are rebuilt");
+    let root = cat.root_ids().unwrap()[0];
+    scan_root(&cat, root, &AtomicBool::new(false), true, &|_| {}).unwrap();
+    assert_eq!(size(&w.data.preview_path(p)), (480, 360));
+    assert_eq!(size(&preview), (1080, 810), "the last edited one shows until made again");
+    let before = rev(&cat, p);
+    assert_eq!(render(&cat, false).rendered, 1);
+    assert_eq!(shown(&cat, p, Picture::Preview), preview, "the same edit keeps its name");
+    assert_eq!((size(&preview), size(&thumb)), ((480, 360), (213, 160)));
+    assert!(rev(&cat, p) > before, "the window asks for the new pictures");
+    assert_eq!(render(&cat, false), Report::default(), "made once");
 }

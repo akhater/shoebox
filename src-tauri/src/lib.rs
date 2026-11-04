@@ -316,17 +316,39 @@ impl Kick {
     }
 }
 
-/// Wakes the worker that has Argentum render what edits look like. A Stop
-/// holds until rendering is started again, or Shoebox restarts: a scan, a
-/// plug-in or a look at a photo doesn't undo it.
+/// What the worker that has Argentum render what edits look like is asked
+/// for: the photos the window shows, and only those. A Stop holds until
+/// rendering is started again, or Shoebox restarts: a scan, a plug-in or a
+/// look at a photo doesn't undo it.
 #[derive(Default)]
 pub struct RenderQueue {
     kick: Kick,
     cancel: AtomicBool,
     stopped: AtomicBool,
+    /// The photos shown, in the order their edits are rendered.
+    shown: Mutex<Vec<i64>>,
+    /// Set when other photos are shown: the look under way ends after its batch.
+    newer: AtomicBool,
 }
 
 impl RenderQueue {
+    /// The window shows these photos now (the one in the viewer first, then
+    /// its view's): their edits are rendered, in place of those asked for before.
+    pub fn show(&self, photos: Vec<i64>) {
+        let mut shown = self.shown.lock().unwrap();
+        *shown = photos;
+        self.newer.store(true, Ordering::SeqCst);
+        drop(shown);
+        self.kick();
+    }
+
+    /// The photos shown, from now on the ones being rendered.
+    fn take(&self) -> Vec<i64> {
+        let shown = self.shown.lock().unwrap();
+        self.newer.store(false, Ordering::SeqCst);
+        shown.clone()
+    }
+
     /// There may be edits to render: nothing happens while stopped.
     pub fn kick(&self) {
         if !self.is_stopped() {
@@ -351,10 +373,11 @@ impl RenderQueue {
     }
 }
 
-/// Has Argentum render what edited photos look like (see renders.rs). Kicked
-/// at start, after each scan, after a check after editing found a change, and
-/// when a disk is plugged in. Without an Argentum that can, nothing is
-/// rendered: the edited mark shows all the same.
+/// Has Argentum render what the edited photos shown look like (see
+/// renders.rs), and nothing else. Kicked when the window shows other photos,
+/// and for those shown after each scan, after a check after editing found a
+/// change, and when a disk is plugged in. Without an Argentum that can,
+/// nothing is rendered: the edited mark shows all the same.
 fn render_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<RenderQueue>) {
     // The first look after a start tries again the edits that failed before.
     let mut retry = true;
@@ -364,11 +387,15 @@ fn render_worker(app: AppHandle, cat: Arc<Catalog>, q: Arc<RenderQueue>) {
             continue;
         }
         q.cancel.store(false, Ordering::SeqCst);
+        let photos = q.take();
+        if photos.is_empty() {
+            continue;
+        }
         let Ok(argentum) = renders::argentum(&cat) else { continue };
         let progress = |p: &renders::Progress| {
             let _ = app.emit("edits-progress", p);
         };
-        let options = renders::Options { photo: None, retry };
+        let options = renders::Options { photos: Some(photos), retry, newer: Some(&q.newer), ..Default::default() };
         if let Err(e) = renders::render_pending(&cat, &argentum, &options, &q.cancel, &progress) {
             log::warn!("rendering edits failed: {e:#}");
             let _ = app.emit("edits-progress", renders::Progress { finished: true, ..Default::default() });
@@ -978,8 +1005,6 @@ pub fn run() {
             let handle = app.handle().clone();
             let (c, r) = (cat.clone(), render_queue.clone());
             std::thread::Builder::new().name("renders".into()).spawn(move || render_worker(handle, c, r))?;
-            // Edits not rendered yet (or that failed before), from the start.
-            render_queue.kick();
             let handle = app.handle().clone();
             let (c, qi, mq) = (cat.clone(), quality.clone(), measure.clone());
             std::thread::Builder::new().name("measure".into()).spawn(move || measure_worker(handle, c, qi, mq))?;
@@ -1022,6 +1047,7 @@ pub fn run() {
             commands::edit_rendering,
             commands::cancel_edit_renders,
             commands::start_edit_renders,
+            commands::show_edits,
             commands::argentum_found,
             commands::argentum_chosen,
             commands::open_argentum_page,
@@ -1129,9 +1155,22 @@ mod tests {
         q.stop();
         assert!(q.cancel.load(Ordering::SeqCst), "what is being rendered stops");
         q.kick(); // a scan, a plug-in, Settings or the viewer asking
+        q.show(vec![7]);
         assert!(!kicked(&q) && q.is_stopped());
         q.start();
         assert!(kicked(&q) && !q.is_stopped());
+        assert_eq!(q.take(), [7], "what the window shows meanwhile is rendered");
+    }
+
+    #[test]
+    fn photos_shown_replace_those_asked_for_before_and_end_the_look_under_way() {
+        let q = RenderQueue::default();
+        q.show(vec![1, 2, 3]);
+        assert_eq!(q.take(), [1, 2, 3]);
+        assert!(!q.newer.load(Ordering::SeqCst));
+        q.show(vec![9, 4]);
+        assert!(q.newer.load(Ordering::SeqCst), "the look rendering 1, 2, 3 ends after its batch");
+        assert_eq!(q.take(), [9, 4], "nothing of the last view is left to render");
     }
 
     #[test]

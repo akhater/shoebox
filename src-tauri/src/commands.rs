@@ -610,6 +610,29 @@ pub async fn check_argentum_edits(app: AppHandle, state: State<'_, AppState>) ->
     Ok(changed)
 }
 
+/// What the window shows now: `photos` (the one open in the viewer first,
+/// then its view's edited ones, in the grid's order) have their edits
+/// rendered, in place of those asked for before; nothing else is. `folder`,
+/// a source or a folder shown, has its sidecars read at once (those new or
+/// changed only, never a photo; not the folders below it).
+#[tauri::command]
+pub async fn show_edits(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    folder: Option<Scope>,
+    photos: Vec<i64>,
+) -> Res<()> {
+    let (cat, renders) = (state.cat.clone(), state.renders.clone());
+    renders.show(photos);
+    let Some(folder) = folder else { return Ok(()) };
+    let changed = in_order(move || crate::edits::check_shown(&cat, &folder)).await?.changed;
+    if changed > 0 {
+        let _ = app.emit("catalog-changed", ());
+        renders.kick();
+    }
+    Ok(())
+}
+
 /// Whether edits are rendered: "stopped" (from the window, until started
 /// again), else whether the Argentum Settings has can render them: "ready",
 /// "outdated" (an update does), "cantStart" or "missing". Asked of Argentum
