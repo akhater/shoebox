@@ -798,7 +798,7 @@ describe("the viewer", () => {
     expect(title(host)).toBe("Fast");
     expect(gridIds(host)).toEqual(photosOf(20));
     expect(tile(host, 202).classList).toContain("is-selected");
-    expect(be.cmdsSince(from).filter((c) => c !== "get_photo").sort()).toEqual(["facets", "list_photos"]);
+    expect(be.cmdsSince(from).filter((c) => c !== "get_photo").sort()).toEqual(["facets", "list_photos", "show_edits"]);
     expect(backButton(host)).not.toBeNull();
 
     await click(backButton(host)!);
@@ -1741,6 +1741,37 @@ describe("Argentum's marks", () => {
     await focusBack();
     await wait(700);
     expect(be.cmdsSince(from)).toEqual(["check_argentum_edits"]);
+  });
+
+  test("only the edits shown are rendered: the viewer's photo first, then the view's in the grid's order", async () => {
+    const be = fakeBackend();
+    for (const id of [103, 101, 203, 201]) be.edited.set(id, 1);
+    const host = await renderApp();
+    await wait(100);
+    const asked = () => be.calls.filter((c) => c.cmd === "show_edits").map((c) => c.args);
+    expect(asked()).toEqual([{ folder: null, photos: [101, 103, 201, 203] }]);
+
+    // A source: its own sidecars are read, and its edits replace the last view's.
+    await click(sidebarItem(host, "Slow"));
+    await wait(100);
+    expect(asked().at(-1)).toEqual({ folder: { kind: "root", id: 10 }, photos: [101, 103] });
+    await choose(sortSelect(host), "newest");
+    await wait(100);
+    expect(asked().at(-1)).toEqual({ folder: null, photos: [103, 101] }); // read once
+    await click(sidebarItem(host, "Fast"));
+    await wait(100);
+    expect(asked().at(-1)).toEqual({ folder: { kind: "root", id: 20 }, photos: [203, 201] });
+
+    await doubleClick(tile(host, 201));
+    await wait(100);
+    expect(asked().at(-1)).toEqual({ folder: null, photos: [201, 203] });
+    await key(viewer(host)!, "ArrowLeft"); // 202: not edited, nothing of its own to render
+    await wait(100);
+    expect(asked().at(-1)).toEqual({ folder: null, photos: [203, 201] });
+    const n = asked().length;
+    await key(viewer(host)!, "ArrowLeft"); // 203, already first
+    await wait(100);
+    expect(asked().length).toBe(n);
   });
 });
 

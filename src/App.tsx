@@ -529,8 +529,16 @@ export default function App() {
   const timer = useRef<number | undefined>(undefined);
   // When People was last reloaded while faces are being found.
   const facesShown = useRef(0);
-  // Edited pictures Argentum rendered: when the view last showed them, and how many had changed then.
-  const editsShown = useRef({ at: 0, changed: 0 });
+  // New pictures of a few photos (their edits rendered): drawn at once, the rest of the view as it is.
+  const showPictures = useCallback((photos: EditsProgress["photos"]) => {
+    const at = new Map(photos.map((p) => [p.id, p]));
+    setLoaded((v) => {
+      const l = v.list;
+      if (!l.ids.some((id) => at.has(id))) return v;
+      const pick = <K extends "rev" | "w" | "h">(k: K) => l[k].map((x, i) => at.get(l.ids[i])?.[k] ?? x);
+      return { ...v, list: { ...l, rev: pick("rev"), w: pick("w"), h: pick("h") } };
+    });
+  }, []);
   // A refresh asked for by background work (a scan, faces found) never starts
   // while the last one is still answering: on a big catalog they would pile
   // up. It runs once that one is done.
@@ -631,13 +639,8 @@ export default function App() {
       listen<EditsProgress>("edits-progress", (e) => {
         const p = e.payload;
         setEditsProgress(p.finished || p.total === 0 ? null : p);
-        // The photos shown get their edited pictures as they come (throttled), and once done.
-        const shown = editsShown.current;
-        if (p.changed > shown.changed && (p.finished || Date.now() - shown.at > 3000)) {
-          editsShown.current = { at: Date.now(), changed: p.changed };
-          loadView();
-        }
-        if (p.finished) editsShown.current = { at: 0, changed: 0 };
+        // Each photo gets its edited pictures as they land (a batch of two at a time), on its own tile.
+        if (p.photos?.length) showPictures(p.photos);
       }),
       listen<Progress>("scan-progress", (e) => {
         lastRootName.current = e.payload.rootName;
@@ -694,7 +697,7 @@ export default function App() {
       }),
     ];
     return () => subs.forEach((p) => p.then((un) => un()));
-  }, [refreshSoon, loadView]);
+  }, [refreshSoon, loadView, showPictures]);
 
   useEffect(() => {
     try {
@@ -1511,6 +1514,26 @@ export default function App() {
     else if (viewerId != null && sidewaysView && current)
       setViewerId(shown.ids.length ? shown.ids[Math.min(viewerAt.current, shown.ids.length - 1)] : null);
   }, [viewerIndex, viewerId, sidewaysView, current, shown]);
+  // Argentum renders only what is shown: the photo in the viewer (when edited), then the view's
+  // edited photos in the grid's order, asked for again whenever that changes (a view's pending ones are
+  // dropped). A source or folder shown has its sidecars read when opened, and again when
+  // its disk comes back.
+  const editsWanted = useMemo(() => {
+    if (!current) return null;
+    const edited = shown.edit ? shown.ids.filter((_, i) => shown.edit![i] > 0) : [];
+    return viewerId != null && edited.includes(viewerId) ? [viewerId, ...edited.filter((id) => id !== viewerId)] : edited;
+  }, [current, shown, viewerId]);
+  const wantedKey = editsWanted?.join(",") ?? null;
+  const editsFolder = current && (scope.kind === "root" || scope.kind === "folder") ? scope : null;
+  const folderKey = editsFolder ? JSON.stringify(editsFolder) + shown.state.some((s) => s === 2) : "";
+  const editsAsked = useRef({ photos: "", folder: "" });
+  useEffect(() => {
+    if (wantedKey == null || !editsWanted) return;
+    const last = editsAsked.current;
+    const readFolder = folderKey !== "" && folderKey !== last.folder;
+    editsAsked.current = { photos: wantedKey, folder: folderKey };
+    if (readFolder || wantedKey !== last.photos) api.showEdits(readFolder ? editsFolder : null, editsWanted).catch(() => {});
+  }, [wantedKey, folderKey, editsWanted, editsFolder]);
   // Selected photos that are missing everywhere: "Remove from catalog" takes them.
   const missingSelected = useMemo(
     () => (current && selected.size > 0 ? shown.ids.filter((id, i) => shown.state[i] === 0 && selected.has(id)) : []),

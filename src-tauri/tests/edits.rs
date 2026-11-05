@@ -280,6 +280,32 @@ fn the_check_after_editing_looks_only_at_the_folders_handed_to_argentum() {
 }
 
 #[test]
+fn a_folder_shown_reads_the_sidecars_no_scan_read_and_nothing_else() {
+    let w = World::new("shown");
+    let cat = w.open(true);
+    scan(&cat);
+    // Beside its photo since before this catalog read sidecars: no scan will read it again.
+    w.write("IMG_0.JPG.agdata", EDIT);
+    let root = cat.root_ids().unwrap()[0];
+    let disk: i64 = cat.db().query_row("SELECT id FROM volumes", [], |r| r.get(0)).unwrap();
+    assert_eq!(edits::check_shown(&cat, &Scope::Root { id: root }).unwrap(), edits::Checked { read: 1, changed: 1 });
+    assert_eq!(mark(&cat, "IMG_0.JPG"), (1, 1));
+    w.write("IMG_1.JPG.agdata", EDIT);
+    let folder = Scope::Folder { volume_id: disk, rel_path: "Photos".into() };
+    assert_eq!(edits::check_shown(&cat, &folder).unwrap(), edits::Checked { read: 1, changed: 1 });
+    assert_eq!(edits::check_shown(&cat, &folder).unwrap(), edits::Checked::default(), "read once");
+    w.write("IMG_2.JPG.agdata", EDIT);
+    assert_eq!(edits::check_shown(&cat, &Scope::All).unwrap(), edits::Checked::default(), "a view that isn't a folder");
+    drop(cat);
+
+    // Unplugged: nothing read, nothing forgotten.
+    std::fs::remove_file(w.photos().join("IMG_0.JPG.agdata")).unwrap();
+    let cat = w.open(false);
+    assert_eq!(edits::check_shown(&cat, &Scope::Root { id: root }).unwrap(), edits::Checked::default());
+    assert_eq!(mark(&cat, "IMG_0.JPG"), (1, 1));
+}
+
+#[test]
 fn the_check_after_editing_is_not_asked_for_a_disk_unplugged() {
     let w = World::new("handed-unplugged");
     scan(&w.open(true));

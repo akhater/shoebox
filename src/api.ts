@@ -308,12 +308,14 @@ export interface FileEdit {
  *  the Argentum in Settings can render them. */
 export type EditRendering = "ready" | "outdated" | "missing" | "cantStart" | "stopped";
 
-/** Argentum rendering edits in the background: photos done of those to render. */
+/** Argentum rendering the edits of the photos shown: photos done of those to render. */
 export interface EditsProgress {
   done: number;
   total: number;
   /** Photos whose pictures shown changed so far. */
   changed: number;
+  /** Those that changed since the last progress, with their new pictures' revision and thumbnail size. */
+  photos: { id: number; rev: number; w: number; h: number }[];
   finished: boolean;
 }
 
@@ -589,6 +591,9 @@ export const api = {
   /** Stops rendering edits until `startEditRenders` (or a restart): scans and plug-ins don't undo it. */
   cancelEditRenders: () => invoke<void>("cancel_edit_renders"),
   startEditRenders: () => invoke<void>("start_edit_renders"),
+  /** What the window shows: these photos' edits are rendered (in this order), in place of those
+   *  asked for before, and nothing else; `folder` (a source or a folder) has its sidecars read. */
+  showEdits: (folder: Scope | null, photos: number[]) => invoke<void>("show_edits", { folder, photos }),
   /** The Argentum photos open in, with `chosen` as the setting. */
   argentumFound: (chosen: string) => invoke<string | null>("argentum_found", { chosen }),
   /** The program `path` names, when it is Argentum. */
