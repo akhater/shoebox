@@ -1190,9 +1190,11 @@ impl QualityIndex {
         // Whether the models can read faces is told without loading them: the
         // viewer asks about one photo at a time, mostly with nothing to measure.
         // They load below, once there is. Models that fail to load then leave
-        // the photos stored without eyes, and the failure kept makes them
-        // unusable (expression::usable), so nothing is sent to be measured
-        // again until their files change (`stale` with `models: false`).
+        // the photos stored without eyes, and the failure makes them unusable
+        // for a minute (expression::usable): those photos stay as they are
+        // (`stale` with `models: false`) until then, and are measured again
+        // after it, when the load is tried again. A model that stays broken
+        // costs one measure of them a minute, without the models.
         let todo = self.pending(cat, &cat.shown_ids(ids)?, crate::expression::usable())?;
         if todo.is_empty() {
             return Ok(0);

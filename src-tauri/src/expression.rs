@@ -346,13 +346,14 @@ fn runtime_here() -> bool {
 pub fn usable() -> bool {
     let Ok(s) = SHARED.try_lock() else { return true };
     let files = || crate::models::ready(crate::models::EXPRESSIONS) && runtime_here();
-    usable_with(s.reader.is_some(), files, s.failed.is_some())
+    usable_with(s.reader.is_some(), files, s.failed.map(|t| t.elapsed()))
 }
 
 /// A reader is loaded, or the files and runtime are here (`files`, asked only when needed) and
-/// loading them hasn't failed since they came.
-fn usable_with(loaded: bool, files: impl FnOnce() -> bool, failed: bool) -> bool {
-    loaded || (!failed && files())
+/// loading them didn't fail in the last [`RETRY`] (`failed`: how long ago it did). After that,
+/// [`shared`] tries again: a runtime or model mended since loads.
+fn usable_with(loaded: bool, files: impl FnOnce() -> bool, failed: Option<Duration>) -> bool {
+    loaded || (failed.is_none_or(|ago| ago >= RETRY) && files())
 }
 
 /// Lets go of the models (they are being deleted). A look in progress keeps its own hold on them
@@ -435,11 +436,14 @@ mod tests {
     #[test]
     fn models_are_usable_when_loaded_or_here_and_not_failing() {
         let never = || -> bool { panic!("files looked at while a reader is loaded") };
-        assert!(usable_with(true, never, false));
-        assert!(usable_with(true, never, true), "loaded since a failure");
-        assert!(usable_with(false, || true, false), "here, not tried yet");
-        assert!(!usable_with(false, || true, true), "here, but they failed to load");
-        assert!(!usable_with(false, || false, false), "not here");
+        let (just, long_ago) = (Some(Duration::from_secs(5)), Some(RETRY + Duration::from_secs(1)));
+        assert!(usable_with(true, never, None));
+        assert!(usable_with(true, never, just), "loaded since a failure");
+        assert!(usable_with(false, || true, None), "here, not tried yet");
+        assert!(!usable_with(false, || true, just), "here, but they just failed to load");
+        assert!(usable_with(false, || true, long_ago), "failed a while ago: tried again");
+        assert!(!usable_with(false, || false, None), "not here");
+        assert!(!usable_with(false, || false, long_ago), "not here");
     }
 
     #[test]
