@@ -6,8 +6,9 @@
 //! closed each eye is and how much each side of the mouth smiles.
 //!
 //! A face found by the face detector is cropped square and levelled around its eyes, the mesh
-//! model places its landmarks, they are brought back to the picture's pixels (as MediaPipe gives
-//! them), and the blendshapes model scores them. Faces too small to tell, or that the mesh model
+//! model places its landmarks, the face is cropped again around them and its landmarks placed once
+//! more, brought back to the picture's pixels (as MediaPipe gives them), and the blendshapes model
+//! scores them. Faces too small to tell, or that the mesh model
 //! doesn't see as a face, are not scored.
 
 use crate::faces::bilinear;
@@ -58,6 +59,30 @@ fn roi(face: &Face) -> Roi {
     }
 }
 
+/// The square a face is read in again, from its 478 landmarks in picture pixels: centred on the
+/// box around them, `ROI_SCALE` times its long side, levelled along the line from the outer corner
+/// of the eye on the image's left (landmark 33) to the other's (263). It is what MediaPipe does
+/// when it tracks a face: the detector's box here (SCRFD's) isn't the one MediaPipe's crop was made
+/// for (BlazeFace's), so the crop is taken again from the face's own landmarks.
+fn mesh_roi(points: &[(f32, f32)]) -> Roi {
+    let (mut x1, mut y1, mut x2, mut y2) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for &(x, y) in points {
+        (x1, y1, x2, y2) = (x1.min(x), y1.min(y), x2.max(x), y2.max(y));
+    }
+    let ((ax, ay), (bx, by)) = (points[33], points[263]);
+    Roi {
+        cx: (x1 + x2) / 2.0,
+        cy: (y1 + y2) / 2.0,
+        side: ROI_SCALE * (x2 - x1).max(y2 - y1),
+        angle: (by - ay).atan2(bx - ax),
+    }
+}
+
+/// The 146 landmarks the blendshapes model takes, as its input: x, y, x, y...
+fn subset(points: &[(f32, f32)]) -> Vec<f32> {
+    SUBSET.iter().flat_map(|&i| [points[i].0, points[i].1]).collect()
+}
+
 /// Where a point of the crop, in the model's 0..256 pixels, is in the picture.
 fn to_picture(roi: &Roi, x: f32, y: f32) -> (f32, f32) {
     let (dx, dy) = ((x / CROP as f32 - 0.5) * roi.side, (y / CROP as f32 - 0.5) * roi.side);
@@ -96,11 +121,11 @@ pub const CLOSED: f32 = 0.5;
 /// How sure the mesh model must be that it saw a face (0..1) for its landmarks to be read.
 const PRESENCE: f32 = 0.5;
 
-/// What a face's expression reads: how closed each eye is (MediaPipe's eyeBlinkLeft, then
-/// eyeBlinkRight), how much it smiles (both mouth corners' average), all 0..1, and how sure the mesh
-/// model was of a face.
+/// What a face's expression reads: how closed each eye is, how much it smiles (both mouth corners'
+/// average), all 0..1, and how sure the mesh model was of a face.
 #[derive(Debug, Clone, Copy)]
 pub struct Expression {
+    /// The person's left eye (on the image's right), then their right eye: MediaPipe's eyeBlinkLeft, eyeBlinkRight.
     pub blink: [f32; 2],
     pub smile: f32,
     pub presence: f32,
@@ -190,23 +215,30 @@ impl Reader {
             && (!self.blend_gpu || crate::ai::still_right(&blendshapes, &mut self.blendshapes.lock().unwrap()))
     }
 
-    /// Reads a face of `img`, as the face detector found it there.
+    /// Reads a face of `img`, as the face detector found it there. The landmarks are read twice: once
+    /// from the detector's box, then from the square the face's own landmarks give (see
+    /// [`mesh_roi`]); the blendshapes score the second reading.
     pub fn read(&self, img: &RgbImage, face: &Face) -> Result<Read> {
         if let Some(r) = unreadable(face) {
             return Ok(r);
         }
-        let (points, presence) = self.landmarks(img, &roi(face))?;
         // A logit that isn't a number gives no presence: no face.
-        if presence.is_nan() || presence < PRESENCE {
+        let no_face = |presence: f32| presence.is_nan() || presence < PRESENCE;
+        let (first, presence) = self.landmarks(img, &roi(face))?;
+        if no_face(presence) {
             return Ok(Read::NoFace);
         }
-        let s = self.blendshapes(points)?;
+        let (points, presence) = self.landmarks(img, &mesh_roi(&first))?;
+        if no_face(presence) {
+            return Ok(Read::NoFace);
+        }
+        let s = self.blendshapes(subset(&points))?;
         Ok(Read::Scored(Expression { blink: [s[9], s[10]], smile: (s[44] + s[45]) / 2.0, presence }))
     }
 
-    /// The face's 146 landmarks the blendshapes model takes (x, y in picture pixels, as MediaPipe
-    /// gives it), and how sure the mesh model is that the crop holds a face (0..1).
-    fn landmarks(&self, img: &RgbImage, roi: &Roi) -> Result<(Vec<f32>, f32)> {
+    /// The face's 478 landmarks (x, y in picture pixels), and how sure the mesh model is that the
+    /// crop holds a face (0..1).
+    fn landmarks(&self, img: &RgbImage, roi: &Roi) -> Result<(Vec<(f32, f32)>, f32)> {
         let t = Tensor::from_array(([1usize, CROP, CROP, 3], crop(img, roi)))?;
         let (mesh, logit) = {
             let mut s = self.landmarks.lock().unwrap();
@@ -219,13 +251,7 @@ impl Reader {
         if mesh.len() != 478 * 3 {
             bail!("the face mesh model gave {} numbers, not 478 landmarks", mesh.len());
         }
-        let points = SUBSET
-            .iter()
-            .flat_map(|&i| {
-                let (x, y) = to_picture(roi, mesh[i * 3], mesh[i * 3 + 1]);
-                [x, y]
-            })
-            .collect();
+        let points = mesh.chunks(3).map(|p| to_picture(roi, p[0], p[1])).collect();
         Ok((points, 1.0 / (1.0 + (-logit).exp())))
     }
 
@@ -406,14 +432,32 @@ mod tests {
         assert!(!e(0.05, 0.1).closed());
     }
 
+    #[test]
+    fn landmarks_give_the_square_around_them_levelled_by_the_eyes() {
+        // A 100-pixel square centred on (300, 200), turned by 30°: its corners, with the eyes'
+        // outer corners (33, 263) at the middles of its left and right sides.
+        let (c, half, angle) = ((300.0f32, 200.0f32), 50.0f32, FRAC_PI_6);
+        let (sin, cos) = angle.sin_cos();
+        let at = |u: f32, v: f32| (c.0 + cos * u - sin * v, c.1 + sin * u + cos * v);
+        let corners = [at(-half, -half), at(half, -half), at(half, half), at(-half, half)];
+        let mut points: Vec<(f32, f32)> = (0..478).map(|i| corners[i % 4]).collect();
+        (points[33], points[263]) = (at(-half, 0.0), at(half, 0.0));
+        let r = mesh_roi(&points);
+        assert!((r.cx - c.0).abs() < 1e-3 && (r.cy - c.1).abs() < 1e-3, "{} {}", r.cx, r.cy);
+        // The box around a turned square is wider than the square: 100 (cos + sin) on each side.
+        let boxed = 2.0 * half * (cos + sin);
+        assert!((r.side - ROI_SCALE * boxed).abs() < 1e-3, "{}", r.side);
+        assert!((r.angle - angle).abs() < 1e-5);
+    }
+
     /// The test faces: CC0 portraits, boxes and points measured by hand (tests/fixtures/faces).
     const OPEN: Face = Face {
         bbox: [78.0, 95.0, 205.0, 255.0],
         kps: [102.0, 152.0, 158.0, 150.0, 128.0, 185.0, 115.0, 213.0, 160.0, 212.0],
     };
     const SHUT: Face = Face {
-        bbox: [90.0, 70.0, 320.0, 400.0],
-        kps: [133.0, 140.0, 258.0, 176.0, 140.0, 235.0, 108.0, 295.0, 205.0, 320.0],
+        bbox: [50.0, 80.0, 185.0, 240.0],
+        kps: [80.0, 145.0, 147.0, 146.0, 113.0, 175.0, 90.0, 198.0, 145.0, 198.0],
     };
 
     fn fixture(name: &str) -> RgbImage {
@@ -455,8 +499,9 @@ mod tests {
     #[test]
     fn a_real_face_reads_closed_eyes() {
         let Some(reader) = models() else { return };
-        let shut = scored("closed", reader.read(&fixture("eyes_closed.jpg"), &SHUT).unwrap());
+        let shut = scored("closed", reader.read(&fixture("eyes_closed_smiling.jpg"), &SHUT).unwrap());
         assert!(min_blink(&shut) > 0.5 && shut.closed());
+        assert!(shut.smile > 0.3, "she laughs");
         assert!(shut.presence > 0.5);
     }
 
@@ -474,7 +519,7 @@ mod tests {
     #[test]
     fn a_turned_face_reads_as_upright() {
         let Some(reader) = models() else { return };
-        for (name, face) in [("eyes_open.jpg", &OPEN), ("eyes_closed.jpg", &SHUT)] {
+        for (name, face) in [("eyes_open.jpg", &OPEN), ("eyes_closed_smiling.jpg", &SHUT)] {
             let img = fixture(name);
             let upright = scored(name, reader.read(&img, face).unwrap());
             let turned_img = image::imageops::rotate90(&img);
@@ -490,14 +535,56 @@ mod tests {
     #[test]
     fn blendshapes_take_points_at_any_scale_and_place() {
         let Some(reader) = models() else { return };
-        for (name, face) in [("eyes_open.jpg", &OPEN), ("eyes_closed.jpg", &SHUT)] {
+        for (name, face) in [("eyes_open.jpg", &OPEN), ("eyes_closed_smiling.jpg", &SHUT)] {
             let (points, _) = reader.landmarks(&fixture(name), &roi(face)).unwrap();
-            let moved: Vec<f32> = points.chunks(2).flat_map(|p| [p[0] * 2.0 + 100.0, p[1] * 2.0 + 50.0]).collect();
-            let (a, b) = (reader.blendshapes(points).unwrap(), reader.blendshapes(moved).unwrap());
+            let moved: Vec<(f32, f32)> = points.iter().map(|&(x, y)| (x * 2.0 + 100.0, y * 2.0 + 50.0)).collect();
+            let (a, b) = (reader.blendshapes(subset(&points)).unwrap(), reader.blendshapes(subset(&moved)).unwrap());
             let off = a.iter().zip(&b).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
             eprintln!("{name}: scores at twice the size, moved, differ by at most {off:.4}");
             assert!(off < 0.05);
         }
+    }
+
+    /// MediaPipe names the eyes as the person sees them: eyeBlinkLeft is the person's left eye, on
+    /// the image's right. Shown by shutting one eye of the open face (its landmarks pressed flat
+    /// onto the line between its corners) and seeing which score rises.
+    #[test]
+    fn eye_blink_left_is_the_eye_on_the_image_right() {
+        let Some(reader) = models() else { return };
+        let img = fixture("eyes_open.jpg");
+        let (first, _) = reader.landmarks(&img, &roi(&OPEN)).unwrap();
+        let (points, _) = reader.landmarks(&img, &mesh_roi(&first)).unwrap();
+        assert!(points[33].0 < points[263].0, "landmark 33 is the outer corner of the eye on the image's left");
+        assert!(points[468].0 < points[473].0, "iris 468.. is the image-left eye's, 473.. the other's");
+        // The landmarks around each eye, its iris included, and its two corners.
+        let image_left: Vec<usize> = [7, 33, 133, 144, 145, 153, 154, 155, 157, 158, 159, 160, 161, 163, 173, 246]
+            .into_iter()
+            .chain(468..473)
+            .collect();
+        let image_right: Vec<usize> = [249, 263, 362, 373, 374, 380, 381, 382, 384, 385, 386, 387, 388, 390, 398, 466]
+            .into_iter()
+            .chain(473..478)
+            .collect();
+        let shut = |eye: &[usize], (a, b): (usize, usize)| {
+            let (pa, pb) = (points[a], points[b]);
+            let (dx, dy) = (pb.0 - pa.0, pb.1 - pa.1);
+            let mut p = points.clone();
+            for &i in eye {
+                let t = ((p[i].0 - pa.0) * dx + (p[i].1 - pa.1) * dy) / (dx * dx + dy * dy);
+                p[i] = (pa.0 + t * dx, pa.1 + t * dy);
+            }
+            let s = reader.blendshapes(subset(&p)).unwrap();
+            (s[9], s[10])
+        };
+        let open = reader.blendshapes(subset(&points)).unwrap();
+        let (left_shut, right_shut) = (shut(&image_left, (33, 133)), shut(&image_right, (263, 362)));
+        eprintln!("open: eyeBlinkLeft {:.3} eyeBlinkRight {:.3}", open[9], open[10]);
+        eprintln!("image-left eye shut: eyeBlinkLeft {:.3} eyeBlinkRight {:.3}", left_shut.0, left_shut.1);
+        eprintln!("image-right eye shut: eyeBlinkLeft {:.3} eyeBlinkRight {:.3}", right_shut.0, right_shut.1);
+        // Each eye shut raises its own score, not the other's: much for the eye facing the camera, less
+        // for the far one (the face is turned a little).
+        assert!(right_shut.0 > right_shut.1 + 0.3, "shutting the image-right eye raises eyeBlinkLeft");
+        assert!(left_shut.1 > left_shut.0 + 0.1, "shutting the image-left eye raises eyeBlinkRight");
     }
 
     #[test]
