@@ -1857,8 +1857,8 @@ button.link:hover {
 }
 .person-face {
   position: relative;
-  width: 112px;
-  height: 112px;
+  width: 100px;
+  height: 100px;
   padding: 0;
   border: 2px solid transparent;
   border-radius: 50%;
@@ -3653,7 +3653,7 @@ button.link:hover {
 }
 .cull-faces {
   flex: none;
-  max-height: 38%;
+  max-height: 42%;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -3692,6 +3692,10 @@ button.cull-face {
   border-radius: 8px;
   background: #0d0e10;
   overflow: hidden;
+}
+.cull-face.none .cull-face-crop {
+  background: none;
+  border: 1px dashed var(--border);
 }
 button.cull-face:hover .cull-face-crop {
   border-color: var(--border);

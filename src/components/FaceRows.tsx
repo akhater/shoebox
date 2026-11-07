@@ -7,44 +7,56 @@ const SETTLE = 400;
 const width = (f: PhotoFace) => f.bbox[2] - f.bbox[0];
 const middle = (f: PhotoFace) => [(f.bbox[0] + f.bbox[2]) / 2, (f.bbox[1] + f.bbox[3]) / 2];
 
+/** How far a face may move from one frame to the next (the subject running, the camera panning)
+ *  and still be the same, in face widths. */
+const REACH = 6;
+
+/**
+ * How unlike two faces of a burst are (lower is likelier the same; null: not
+ * the same): who they are when the catalog knows both, else how far apart, in
+ * face widths, when about the same size.
+ */
+function apart(a: PhotoFace, b: PhotoFace): number | null {
+  if (a.personId != null && b.personId != null) return a.personId === b.personId ? -1 : null;
+  const w = Math.max(width(a), width(b));
+  if (Math.min(width(a), width(b)) * 2 < w) return null;
+  const [ax, ay] = middle(a);
+  const [bx, by] = middle(b);
+  const d = Math.hypot(ax - bx, ay - by) / w;
+  return d <= REACH ? d : null;
+}
+
 /**
  * The faces of frames, a row per face across them (`columns[c]` the faces of
- * frame c): the same person when the catalog knows who both are, else the
- * nearest face within a face's width of where it was in the last frame that
- * has it. Larger faces first.
+ * frame c): each face goes with the row whose face in the last frame that has
+ * one is likeliest the same ([`apart`]), the likeliest pairs first. Rows of
+ * larger faces first.
  */
 export function matchFaces(columns: PhotoFace[][]): (PhotoFace | null)[][] {
   const rows: (PhotoFace | null)[][] = [];
   columns.forEach((faces, c) => {
-    for (const f of [...faces].sort((a, b) => width(b) - width(a))) {
-      let best = -1;
-      let bestD = Infinity;
+    const pairs: [number, number, number][] = [];
+    faces.forEach((f, i) =>
       rows.forEach((row, r) => {
-        if (row[c]) return;
-        let last: PhotoFace | null = null;
-        for (let k = c - 1; k >= 0 && !last; k--) last = row[k];
-        if (!last) return;
-        let d: number;
-        if (f.personId != null && last.personId != null) {
-          if (f.personId !== last.personId) return;
-          d = 0;
-        } else {
-          const [ax, ay] = middle(f);
-          const [bx, by] = middle(last);
-          d = Math.hypot(ax - bx, ay - by);
-          if (d > Math.max(width(f), width(last))) return;
-        }
-        if (d < bestD) {
-          best = r;
-          bestD = d;
-        }
-      });
-      if (best < 0) {
-        rows.push(columns.map(() => null));
-        best = rows.length - 1;
-      }
-      rows[best][c] = f;
+        const last = [...row].reverse().find((x) => x != null);
+        const d = last ? apart(f, last) : null;
+        if (d != null) pairs.push([d, i, r]);
+      }),
+    );
+    pairs.sort((a, b) => a[0] - b[0]);
+    const placed = new Set<number>();
+    const taken = new Set<number>();
+    for (const [, i, r] of pairs) {
+      if (placed.has(i) || taken.has(r)) continue;
+      rows[r][c] = faces[i];
+      placed.add(i);
+      taken.add(r);
     }
+    faces.forEach((f, i) => {
+      if (placed.has(i)) return;
+      rows.push(columns.map(() => null));
+      rows[rows.length - 1][c] = f;
+    });
   });
   const largest = (row: (PhotoFace | null)[]) => Math.max(...row.map((f) => (f ? width(f) : 0)));
   return rows.sort((a, b) => largest(b) - largest(a));
@@ -124,7 +136,12 @@ export const FaceRows = memo(function FaceRows({
             {row.map((f, c) => {
               const frame = held.frames[c];
               const at = frame.id === current ? "current" : "";
-              if (!f) return <span key={c} className={`cull-face none ${at}`} />;
+              if (!f)
+                return (
+                  <span key={c} className={`cull-face none ${at}`} title="No face here in this frame">
+                    <span className="cull-face-crop" />
+                  </span>
+                );
               const style = cropStyle(f.bbox, frame.w / frame.h);
               return (
                 <button
