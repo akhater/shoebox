@@ -894,7 +894,7 @@ struct Kept {
     without_focus: bool,
     without_eyes: bool,
     /// Now its faces have been looked for, the catalog has its focus points,
-    /// it has faces, the expression models are here.
+    /// it has faces, the expression models are here and load.
     looked: bool,
     pointed: bool,
     has_faces: bool,
@@ -1238,7 +1238,9 @@ impl QualityIndex {
     /// indexes: a view costs what it shows.
     fn pending(&self, cat: &Catalog, ids: &[i64]) -> Result<Vec<(i64, String)>> {
         let mut todo = Vec::new();
-        let models = crate::expression::available();
+        // The models count as here only when they load: models that fail to
+        // load leave nothing to measure again, rather than the same photos each time.
+        let models = crate::expression::shared().is_some();
         for chunk in ids.chunks(500) {
             let (shown, looked, pointed, with_faces) = {
                 let db = cat.read()?;
@@ -2638,7 +2640,8 @@ mod tests {
         let eyeless = Kept { without_eyes: true, ..fresh };
         assert!(stale(Kept { has_faces: true, models: true, ..eyeless }));
         assert!(!stale(Kept { has_faces: false, models: true, ..eyeless }), "no faces to read");
-        assert!(!stale(Kept { has_faces: true, models: false, ..eyeless }), "the models still aren't here");
+        // Models absent, or here but failing to load, can't read it: it stays as it is.
+        assert!(!stale(Kept { has_faces: true, models: false, ..eyeless }), "no models to read it with");
         assert!(!stale(Kept { has_faces: true, models: true, ..fresh }), "measured with them");
     }
 

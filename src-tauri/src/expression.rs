@@ -314,7 +314,8 @@ pub fn shared() -> Option<Arc<Reader>> {
         // Gone wrong on the GPU since it was loaded: loaded again, checked again.
         s.reader = None;
     }
-    if !available() {
+    let runtime = crate::models::runtime_ready() || crate::ai::runtime_in_use().is_some();
+    if !runtime {
         return None;
     }
     if s.failed.is_some_and(|t| t.elapsed() < RETRY) {
@@ -333,13 +334,6 @@ pub fn shared() -> Option<Arc<Reader>> {
             None
         }
     }
-}
-
-/// The models and the AI runtime are here: [`shared`] gives a reader (unless loading it fails).
-/// Cheap: it loads nothing.
-pub fn available() -> bool {
-    let runtime = crate::models::runtime_ready() || crate::ai::runtime_in_use().is_some();
-    runtime && crate::models::ready(crate::models::EXPRESSIONS)
 }
 
 /// Lets go of the models (they are being deleted). A look in progress keeps its own hold on them
