@@ -6,6 +6,7 @@ pub mod dates;
 pub mod db;
 pub mod edits;
 pub mod embedded;
+pub mod expression;
 pub mod faces;
 pub mod focus;
 pub mod formats;
