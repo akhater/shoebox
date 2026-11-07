@@ -716,6 +716,160 @@ describe("Cull", () => {
     expect(be.marked).toEqual(new Set([301, 302]));
   });
 
+  /** The frames compared side by side, by id, and the one looked at. */
+  const panes = (host: HTMLElement) => [...host.querySelectorAll<HTMLElement>(".cull-pane")].map((p) => Number(p.dataset.frame));
+  const looked = (host: HTMLElement) => Number(host.querySelector<HTMLElement>(".cull-pane.current")?.dataset.frame);
+
+  test("C compares a frame with the next ones of its burst: arrows move through them, X and P act on the one looked at", async () => {
+    const be = fakeBackend();
+    be.burst([301, 302, 303, 304]);
+    const host = await renderApp();
+    await openCull(host, "Trip");
+    expect(host.querySelector(".cull-keys")!.textContent).toContain("C compare");
+    await key(document.body, "c");
+    // From the keeper on: three frames.
+    expect(panes(host)).toEqual([302, 303, 304]);
+    expect(looked(host)).toBe(302);
+    expect(host.querySelector(".cull-photo")).toBeNull();
+    // Each with what Cull says, the keeper starred.
+    const pane = (id: number) => host.querySelector<HTMLElement>(`.cull-pane[data-frame="${id}"]`)!;
+    expect(pane(302).querySelector(".cull-suggest")!.textContent).toBe("Keep");
+    expect(pane(302).querySelector(".cull-keeper")).not.toBeNull();
+    expect(pane(303).querySelector(".cull-suggest")!.textContent).toBe("Reject");
+    expect(pane(303).textContent).toContain("Same shot: frame 2 is better");
+
+    // The frames stay while the one looked at moves; past the first, they slide.
+    await key(document.body, "ArrowRight");
+    await key(document.body, "ArrowRight");
+    expect(panes(host)).toEqual([302, 303, 304]);
+    expect(looked(host)).toBe(304);
+    for (let i = 0; i < 3; i++) await key(document.body, "ArrowLeft");
+    expect(panes(host)).toEqual([301, 302, 303]);
+    expect(looked(host)).toBe(301);
+
+    let from = be.calls.length;
+    await key(document.body, "x");
+    await wait(30);
+    expect(marks(be, from)).toEqual([{ ids: [301], marked: true }]);
+    expect(pane(301).querySelector(".cull-stamp.rejected")).not.toBeNull();
+    expect(looked(host)).toBe(302);
+    from = be.calls.length;
+    await key(document.body, "p");
+    await wait(30);
+    expect(marks(be, from)).toEqual([{ ids: [302], marked: false }]);
+    expect(looked(host)).toBe(303);
+    // A click on another frame looks at it (no 100% yet).
+    await click(pane(301).querySelector(".cull-pane-photo")!);
+    expect(looked(host)).toBe(301);
+    expect(host.querySelector(".cull-zoom")).toBeNull();
+
+    // Esc: back to one frame, then out of Cull.
+    await key(document.body, "Escape");
+    expect(host.querySelector(".cull-pane")).toBeNull();
+    expect(cullPhoto(host)).toBe(301);
+    expect(title(host)).toBe("Cull · Trip");
+    await key(document.body, "Escape");
+    await wait(100);
+    expect(title(host)).toBe("Trip");
+  });
+
+  test("2, 3 and 4 say how many frames are compared; frames selected are compared instead", async () => {
+    const be = fakeBackend();
+    be.burst([301, 302, 303, 304]);
+    const host = await renderApp();
+    await openCull(host, "Trip");
+    await key(document.body, "c");
+    await key(document.body, "2");
+    expect(panes(host)).toEqual([302, 303]);
+    await key(document.body, "4");
+    expect(panes(host)).toEqual([301, 302, 303, 304]);
+    expect(localStorage.getItem("shoebox.cullCompare")).toBe("4");
+
+    // Two frames selected: those two, X still on the one looked at.
+    await click(host.querySelectorAll(".cull-frame")[3], { ctrlKey: true });
+    expect(panes(host)).toEqual([302, 304]);
+    expect(looked(host)).toBe(304);
+    const from = be.calls.length;
+    await key(document.body, "x");
+    await wait(30);
+    expect(marks(be, from)).toEqual([{ ids: [304], marked: true }]);
+    expect(panes(host)).toEqual([302, 304]);
+    await key(document.body, "ArrowLeft");
+    expect(looked(host)).toBe(302);
+    // Esc clears the selection first: the burst again.
+    await key(document.body, "Escape");
+    expect(panes(host)).toEqual([301, 302, 303, 304]);
+  });
+
+  test("Z puts every frame compared at 100% on the same spot; dragging one moves them all", async () => {
+    const be = fakeBackend();
+    be.burst([301, 302, 303, 304]);
+    const host = await renderApp();
+    await openCull(host, "Trip");
+    await key(document.body, "c");
+    await key(document.body, "z");
+    await wait(20);
+    const fulls = () => [...host.querySelectorAll<HTMLImageElement>(".cull-zoom-full")];
+    expect(fulls().map((f) => /full\/(\d+)\?long=0/.exec(f.src)![1])).toEqual(["302", "303", "304"]);
+    for (const full of fulls()) {
+      Object.defineProperty(full, "naturalWidth", { configurable: true, value: 1500 });
+      Object.defineProperty(full, "naturalHeight", { configurable: true, value: 1000 });
+      await act(async () => {
+        full.dispatchEvent(new Event("load"));
+      });
+    }
+    // The keeper's spot (its face, 0.5 x 0.3) in the middle of each.
+    const lefts = () => fulls().map((f) => parseFloat(f.style.left));
+    expect(lefts()).toEqual([620 - 750, 620 - 750, 620 - 750]);
+    expect(fulls().map((f) => parseFloat(f.style.top))).toEqual([400 - 300, 400 - 300, 400 - 300]);
+
+    const zoom = host.querySelectorAll(".cull-zoom")[2];
+    await act(async () => {
+      zoom.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 500, clientY: 300 }));
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: 440, clientY: 300 }));
+      window.dispatchEvent(new MouseEvent("mouseup", { clientX: 440, clientY: 300 }));
+    });
+    expect(lefts()).toEqual([620 - 810, 620 - 810, 620 - 810]);
+    expect(host.querySelectorAll(".cull-zoom")).toHaveLength(3);
+    // Esc: back to the frames fitted, still compared.
+    await key(document.body, "Escape");
+    expect(fulls()).toHaveLength(0);
+    expect(panes(host)).toEqual([302, 303, 304]);
+  });
+
+  test("faces compared: a row per face across the frames, by person or place; a click on one looks at its frame", async () => {
+    const be = fakeBackend();
+    be.burst([301, 302, 303, 304]);
+    const face = (id: number, photoId: number, bbox: [number, number, number, number], personId: number | null = null) => ({
+      id,
+      photoId,
+      personId,
+      name: personId === 7 ? "Ana" : null,
+      bbox,
+    });
+    // Ana moved between frames (matched by who she is); the other face stayed (matched by where).
+    be.facesIn.set(302, [face(1, 302, [0.1, 0.1, 0.2, 0.3], 7), face(2, 302, [0.55, 0.2, 0.75, 0.5])]);
+    be.facesIn.set(303, [face(4, 303, [0.4, 0.1, 0.5, 0.3], 7), face(3, 303, [0.57, 0.21, 0.77, 0.51])]);
+    const host = await renderApp();
+    await openCull(host, "Trip");
+    await key(document.body, "c");
+    await wait(50);
+    expect(be.calls.filter((c) => c.cmd === "faces_in_photos").map((c) => c.args.photoIds)).toEqual([[302, 303, 304]]);
+    const rows = [...host.querySelectorAll<HTMLElement>(".cull-face-row")];
+    const faces = (row: HTMLElement) => [...row.querySelectorAll<HTMLElement>(".cull-face")].map((f) => Number(f.dataset.face ?? 0));
+    // The larger face first; no face in the third frame.
+    expect(rows.map(faces)).toEqual([
+      [2, 3, 0],
+      [1, 4, 0],
+    ]);
+    expect(rows[1].querySelector(".cull-face-name")!.textContent).toBe("Ana");
+    // Cut from each photo's own preview.
+    expect(rows[0].querySelector<HTMLImageElement>('.cull-face[data-face="3"] img')!.src).toMatch(/\/original\/303\?r=1$/);
+
+    await click(rows[1].querySelector('.cull-face[data-face="4"]')!);
+    expect(looked(host)).toBe(303);
+  });
+
   test("originals Look closer couldn't read are named, with why", async () => {
     const be = fakeBackend();
     be.unreadableOriginals([{ id: 303, name: "IMG_303.CR3", reason: "IMG_303.CR3: the file couldn't be read" }]);

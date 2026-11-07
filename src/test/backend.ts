@@ -18,6 +18,7 @@ import type {
   PeopleCheck,
   Person,
   PhotoDetail,
+  PhotoFace,
   PhotoList,
   PhotoMoveAsk,
   PhotoMovePlan,
@@ -185,6 +186,10 @@ export function fakeBackend() {
   /** Photos Cull hasn't measured yet (a test sets them), with what it finds once asked (cull_flags). */
   const unmeasured = new Map<number, number>();
   const measuredAs = new Map<number, number>();
+  /** Bursts longer than the usual two frames (a test sets them): one shot each, its second frame the keeper. */
+  const bursts: number[][] = [];
+  /** The faces found in each photo (a test sets them). */
+  const facesIn = new Map<number, PhotoFace[]>();
   // The fourth photo of each source is blurry.
   const flagsOf = (id: number) => (unmeasured.has(id) ? 0 : (measuredAs.get(id) ?? (id % 10 === 4 ? 4 : 0)));
   let people: Person[] = [
@@ -361,7 +366,13 @@ export function fakeBackend() {
     for (const p of ps) {
       const n = p.id % 10;
       const prev = stacks[stacks.length - 1];
-      if (n === 2 && prev?.frames[0].id === p.id - 1) {
+      const burst = bursts.find((b) => b.includes(p.id));
+      const k = burst?.indexOf(p.id) ?? -1;
+      if (k === 0) {
+        stacks.push({ frames: [frame(p, "reject", ["Same shot: frame 2 is better"])], keeper: 1, compared: "sharpest", closer: false, kind: "shot" });
+      } else if (k > 0) {
+        prev.frames.push(k === 1 ? frame(p, "keep", [`The best of these ${burst!.length} frames`]) : frame(p, "reject", ["Same shot: frame 2 is better"]));
+      } else if (n === 2 && prev?.frames[0].id === p.id - 1) {
         prev.frames[0] = { ...prev.frames[0], suggest: "reject", reasons: ["Same shot: frame 2 is better"] };
         prev.frames.push(frame(p, "keep", ["The best of these 2 frames"]));
         prev.keeper = 1;
@@ -557,6 +568,8 @@ export function fakeBackend() {
         return facets(a.scope as Scope);
       case "get_photo":
         return detail(a.id as number);
+      case "faces_in_photos":
+        return (a.photoIds as number[]).flatMap((id) => facesIn.get(id) ?? []);
       case "photo_faces":
       case "tags_on":
       case "tags_all":
@@ -871,6 +884,9 @@ export function fakeBackend() {
     /** The private photos of a password now. */
     privateOf: (password: string) => [...(spaces.get(password) ?? [])].sort(),
     focusMissed,
+    /** Makes these photos one shot in Cull, the second the keeper. */
+    burst: (ids: number[]) => bursts.push(ids),
+    facesIn,
     /** What Cull says it couldn't read. */
     unreadableOriginals: (u: Shoot["unreadable"]) => {
       unreadable = u;

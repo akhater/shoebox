@@ -9,10 +9,20 @@ import { act } from "react";
 import { describe, expect, test, vi } from "vitest";
 import type { AiProgress, EditsProgress, Progress } from "../api";
 import { ALL, fakeBackend, photosOf, ROOTS } from "./backend";
-import { choose, click, gridIds, gridStack, renderApp, searchBox, sidebarItem, sortSelect, subtitle, tile, title, type, wait, walk } from "./ui";
+import { byText, choose, click, gridIds, gridStack, key, renderApp, searchBox, sidebarItem, sortSelect, subtitle, tile, title, type, wait, walk } from "./ui";
 
-// How often the grid and People are drawn.
-const renders = vi.hoisted(() => ({ grid: 0, people: 0 }));
+// How often the grid, People and Cull's compared frames and faces are drawn.
+const renders = vi.hoisted(() => ({ grid: 0, people: 0, panes: 0, faces: 0 }));
+vi.mock("../components/ComparePane", async (importOriginal) => {
+  const { counted } = await import("./counted");
+  const m = await importOriginal<typeof import("../components/ComparePane")>();
+  return { ...m, ComparePane: counted(m.ComparePane, () => renders.panes++) };
+});
+vi.mock("../components/FaceRows", async (importOriginal) => {
+  const { counted } = await import("./counted");
+  const m = await importOriginal<typeof import("../components/FaceRows")>();
+  return { ...m, FaceRows: counted(m.FaceRows, () => renders.faces++) };
+});
 vi.mock("../components/PhotoGrid", async (importOriginal) => {
   const { counted } = await import("./counted");
   const m = await importOriginal<typeof import("../components/PhotoGrid")>();
@@ -292,6 +302,95 @@ describe("background work refreshes only what its event changed", () => {
     await send("scan-progress", { ...progress, read: 4 });
     await wait(50);
     expect(renders.people - before).toBe(0);
+  });
+});
+
+describe("Cull's compared frames and faces", () => {
+  /** Fast with a face in each frame, in two bursts (201-202, 203-204) or `burst`. */
+  const setUp = (burst = [203, 204]) => {
+    const be = fakeBackend();
+    be.burst(burst);
+    for (const id of photosOf(20)) be.facesIn.set(id, [{ id: id * 10, photoId: id, personId: null, name: null, bbox: [0.4, 0.2, 0.6, 0.5] }]);
+    return be;
+  };
+  const openCompare = async (host: HTMLElement) => {
+    await click(sidebarItem(host, "Fast"));
+    await wait(100);
+    await click(byText(host, ".toolbar button", "Cull"));
+    await wait(100);
+    await key(document.body, "c");
+  };
+  const paneIds = (host: HTMLElement) => [...host.querySelectorAll<HTMLElement>(".cull-pane")].map((p) => Number(p.dataset.frame));
+  const faceIds = (host: HTMLElement) =>
+    [...host.querySelectorAll<HTMLImageElement>(".cull-face img.cull-face-preview")].map((img) => Number(/original\/(\d+)/.exec(img.src)![1]));
+  /** Faces shown as current are always those of the frames compared; others only dimmed, not clickable. */
+  const honestFaces = (host: HTMLElement) => {
+    const box = host.querySelector<HTMLElement>(".cull-faces");
+    if (!box) return;
+    if (box.classList.contains("stale")) expect(getComputedStyle(box).pointerEvents).toBe("none");
+    else expect(faceIds(host)).toEqual(paneIds(host));
+  };
+
+  test("a new burst never shows the last one's faces as its own; only the latest answer counts", async () => {
+    const be = setUp();
+    be.delay("faces_in_photos", 300);
+    const host = await renderApp();
+    await openCompare(host);
+    await walk(400, () => honestFaces(host));
+    expect(faceIds(host)).toEqual([201, 202]);
+
+    // Down to the next burst, back, and down again before any answer.
+    for (const k of ["ArrowDown", "ArrowUp", "ArrowDown"]) {
+      await key(document.body, k);
+      await walk(60, () => honestFaces(host));
+    }
+    expect(host.querySelector(".cull-faces")!.classList).toContain("stale");
+    await walk(500, () => honestFaces(host));
+    expect(paneIds(host)).toEqual([203, 204]);
+    expect(faceIds(host)).toEqual([203, 204]);
+    expect(host.querySelector(".cull-faces")!.classList).not.toContain("stale");
+
+    // Up (a slow answer), then down again before it comes (a quick one): the slow one, late, is dropped.
+    await key(document.body, "ArrowUp");
+    await walk(60, () => honestFaces(host));
+    be.delay("faces_in_photos", 0);
+    await key(document.body, "ArrowDown");
+    await walk(500, () => honestFaces(host));
+    expect(faceIds(host)).toEqual([203, 204]);
+    expect(host.querySelector(".cull-faces")!.classList).not.toContain("stale");
+  });
+
+  test("panning at 100% doesn't draw the faces again; a mark draws only the frames it changed", async () => {
+    setUp([201, 202, 203, 204]);
+    const host = await renderApp();
+    await openCompare(host);
+    await key(document.body, "4");
+    await wait(100);
+    await key(document.body, "z");
+    await wait(20);
+    for (const full of host.querySelectorAll<HTMLImageElement>(".cull-zoom-full")) {
+      Object.defineProperty(full, "naturalWidth", { configurable: true, value: 1500 });
+      Object.defineProperty(full, "naturalHeight", { configurable: true, value: 1000 });
+      await act(async () => {
+        full.dispatchEvent(new Event("load"));
+      });
+    }
+    const faces = renders.faces;
+    await act(async () => {
+      host.querySelector(".cull-pane.current .cull-zoom")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 500, clientY: 300 }));
+      for (let x = 490; x > 400; x -= 10) window.dispatchEvent(new MouseEvent("mousemove", { clientX: x, clientY: 300 }));
+      window.dispatchEvent(new MouseEvent("mouseup", { clientX: 400, clientY: 300 }));
+    });
+    expect(renders.faces - faces).toBe(0);
+
+    // X on the first of four frames: it is drawn again (rejected), and the next one (looked at now).
+    await key(document.body, "Escape");
+    await key(document.body, "ArrowLeft");
+    expect(paneIds(host)).toEqual([201, 202, 203, 204]);
+    const panes = renders.panes;
+    await key(document.body, "x");
+    await wait(50);
+    expect(renders.panes - panes).toBeLessThanOrEqual(2);
   });
 });
 
