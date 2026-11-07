@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { CircleStop, Cpu, Download, FolderOpen, Gpu, Package, ScanFace, Search, Trash2 } from "lucide-react";
+import { CircleStop, Cpu, Download, FolderOpen, Gpu, Package, ScanEye, ScanFace, Search, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { fmtBytes, modelsApi, type ModelProgress, type ModelStatus, type ModelsOverview } from "../api";
 import { TurnPhotoIcon } from "./TurnControl";
@@ -8,6 +8,7 @@ const ICONS: Record<string, (p: { size?: number; className?: string }) => ReactN
   clip: Search,
   faces: ScanFace,
   upright: TurnPhotoIcon,
+  expressions: ScanEye,
   "runtime-gpu": Gpu,
   "runtime-cpu": Cpu,
 };
@@ -97,6 +98,8 @@ export function ModelsTab() {
       return "New photos won't get faces until it's downloaded again. Your people and their names stay.";
     if (m.id === "upright")
       return "New photos aren't looked at for being sideways until it's downloaded again. Photos you turned stay turned.";
+    if (m.id === "expressions")
+      return "Cull stops checking eyes until it's downloaded again. Photos you marked stay marked.";
     if (ready(other(m.id)))
       return m.id === "runtime-gpu"
         ? "Shoebox then runs the models on the processor, which is slower."

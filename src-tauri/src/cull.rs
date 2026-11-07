@@ -1,6 +1,6 @@
 //! The culling assistant: what is wrong with a photo (blurry, a face out of
-//! focus, too dark, blown out, nothing in it), which frames are the same shot
-//! (a burst), and which one of them to keep.
+//! focus, too dark, blown out, nothing in it, eyes closed), which frames are
+//! the same shot (a burst), and which one of them to keep.
 //!
 //! It only suggests, keep or reject. A reject is a photo marked for deletion,
 //! as Cull does by hand: nothing is deleted until the user confirms. Marks
@@ -25,7 +25,7 @@ use crate::catalog::{Catalog, Filters, PhotoDetail, Scope, Sort};
 use crate::db::PREVIEW_OK;
 use crate::expression::{Expression, Read, Reader};
 use crate::focus::{Focus, Point, State};
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use image::RgbImage;
 use rayon::prelude::*;
 use rusqlite::{Connection, params};
@@ -87,6 +87,12 @@ const SAME_FRAMING_AS_FIRST: f32 = 0.8;
 const SAME_SHOT_GAP: i64 = 30;
 /// Without CLIP descriptions: frames of one burst, within a second.
 const BURST_GAP: i64 = 1;
+/// Of the frames of a shot within this much of the best one's score (edge
+/// blur in thousandths of the long edge, and what counts against a frame:
+/// [`stack_of`]), as sharp to the eye, the one smiling the most is kept when
+/// it smiles this much more (0..1) than the best one.
+const TIE: f32 = 0.15;
+const SMILE_MARGIN: f32 = 0.2;
 
 /// What one look at a photo found. Blur is a Gaussian sigma, in pixels of
 /// the picture measured (`long` px on its long edge).
@@ -284,15 +290,19 @@ pub enum Problem {
     /// Where the camera focused is soft while something else is sharp: the
     /// focus missed, or the subject moved.
     FocusMissed,
+    /// A face's eyes are closed (some faces', in a group).
+    EyesClosed,
 }
 
 impl Problem {
     /// Enough to suggest rejecting the photo. The others are shown, and left
     /// to the user: a focus missed too, since a photographer who focused,
     /// then turned the camera to frame the shot leaves the point where the
-    /// subject was, not where it is.
+    /// subject was, not where it is; and closed eyes, since a sleeping baby,
+    /// a laugh or a look down read as closed (in a burst, a frame with open
+    /// eyes is kept: [`stack_of`]).
     pub fn major(self) -> bool {
-        !matches!(self, Problem::Blown | Problem::Bright | Problem::FocusMissed)
+        !matches!(self, Problem::Blown | Problem::Bright | Problem::FocusMissed | Problem::EyesClosed)
     }
 
     /// Its bit in [`flags`]: the grid's badge (the window knows the same bits).
@@ -306,6 +316,7 @@ impl Problem {
             Problem::Blown => 32,
             Problem::Bright => 64,
             Problem::FocusMissed => 128,
+            Problem::EyesClosed => 256,
         }
     }
 }
@@ -397,6 +408,13 @@ pub fn problems(q: &Quality, shot: &Shot) -> Vec<Found> {
                 "Focus missed: the camera focused here, but the sharpest part is elsewhere".into(),
             );
         }
+    }
+    if let Some(e) = q.eyes().filter(|e| e.closed > 0) {
+        let text = match e.faces {
+            1 => "Eyes closed".to_string(),
+            n => format!("Eyes closed: {} of {n} faces", e.closed),
+        };
+        add(Problem::EyesClosed, text);
     }
     out
 }
@@ -855,19 +873,120 @@ fn eyes_of(reads: &[Read]) -> Option<Eyes> {
 /// points isn't read. None without the models.
 fn eyes_in(reader: Option<&Reader>, img: &RgbImage, faces: &[FaceBox]) -> Option<Eyes> {
     let reader = reader?;
-    let (w, h) = (img.width() as f32, img.height() as f32);
     let reads: Vec<Read> = faces
         .iter()
         .filter_map(|f| {
-            let k = f.kps?;
-            let face = crate::expression::Face {
-                bbox: [f.x1 * w, f.y1 * h, f.x2 * w, f.y2 * h],
-                kps: std::array::from_fn(|i| k[i] * if i % 2 == 0 { w } else { h }),
-            };
+            let face = face_in(f, img)?;
             reader.read(img, &face).map_err(|e| log::warn!("cull: a face's eyes couldn't be read: {e:#}")).ok()
         })
         .collect();
     eyes_of(&reads)
+}
+
+/// A face as the expression models take it: in pixels of `img`. None without its five points.
+fn face_in(f: &FaceBox, img: &RgbImage) -> Option<crate::expression::Face> {
+    let (w, h) = (img.width() as f32, img.height() as f32);
+    let k = f.kps?;
+    Some(crate::expression::Face {
+        bbox: [f.x1 * w, f.y1 * h, f.x2 * w, f.y2 * h],
+        kps: std::array::from_fn(|i| k[i] * if i % 2 == 0 { w } else { h }),
+    })
+}
+
+/// What the expression models read on a photo's faces, face by face (`shoebox-cli eyes`).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EyesReport {
+    pub id: i64,
+    /// The picture read: "preview", or "original" (as a closer look reads it).
+    pub from: &'static str,
+    /// Its long edge, px.
+    pub long: u32,
+    pub faces: Vec<FaceEyes>,
+    /// What Cull keeps of them ([`Measures::eyes`]): None when no face was read.
+    pub eyes: Option<Eyes>,
+}
+
+/// One face's read.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceEyes {
+    /// Its box, 0..1 of the picture: x1, y1, x2, y2.
+    #[serde(rename = "box")]
+    pub bbox: [f32; 4],
+    /// Its width in pixels of the picture read: a face narrower than
+    /// [`crate::expression::MIN_FACE_PX`] isn't read.
+    pub px: f32,
+    #[serde(flatten)]
+    pub read: FaceRead,
+}
+
+/// What reading a face gave, or why it wasn't read.
+#[derive(Debug, Serialize)]
+#[serde(tag = "read", rename_all = "camelCase")]
+pub enum FaceRead {
+    /// `blink`: how closed the person's left eye is, then their right (0 open
+    /// to 1 shut); `closed`: both are ([`Expression::closed`]).
+    Scored { blink: [f32; 2], smile: f32, presence: f32, closed: bool },
+    /// Too small to tell open eyes from closed.
+    Small,
+    /// The models saw no face there (a profile, a hidden face).
+    NoFace,
+    /// Its five points aren't known.
+    NoPoints,
+    /// The models failed on it.
+    Failed { error: String },
+}
+
+/// What the expression models read on photo `id`'s faces, face by face: on
+/// its preview, or on its original read as a closer look reads it (read-only,
+/// its disk plugged in).
+pub fn eyes_report(cat: &Catalog, id: i64, original: bool) -> Result<EyesReport> {
+    cat.check_shown(id)?;
+    let Some(reader) = crate::expression::shared() else {
+        bail!(
+            "The expression models aren't here, or couldn't be loaded: \
+             `shoebox-cli models download expressions` (an AI runtime is needed too)"
+        );
+    };
+    let faces = faces_of(&*cat.read()?, &[id])?.remove(&id).unwrap_or_default();
+    let img = if original {
+        original_picture(cat, id).map_err(|e| anyhow!("photo {id}: its original couldn't be read: {e}"))?.0
+    } else {
+        cat.open_copy(&cat.data.preview_path(id))?.to_rgb8()
+    };
+    let mut reads = Vec::new();
+    let faces = faces
+        .iter()
+        .map(|f| {
+            let px = (f.x2 - f.x1) * img.width() as f32;
+            let read = match face_in(f, &img).map(|face| reader.read(&img, &face)) {
+                None => FaceRead::NoPoints,
+                Some(Err(e)) => FaceRead::Failed { error: format!("{e:#}") },
+                Some(Ok(r)) => {
+                    reads.push(r);
+                    match r {
+                        Read::Scored(e) => FaceRead::Scored {
+                            blink: e.blink,
+                            smile: e.smile,
+                            presence: e.presence,
+                            closed: e.closed(),
+                        },
+                        Read::Small => FaceRead::Small,
+                        Read::NoFace => FaceRead::NoFace,
+                    }
+                }
+            };
+            FaceEyes { bbox: [f.x1, f.y1, f.x2, f.y2], px, read }
+        })
+        .collect();
+    Ok(EyesReport {
+        id,
+        from: if original { "original" } else { "preview" },
+        long: img.width().max(img.height()),
+        faces,
+        eyes: eyes_of(&reads),
+    })
 }
 
 /// [`measure_taken`], and the faces' eyes read with the expression models
@@ -1607,6 +1726,16 @@ fn closer_look(
     slow_shutter: bool,
     reader: Option<&Reader>,
 ) -> std::result::Result<Measures, String> {
+    let (img, full) = original_picture(cat, id)?;
+    let mut m = measured_with(reader, &img, faces, points, slow_shutter);
+    m.full = full.filter(|&f| f >= m.long);
+    Ok(m)
+}
+
+/// A photo's original as a closer look reads it: at half its size, whole
+/// when small (read-only), turned as its preview is; with its long edge at
+/// full size, when known. Or why it couldn't be read.
+fn original_picture(cat: &Catalog, id: i64) -> std::result::Result<(RgbImage, Option<u32>), String> {
     let (path, kind, turn) = cat.original(id).map_err(|e| format!("{e:#}"))?;
     let full = cat.full_size(id);
     let long = full.map_or(3000, |l| if l <= CLOSE_WHOLE { l } else { l / 2 });
@@ -1615,9 +1744,7 @@ fn closer_look(
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     // Turned as its preview is: the faces' boxes and the focus points are on the photo as it stands.
     let img = crate::imaging::turned(loaded.image.map_err(|e| format!("{name}: {e}"))?, turn).to_rgb8();
-    let mut m = measured_with(reader, &img, faces, points, slow_shutter);
-    m.full = full.filter(|&f| f >= m.long);
-    Ok(m)
+    Ok((img, full))
 }
 
 /// Where to look at 100% first (0..1 of the picture): where the camera
@@ -2004,13 +2131,31 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
     // Shake short of a problem counts too: of frames all shaken a little,
     // the steadiest is kept.
     let shake: Vec<f32> = looks.iter().map(|m| m.as_ref().map_or(0.0, |m| m.shake(all_close).min(1.0))).collect();
+    let eyes: Vec<Option<Eyes>> = frames.iter().map(|f| f.quality.and_then(|q| q.eyes())).collect();
+    // Closed eyes count as a major problem here, alone left to the user: a
+    // sharp frame with open eyes is kept. Each further face with its eyes
+    // closed counts a little more: of a group, the frame with the fewest
+    // blinks. Faces not read count for nothing.
+    let blinks = |i: usize| eyes[i].filter(|e| e.closed > 0).map_or(0.0, |e| 5.0 + f32::from(e.closed - 1));
     let score = |i: usize| -> f32 {
         let major = found[i].iter().filter(|p| p.problem.major()).count() as f32;
-        let minor = found[i].len() as f32 - major;
+        let minor = found[i].iter().filter(|p| !p.problem.major() && p.problem != Problem::EyesClosed).count() as f32;
         let blown = frames[i].quality.map_or(0.0, |q| q.preview.blown);
-        blur[i].unwrap_or(5.0) + 5.0 * major + 0.5 * minor + 2.0 * blown + shake[i]
+        blur[i].unwrap_or(5.0) + 5.0 * major + 0.5 * minor + 2.0 * blown + shake[i] + blinks(i)
     };
-    let keeper = (0..frames.len()).min_by(|a, b| score(*a).total_cmp(&score(*b))).unwrap_or(0);
+    let best = (0..frames.len()).min_by(|a, b| score(*a).total_cmp(&score(*b))).unwrap_or(0);
+    // Frames as sharp to the eye: the one smiling clearly more is kept, when
+    // the best one's faces were read too.
+    let smile = |i: usize| eyes[i].map(|e| e.smile);
+    let smiling = smile(best).and_then(|least| {
+        (0..frames.len())
+            .filter(|&i| score(i) <= score(best) + TIE)
+            .filter_map(|i| Some((i, smile(i)?)))
+            .filter(|&(_, s)| s >= least + SMILE_MARGIN)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    });
+    let keeper = smiling.unwrap_or(best);
     // Versions of one capture (a RAW and its camera JPEG or an export) are
     // one frame to Cull: they share the verdict of the best of them.
     let capture: Vec<usize> =
@@ -2047,7 +2192,8 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
             } else if capture[i] == kept && keeper_ok {
                 row.suggest = Suggest::Keep;
                 let best = (i == keeper).then(|| format!("The best of these {n} frames"));
-                row.reasons = best.into_iter().chain(version).chain(own).collect();
+                let smiles = (i == keeper && smiling.is_some()).then(|| "Smiling".to_string());
+                row.reasons = best.into_iter().chain(smiles).chain(version).chain(own).collect();
             } else if capture[i] == kept {
                 row.suggest = Suggest::Reject;
                 row.reasons = version.into_iter().chain(own).collect();
@@ -2675,5 +2821,109 @@ mod tests {
         assert_eq!(q(None), preview.eyes);
         assert_eq!(q(Some(Measures::default())), preview.eyes);
         assert_eq!(q(Some(with)), Some(eyes));
+    }
+
+    /// Frame `id` of a burst, `blur` sharp, its `faces` read: `closed` of them
+    /// with their eyes closed, smiling `smile` on average.
+    fn with_eyes(id: i64, blur: f32, faces: u8, closed: u8, smile: f32) -> FrameIn {
+        let mut f = frame(id, 100 + id, None, blur);
+        let blink = if closed > 0 { 0.9 } else { 0.1 };
+        f.quality.as_mut().unwrap().preview.eyes = Some(Eyes { faces, closed, blink, smile });
+        f
+    }
+
+    #[test]
+    fn a_blink_loses_to_open_eyes_in_a_burst() {
+        // The sharpest frame caught a blink: the sharpest with open eyes is kept.
+        let s =
+            &suggest(vec![with_eyes(1, 0.5, 1, 0, 0.3), with_eyes(2, 0.2, 1, 1, 0.3), with_eyes(3, 0.4, 1, 0, 0.3)])[0];
+        assert_eq!((s.frames.len(), s.keeper), (3, 2), "{:?}", s.frames);
+        assert_eq!(s.frames[1].suggest, Suggest::Reject);
+        assert_eq!(s.frames[1].problems, [Problem::EyesClosed]);
+        assert_eq!(s.frames[1].reasons, ["Same shot: frame 3 is better", "Eyes closed"]);
+        assert_eq!(s.frames[2].suggest, Suggest::Keep);
+        assert_eq!(s.frames[2].reasons, ["The best of these 3 frames"]);
+    }
+
+    #[test]
+    fn a_lone_blink_is_left_to_the_user() {
+        // A sleeping baby, a laugh, a look down read as closed: shown, not rejected.
+        assert!(!Problem::EyesClosed.major());
+        let f = with_eyes(1, 0.3, 1, 1, 0.0);
+        let q = f.quality.unwrap();
+        let s = &suggest(vec![f])[0];
+        assert_eq!(s.frames[0].suggest, Suggest::None);
+        assert_eq!(s.frames[0].problems, [Problem::EyesClosed]);
+        assert_eq!(s.frames[0].reasons, ["Eyes closed"]);
+        assert_eq!(flags_of(&q, false), 256);
+        // A group: how many of its faces.
+        let mut group = q;
+        group.preview.eyes = Some(Eyes { faces: 3, closed: 2, blink: 0.9, smile: 0.2 });
+        assert_eq!(problems(&group, &Shot::default())[0].text, "Eyes closed: 2 of 3 faces");
+        // Open eyes: nothing to say.
+        group.preview.eyes = Some(Eyes { faces: 3, closed: 0, blink: 0.2, smile: 0.2 });
+        assert_eq!(flags_of(&group, false), 0);
+    }
+
+    #[test]
+    fn every_frame_blinking_keeps_the_sharpest() {
+        let s =
+            &suggest(vec![with_eyes(1, 0.5, 1, 1, 0.3), with_eyes(2, 0.2, 1, 1, 0.3), with_eyes(3, 0.4, 1, 1, 0.3)])[0];
+        assert_eq!(s.keeper, 1, "{:?}", s.frames);
+        let suggests: Vec<Suggest> = s.frames.iter().map(|f| f.suggest).collect();
+        assert_eq!(suggests, [Suggest::Reject, Suggest::Keep, Suggest::Reject]);
+        assert_eq!(s.frames[1].reasons, ["The best of these 3 frames", "Eyes closed"]);
+        assert_eq!(s.frames[0].reasons, ["Same shot: frame 2 is better", "Eyes closed"]);
+    }
+
+    #[test]
+    fn a_group_burst_keeps_the_fewest_blinks() {
+        // Four faces: two blink in the sharper frame, one in the other.
+        let s = &suggest(vec![with_eyes(1, 0.2, 4, 2, 0.3), with_eyes(2, 0.5, 4, 1, 0.3)])[0];
+        assert_eq!(s.keeper, 1, "{:?}", s.frames);
+        assert_eq!(s.frames[1].reasons, ["The best of these 2 frames", "Eyes closed: 1 of 4 faces"]);
+        assert_eq!(s.frames[0].reasons, ["Same shot: frame 2 is better", "Eyes closed: 2 of 4 faces"]);
+    }
+
+    #[test]
+    fn a_smile_breaks_a_tie_only() {
+        // As sharp to the eye: the one smiling clearly more is kept.
+        let s = &suggest(vec![with_eyes(1, 0.30, 1, 0, 0.1), with_eyes(2, 0.40, 1, 0, 0.5)])[0];
+        assert_eq!(s.keeper, 1, "{:?}", s.frames);
+        assert_eq!(s.frames[1].reasons, ["The best of these 2 frames", "Smiling"]);
+        assert_eq!(s.frames[0].reasons, ["Same shot: frame 2 is better"]);
+        // Clearly sharper: kept, smile or not.
+        let s = &suggest(vec![with_eyes(1, 0.30, 1, 0, 0.1), with_eyes(2, 0.50, 1, 0, 0.9)])[0];
+        assert_eq!(s.keeper, 0, "{:?}", s.frames);
+        assert!(s.frames.iter().all(|f| !f.reasons.iter().any(|r| r == "Smiling")), "{:?}", s.frames);
+        // Smiling a little more: nothing changes.
+        let s = &suggest(vec![with_eyes(1, 0.30, 1, 0, 0.3), with_eyes(2, 0.40, 1, 0, 0.45)])[0];
+        assert_eq!(s.keeper, 0, "{:?}", s.frames);
+        assert_eq!(s.frames[0].reasons, ["The best of these 2 frames"]);
+    }
+
+    #[test]
+    fn focus_stacks_ignore_eyes() {
+        let in_stack = |id, closed| {
+            let mut f = with_eyes(id, 0.3, 1, closed, 0.0);
+            (f.stack, f.shot.focus_stack, f.taken) = (Some(1), true, 100);
+            f
+        };
+        let s = &suggest(vec![in_stack(1, 0), in_stack(2, 1)])[0];
+        assert_eq!(s.kind, StackKind::Focus);
+        assert_eq!((s.frames[1].suggest, s.frames[1].problems.len()), (Suggest::Keep, 0), "{:?}", s.frames[1]);
+        let q = in_stack(2, 1).quality.unwrap();
+        assert_eq!(flags_of(&q, true), 0);
+    }
+
+    #[test]
+    fn unread_eyes_count_for_nothing() {
+        // No face read in the sharper frame: neither a blink nor a smile to weigh.
+        let s = &suggest(vec![frame(1, 101, None, 0.3), with_eyes(2, 0.4, 1, 0, 0.9)])[0];
+        assert_eq!(s.keeper, 0, "{:?}", s.frames);
+        assert!(s.frames[0].problems.is_empty());
+        // Against a frame read with its eyes closed, it wins even when softer.
+        let s = &suggest(vec![frame(1, 101, None, 0.6), with_eyes(2, 0.3, 1, 1, 0.0)])[0];
+        assert_eq!(s.keeper, 0, "{:?}", s.frames);
     }
 }

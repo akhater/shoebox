@@ -46,6 +46,8 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   blurry, shaken, a face out of focus, the focus missed where the camera says
   it focused, too dark, blown out, nothing in it (lens cap). At 100% it looks
   first where the camera focused.
+  With the closed-eyes model downloaded, it flags closed eyes and keeps the
+  frame where they are open; of frames as sharp, the one with the bigger smile.
   It only suggests: you reject, take back, or accept its suggestions in one
   key. A shoot is measured from its previews when you open it, so unplugged
   drives too; with the drive connected it looks closer at the originals and
@@ -221,6 +223,7 @@ shoebox-cli argentum 42          # open a photo in Argentum
 shoebox-cli list newest 50 '{"edits":["edited","film"]}'   # photos edited in Argentum
 shoebox-cli focus "D:\Photos\IMG_0001.CR3"   # where the camera focused, as Shoebox reads it
 shoebox-cli cull '{}' '{"kind":"root","id":1}'   # a folder as Cull shows it: bursts, problems, suggestions
+shoebox-cli eyes 42              # each face's eyes and smile, as Cull reads them
 shoebox-cli models               # which AI models are installed
 shoebox-cli bench                # how fast the main views are on this catalog and computer
 shoebox-cli logs                 # the log files and the newest log's last lines
