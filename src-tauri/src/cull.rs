@@ -23,6 +23,7 @@
 
 use crate::catalog::{Catalog, Filters, PhotoDetail, Scope, Sort};
 use crate::db::PREVIEW_OK;
+use crate::expression::{Expression, Read, Reader};
 use crate::focus::{Focus, Point, State};
 use anyhow::{Result, bail};
 use image::RgbImage;
@@ -34,8 +35,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// Version of how photos are measured: photos measured by an older one are
-/// measured again.
-pub const QUALITY_VERSION: i64 = 2;
+/// measured again. 3: faces' eyes and smiles are read too ([`Eyes`]).
+pub const QUALITY_VERSION: i64 = 3;
 
 /// Cull works on a shoot, not a whole archive: views bigger than this ask
 /// for a folder or a day instead.
@@ -132,6 +133,23 @@ pub struct Measures {
     pub slow_shutter: bool,
     /// How the frame is laid out, to tell frames of one shot from the next pose.
     pub layout: Option<Layout>,
+    /// What its faces' eyes and smiles read, when the expression models were
+    /// here and read at least one face.
+    pub eyes: Option<Eyes>,
+}
+
+/// What the expression models read on a photo's faces ([`eyes_of`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Eyes {
+    /// Faces read: big enough, and seen as faces by the models.
+    pub faces: u8,
+    /// Of those, faces whose eyes are closed ([`Expression::closed`]).
+    pub closed: u8,
+    /// How shut the most shut eyes are, 0 open to 1 shut ([`Expression::shut`]).
+    pub blink: f32,
+    /// How much the faces smile, on average, 0..1.
+    pub smile: f32,
 }
 
 /// A picture's brightness on an 8 x 8 grid: frames of the same shot (the same
@@ -240,6 +258,11 @@ impl Quality {
     /// The closest look there is.
     pub fn best(&self) -> &Measures {
         self.close.as_ref().unwrap_or(&self.preview)
+    }
+
+    /// What its faces' eyes read: on the closer look when it read them, else on the preview.
+    pub fn eyes(&self) -> Option<Eyes> {
+        self.close.and_then(|c| c.eyes).or(self.preview.eyes)
     }
 }
 
@@ -805,6 +828,87 @@ pub fn measure_taken(img: &RgbImage, faces: &[FaceBox], points: &[Point], slow_s
     Measures { slow_shutter, ..measured(img, faces, points, slow_shutter) }
 }
 
+/// What a photo's faces read, summed up: None when none was read (too
+/// small, not seen as faces, or no faces).
+fn eyes_of(reads: &[Read]) -> Option<Eyes> {
+    let scored: Vec<&Expression> = reads
+        .iter()
+        .filter_map(|r| match r {
+            Read::Scored(e) => Some(e),
+            Read::Small | Read::NoFace => None,
+        })
+        .collect();
+    if scored.is_empty() {
+        return None;
+    }
+    let count = |n: usize| u8::try_from(n).unwrap_or(u8::MAX);
+    Some(Eyes {
+        faces: count(scored.len()),
+        closed: count(scored.iter().filter(|e| e.closed()).count()),
+        blink: scored.iter().map(|e| e.shut()).fold(0.0, f32::max),
+        smile: scored.iter().map(|e| e.smile).sum::<f32>() / scored.len() as f32,
+    })
+}
+
+/// Reads the eyes and smiles of a picture's faces (0..1 of it, as the faces
+/// table keeps them) with the expression models. A face without its five
+/// points isn't read. None without the models.
+fn eyes_in(reader: Option<&Reader>, img: &RgbImage, faces: &[FaceBox]) -> Option<Eyes> {
+    let reader = reader?;
+    let (w, h) = (img.width() as f32, img.height() as f32);
+    let reads: Vec<Read> = faces
+        .iter()
+        .filter_map(|f| {
+            let k = f.kps?;
+            let face = crate::expression::Face {
+                bbox: [f.x1 * w, f.y1 * h, f.x2 * w, f.y2 * h],
+                kps: std::array::from_fn(|i| k[i] * if i % 2 == 0 { w } else { h }),
+            };
+            reader.read(img, &face).map_err(|e| log::warn!("cull: a face's eyes couldn't be read: {e:#}")).ok()
+        })
+        .collect();
+    eyes_of(&reads)
+}
+
+/// [`measure_taken`], and the faces' eyes read with the expression models
+/// when they are here.
+fn measured_with(
+    reader: Option<&Reader>,
+    img: &RgbImage,
+    faces: &[FaceBox],
+    points: &[Point],
+    slow_shutter: bool,
+) -> Measures {
+    Measures { eyes: eyes_in(reader, img, faces), ..measure_taken(img, faces, points, slow_shutter) }
+}
+
+/// What decides whether a photo's measures still hold ([`stale`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct Kept {
+    /// It has measures, of the picture its preview shows now.
+    measured: bool,
+    same_picture: bool,
+    /// They were taken before its faces were looked for, before the catalog
+    /// had its focus points, without the expression models.
+    without_faces: bool,
+    without_focus: bool,
+    without_eyes: bool,
+    /// Now its faces have been looked for, the catalog has its focus points,
+    /// it has faces, the expression models are here.
+    looked: bool,
+    pointed: bool,
+    has_faces: bool,
+    models: bool,
+}
+
+/// The photo needs measuring again ([`QualityIndex::pending`]).
+fn stale(k: Kept) -> bool {
+    !(k.measured && k.same_picture)
+        || (k.without_faces && k.looked)
+        || (k.without_focus && k.pointed)
+        || (k.without_eyes && k.has_faces && k.models)
+}
+
 fn measured(img: &RgbImage, faces: &[FaceBox], points: &[Point], shake: bool) -> Measures {
     let fine = Plane::luma(img);
     let (w, h) = (fine.w, fine.h);
@@ -901,6 +1005,9 @@ pub struct QualityIndex {
     /// Photos measured while the catalog didn't have their focus points
     /// (read again from an older photo's file since): measured again once it has.
     without_focus: RwLock<HashSet<i64>>,
+    /// Photos measured while the expression models weren't here: measured
+    /// again once they are, when they have faces.
+    without_eyes: RwLock<HashSet<i64>>,
     /// Originals a closer look couldn't read, and why (until Shoebox restarts):
     /// Cull stops offering them and says so.
     unreadable: Mutex<HashMap<i64, String>>,
@@ -956,12 +1063,16 @@ impl QualityIndex {
                  faces       INTEGER NOT NULL,   -- its faces were looked for when measured
                  preview     TEXT    NOT NULL,   -- Measures (JSON)
                  close       TEXT,               -- Measures from the original, when Cull looked closer
-                 focus       INTEGER NOT NULL DEFAULT 0  -- the catalog had its focus points when measured
+                 focus       INTEGER NOT NULL DEFAULT 0, -- the catalog had its focus points when measured
+                 eyes        INTEGER NOT NULL DEFAULT 0  -- the expression models were here when measured
              );",
         )?;
-        // Measures from before Cull knew focus points: the catalog had none for them.
-        if !conn.prepare("SELECT 1 FROM pragma_table_info('quality') WHERE name = 'focus'")?.exists([])? {
-            conn.execute_batch("ALTER TABLE quality ADD COLUMN focus INTEGER NOT NULL DEFAULT 0")?;
+        // Measures from before Cull knew focus points: the catalog had none for
+        // them. From before it read eyes: no models were here.
+        for column in ["focus", "eyes"] {
+            if !conn.prepare("SELECT 1 FROM pragma_table_info('quality') WHERE name = ?1")?.exists([column])? {
+                conn.execute_batch(&format!("ALTER TABLE quality ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"))?;
+            }
         }
         let threads = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) / 2).clamp(1, 6);
         Ok(Self {
@@ -969,6 +1080,7 @@ impl QualityIndex {
             measured: RwLock::new(HashMap::new()),
             without_faces: RwLock::new(HashSet::new()),
             without_focus: RwLock::new(HashSet::new()),
+            without_eyes: RwLock::new(HashSet::new()),
             unreadable: Mutex::new(HashMap::new()),
             ready: crate::Ready::default(),
             pool: rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|i| format!("cull-{i}")).build()?,
@@ -981,7 +1093,9 @@ impl QualityIndex {
         let mut measured = HashMap::new();
         let mut without_faces = HashSet::new();
         let mut without_focus = HashSet::new();
-        let mut stmt = conn.prepare("SELECT photo_id, faces, preview, close, focus FROM quality WHERE version = ?1")?;
+        let mut without_eyes = HashSet::new();
+        let mut stmt =
+            conn.prepare("SELECT photo_id, faces, preview, close, focus, eyes FROM quality WHERE version = ?1")?;
         let mut rows = stmt.query([QUALITY_VERSION])?;
         while let Some(r) = rows.next()? {
             let id: i64 = r.get(0)?;
@@ -996,11 +1110,15 @@ impl QualityIndex {
             if !r.get::<_, bool>(4)? {
                 without_focus.insert(id);
             }
+            if !r.get::<_, bool>(5)? {
+                without_eyes.insert(id);
+            }
         }
         log::info!("cull: {} photos' measures read in {} ms", measured.len(), started.elapsed().as_millis());
         *self.measured.write().unwrap() = measured;
         *self.without_faces.write().unwrap() = without_faces;
         *self.without_focus.write().unwrap() = without_focus;
+        *self.without_eyes.write().unwrap() = without_eyes;
         Ok(())
     }
 
@@ -1054,7 +1172,8 @@ impl QualityIndex {
     /// Measures those of `ids` that need it, from their previews: not
     /// measured yet, or measured from another picture (turned since, or an id
     /// now another photo's), or before their faces were looked for or their
-    /// focus points read. Returns how many were measured.
+    /// focus points read, or without the expression models (once they are
+    /// here, for photos with faces). Returns how many were measured.
     pub fn measure(
         &self,
         cat: &Catalog,
@@ -1081,6 +1200,7 @@ impl QualityIndex {
                 (faces_of(&db, &ids)?, points_of(&db, &ids)?, looked_of(&db, &ids)?)
             };
             let shaky = shaky_of(cat, &ids)?;
+            let reader = crate::expression::shared();
             let rows: Vec<Measured> = self.pool.install(|| {
                 chunk
                     .par_iter()
@@ -1092,12 +1212,14 @@ impl QualityIndex {
                                 return None;
                             }
                         };
-                        let m = measure_taken(&img, of(&faces, id), of(&points, id), shaky.contains(id));
+                        let m =
+                            measured_with(reader.as_deref(), &img, of(&faces, id), of(&points, id), shaky.contains(id));
                         Some(Measured {
                             id: *id,
                             fingerprint: fp.clone(),
                             faces: looked.contains(id),
                             focus: points.contains_key(id),
+                            eyes: reader.is_some(),
                             m,
                         })
                     })
@@ -1116,10 +1238,13 @@ impl QualityIndex {
     /// indexes: a view costs what it shows.
     fn pending(&self, cat: &Catalog, ids: &[i64]) -> Result<Vec<(i64, String)>> {
         let mut todo = Vec::new();
+        let models = crate::expression::available();
         for chunk in ids.chunks(500) {
-            let (shown, looked, pointed) = {
+            let (shown, looked, pointed, with_faces) = {
                 let db = cat.read()?;
-                (fingerprints_of(&db, chunk)?, looked_of(&db, chunk)?, pointed_of(&db, chunk)?)
+                // Which have faces matters only once the models are here.
+                let with_faces = if models { with_faces_of(&db, chunk)? } else { HashSet::new() };
+                (fingerprints_of(&db, chunk)?, looked_of(&db, chunk)?, pointed_of(&db, chunk)?, with_faces)
             };
             let stored: HashMap<i64, String> = self
                 .db
@@ -1134,13 +1259,21 @@ impl QualityIndex {
             let measured = self.measured.read().unwrap();
             let without = self.without_faces.read().unwrap();
             let unpointed = self.without_focus.read().unwrap();
+            let eyeless = self.without_eyes.read().unwrap();
             todo.extend(chunk.iter().filter_map(|id| {
                 let fp = shown.get(id)?;
-                let fresh = measured.contains_key(id)
-                    && stored.get(id) == Some(fp)
-                    && !(without.contains(id) && looked.contains(id))
-                    && !(unpointed.contains(id) && pointed.contains(id));
-                (!fresh).then(|| (*id, fp.clone()))
+                let kept = Kept {
+                    measured: measured.contains_key(id),
+                    same_picture: stored.get(id) == Some(fp),
+                    without_faces: without.contains(id),
+                    without_focus: unpointed.contains(id),
+                    without_eyes: eyeless.contains(id),
+                    looked: looked.contains(id),
+                    pointed: pointed.contains(id),
+                    has_faces: with_faces.contains(id),
+                    models,
+                };
+                stale(kept).then(|| (*id, fp.clone()))
             }));
         }
         Ok(todo)
@@ -1167,12 +1300,20 @@ impl QualityIndex {
                 // A photo's closer look stays while it is of the same picture:
                 // it doesn't depend on the preview.
                 let close: Option<String> = tx.query_row(
-                    "INSERT INTO quality (photo_id, fingerprint, version, faces, focus, preview)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    "INSERT INTO quality (photo_id, fingerprint, version, faces, focus, eyes, preview)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                      ON CONFLICT (photo_id) DO UPDATE SET fingerprint = ?2, version = ?3, faces = ?4, focus = ?5,
-                         preview = ?6, close = CASE WHEN fingerprint = ?2 AND version = ?3 THEN close END
+                         eyes = ?6, preview = ?7, close = CASE WHEN fingerprint = ?2 AND version = ?3 THEN close END
                      RETURNING close",
-                    params![r.id, r.fingerprint, QUALITY_VERSION, r.faces, r.focus, serde_json::to_string(&r.m)?],
+                    params![
+                        r.id,
+                        r.fingerprint,
+                        QUALITY_VERSION,
+                        r.faces,
+                        r.focus,
+                        r.eyes,
+                        serde_json::to_string(&r.m)?
+                    ],
                     |row| row.get(0),
                 )?;
                 closes.push(close.and_then(|c| serde_json::from_str(&c).ok()));
@@ -1182,9 +1323,10 @@ impl QualityIndex {
         let mut measured = self.measured.write().unwrap();
         let mut without = self.without_faces.write().unwrap();
         let mut unpointed = self.without_focus.write().unwrap();
+        let mut eyeless = self.without_eyes.write().unwrap();
         for (r, close) in rows.iter().zip(closes) {
             measured.insert(r.id, Quality { preview: r.m, close });
-            for (set, has) in [(&mut *without, r.faces), (&mut *unpointed, r.focus)] {
+            for (set, has) in [(&mut *without, r.faces), (&mut *unpointed, r.focus), (&mut *eyeless, r.eyes)] {
                 if has {
                     set.remove(&r.id);
                 } else {
@@ -1223,10 +1365,12 @@ impl QualityIndex {
         let mut measured = self.measured.write().unwrap();
         let mut without = self.without_faces.write().unwrap();
         let mut unpointed = self.without_focus.write().unwrap();
+        let mut eyeless = self.without_eyes.write().unwrap();
         for id in &gone {
             measured.remove(id);
             without.remove(id);
             unpointed.remove(id);
+            eyeless.remove(id);
         }
         Ok(gone.len())
     }
@@ -1261,11 +1405,15 @@ impl QualityIndex {
             let points = points_of(&cat.db(), chunk)?;
             let fingerprints = fingerprints_of(&cat.db(), chunk)?;
             let shaky = shaky_of(cat, chunk)?;
+            let reader = crate::expression::shared();
             let results: Vec<(i64, std::result::Result<Measures, String>)> = self.pool.install(|| {
                 chunk
                     .par_iter()
                     .with_max_len(1)
-                    .map(|id| (*id, closer_look(cat, *id, of(&faces, id), of(&points, id), shaky.contains(id))))
+                    .map(|id| {
+                        let (faces, points) = (of(&faces, id), of(&points, id));
+                        (*id, closer_look(cat, *id, faces, points, shaky.contains(id), reader.as_deref()))
+                    })
                     .collect()
             });
             let mut found = Vec::new();
@@ -1285,7 +1433,7 @@ impl QualityIndex {
                 }
             }
             looked += found.len();
-            self.store_close(cat, &found, &fingerprints, &faces, &points)?;
+            self.store_close(cat, &found, &fingerprints, &faces, &points, reader.as_deref())?;
             done += chunk.len() as u64;
             progress(done, total);
         }
@@ -1300,6 +1448,7 @@ impl QualityIndex {
         fingerprints: &HashMap<i64, String>,
         faces: &HashMap<i64, Vec<FaceBox>>,
         points: &HashMap<i64, Vec<Point>>,
+        reader: Option<&Reader>,
     ) -> Result<()> {
         // A photo not measured from its preview yet is now, so it has a row.
         let missing: Vec<Measured> = {
@@ -1309,12 +1458,13 @@ impl QualityIndex {
                 .filter(|(id, _)| !measured.contains_key(id))
                 .filter_map(|(id, close)| {
                     let img = cat.open_copy(&cat.data.preview_path(*id)).ok()?.to_rgb8();
-                    let m = measure_taken(&img, of(faces, id), of(points, id), close.slow_shutter);
+                    let m = measured_with(reader, &img, of(faces, id), of(points, id), close.slow_shutter);
                     Some(Measured {
                         id: *id,
                         fingerprint: fingerprints.get(id)?.clone(),
                         faces: faces.contains_key(id),
                         focus: points.contains_key(id),
+                        eyes: reader.is_some(),
                         m,
                     })
                 })
@@ -1433,13 +1583,14 @@ impl QualityIndex {
 }
 
 /// A photo's original, read at half its size (whole when small, read-only),
-/// and measured; or why it couldn't be.
+/// and measured, its faces' eyes read with `reader`; or why it couldn't be.
 fn closer_look(
     cat: &Catalog,
     id: i64,
     faces: &[FaceBox],
     points: &[Point],
     slow_shutter: bool,
+    reader: Option<&Reader>,
 ) -> std::result::Result<Measures, String> {
     let (path, kind, turn) = cat.original(id).map_err(|e| format!("{e:#}"))?;
     let full = cat.full_size(id);
@@ -1449,7 +1600,7 @@ fn closer_look(
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     // Turned as its preview is: the faces' boxes and the focus points are on the photo as it stands.
     let img = crate::imaging::turned(loaded.image.map_err(|e| format!("{name}: {e}"))?, turn).to_rgb8();
-    let mut m = measure_taken(&img, faces, points, slow_shutter);
+    let mut m = measured_with(reader, &img, faces, points, slow_shutter);
     m.full = full.filter(|&f| f >= m.long);
     Ok(m)
 }
@@ -1515,6 +1666,8 @@ struct Measured {
     faces: bool,
     /// The catalog had its focus points.
     focus: bool,
+    /// The expression models were here to read its faces' eyes.
+    eyes: bool,
     m: Measures,
 }
 
@@ -1554,6 +1707,15 @@ fn fingerprints_of(db: &Connection, ids: &[i64]) -> Result<HashMap<i64, String>>
 fn looked_of(db: &Connection, ids: &[i64]) -> Result<HashSet<i64>> {
     let out = db
         .prepare("SELECT photo_id FROM face_scan WHERE photo_id IN (SELECT value FROM json_each(?1))")?
+        .query_map([serde_json::to_string(ids)?], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(out)
+}
+
+/// Those of these photos with faces found in them.
+fn with_faces_of(db: &Connection, ids: &[i64]) -> Result<HashSet<i64>> {
+    let out = db
+        .prepare("SELECT DISTINCT photo_id FROM faces WHERE photo_id IN (SELECT value FROM json_each(?1))")?
         .query_map([serde_json::to_string(ids)?], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(out)
@@ -2449,5 +2611,53 @@ mod tests {
         };
         assert!(shaky(Some("1/50"), Some(50.0)) && shaky(Some("2s"), Some(17.0)));
         assert!(!shaky(Some("1/125"), Some(35.0)) && !shaky(Some("1s"), None) && !shaky(None, Some(35.0)));
+    }
+
+    #[test]
+    fn eyes_summarise_the_faces_read() {
+        let face = |l: f32, r: f32, smile: f32| Read::Scored(Expression { blink: [l, r], smile, presence: 1.0 });
+        assert_eq!(eyes_of(&[]), None);
+        assert_eq!(eyes_of(&[Read::Small, Read::NoFace]), None, "no face read: nothing to say");
+        let eyes = eyes_of(&[face(0.1, 0.05, 0.6), Read::Small, face(0.8, 0.7, 0.2), Read::NoFace]).unwrap();
+        assert_eq!((eyes.faces, eyes.closed), (2, 1));
+        assert_eq!(eyes.blink, 0.7, "the most shut eyes, each face's less shut eye");
+        assert!((eyes.smile - 0.4).abs() < 1e-6, "{}", eyes.smile);
+    }
+
+    #[test]
+    fn a_photo_is_measured_again_when_what_it_was_measured_without_is_here() {
+        let fresh = Kept { measured: true, same_picture: true, ..Default::default() };
+        assert!(!stale(fresh));
+        assert!(stale(Kept { measured: false, ..fresh }));
+        assert!(stale(Kept { same_picture: false, ..fresh }), "another picture (turned, or another photo's id)");
+        assert!(stale(Kept { without_faces: true, looked: true, ..fresh }));
+        assert!(!stale(Kept { without_faces: true, ..fresh }), "faces not looked for yet");
+        assert!(stale(Kept { without_focus: true, pointed: true, ..fresh }));
+        assert!(!stale(Kept { without_focus: true, ..fresh }));
+        // Measured without the expression models: again once they are here, if it has faces to read.
+        let eyeless = Kept { without_eyes: true, ..fresh };
+        assert!(stale(Kept { has_faces: true, models: true, ..eyeless }));
+        assert!(!stale(Kept { has_faces: false, models: true, ..eyeless }), "no faces to read");
+        assert!(!stale(Kept { has_faces: true, models: false, ..eyeless }), "the models still aren't here");
+        assert!(!stale(Kept { has_faces: true, models: true, ..fresh }), "measured with them");
+    }
+
+    #[test]
+    fn measures_kept_before_eyes_still_read_and_eyes_are_kept() {
+        let mut old = serde_json::to_value(Measures { long: 1080, mean: 0.5, ..Default::default() }).unwrap();
+        old.as_object_mut().unwrap().remove("eyes");
+        let m: Measures = serde_json::from_value(old).unwrap();
+        assert_eq!((m.long, m.eyes), (1080, None));
+        let eyes = Eyes { faces: 2, closed: 1, blink: 0.7, smile: 0.4 };
+        let with = Measures { eyes: Some(eyes), ..Default::default() };
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(json.contains(r#""eyes":{"faces":2,"closed":1,"blink":0.7,"smile":0.4}"#), "{json}");
+        assert_eq!(serde_json::from_str::<Measures>(&json).unwrap(), with);
+        // A closer look's eyes, when it read them, else the preview's.
+        let preview = Measures { eyes: Some(Eyes { closed: 0, ..eyes }), ..Default::default() };
+        let q = |close: Option<Measures>| Quality { preview, close }.eyes();
+        assert_eq!(q(None), preview.eyes);
+        assert_eq!(q(Some(Measures::default())), preview.eyes);
+        assert_eq!(q(Some(with)), Some(eyes));
     }
 }

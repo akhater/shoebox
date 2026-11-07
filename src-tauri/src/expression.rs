@@ -38,6 +38,10 @@ const CROP: usize = 256;
 /// the forehead, chin and ears the mesh covers.
 const ROI_SCALE: f32 = 1.5;
 
+/// MediaPipe's scale from the box around a face's landmarks to the square it crops again (see
+/// [`mesh_roi`]): the landmarks reach the face's edges, the crop leaves a margin around them.
+const MESH_ROI_SCALE: f32 = 1.5;
+
 /// The square a face is read in: its centre and side in picture pixels, and the angle of the line
 /// between the eyes in the picture (radians, y down). The crop is turned by that angle so the eyes
 /// come out level.
@@ -60,7 +64,7 @@ fn roi(face: &Face) -> Roi {
 }
 
 /// The square a face is read in again, from its 478 landmarks in picture pixels: centred on the
-/// box around them, `ROI_SCALE` times its long side, levelled along the line from the outer corner
+/// box around them, [`MESH_ROI_SCALE`] times its long side, levelled along the line from the outer corner
 /// of the eye on the image's left (landmark 33) to the other's (263). It is what MediaPipe does
 /// when it tracks a face: the detector's box here (SCRFD's) isn't the one MediaPipe's crop was made
 /// for (BlazeFace's), so the crop is taken again from the face's own landmarks.
@@ -73,7 +77,7 @@ fn mesh_roi(points: &[(f32, f32)]) -> Roi {
     Roi {
         cx: (x1 + x2) / 2.0,
         cy: (y1 + y2) / 2.0,
-        side: ROI_SCALE * (x2 - x1).max(y2 - y1),
+        side: MESH_ROI_SCALE * (x2 - x1).max(y2 - y1),
         angle: (by - ay).atan2(bx - ax),
     }
 }
@@ -132,9 +136,15 @@ pub struct Expression {
 }
 
 impl Expression {
-    /// Both eyes are closed: a wink, or one eye hidden, is not.
+    /// How shut the face's eyes are, 0..1: its less shut eye's score, so a wink, or one eye
+    /// hidden, reads as open.
+    pub fn shut(&self) -> f32 {
+        self.blink[0].min(self.blink[1])
+    }
+
+    /// The eyes are closed: [`Self::shut`] reaches [`CLOSED`].
     pub fn closed(&self) -> bool {
-        self.blink[0].min(self.blink[1]) >= CLOSED
+        self.shut() >= CLOSED
     }
 }
 
@@ -287,6 +297,11 @@ const RETRY: Duration = Duration::from_secs(60);
 /// (logged once a minute at most).
 pub fn shared() -> Option<Arc<Reader>> {
     let mut s = SHARED.lock().unwrap();
+    if !crate::models::ready(crate::models::EXPRESSIONS) {
+        // Deleted, or being deleted: a reader loaded again after unload() lets go of the files too.
+        s.reader = None;
+        return None;
+    }
     if let Some(reader) = s.reader.clone() {
         let on_gpu = reader.mesh_gpu || reader.blend_gpu;
         if !on_gpu || s.checked.is_some_and(|t| t.elapsed() < RETRY) {
@@ -299,8 +314,7 @@ pub fn shared() -> Option<Arc<Reader>> {
         // Gone wrong on the GPU since it was loaded: loaded again, checked again.
         s.reader = None;
     }
-    let runtime = crate::models::runtime_ready() || crate::ai::runtime_in_use().is_some();
-    if !runtime || !crate::models::ready(crate::models::EXPRESSIONS) {
+    if !available() {
         return None;
     }
     if s.failed.is_some_and(|t| t.elapsed() < RETRY) {
@@ -319,6 +333,13 @@ pub fn shared() -> Option<Arc<Reader>> {
             None
         }
     }
+}
+
+/// The models and the AI runtime are here: [`shared`] gives a reader (unless loading it fails).
+/// Cheap: it loads nothing.
+pub fn available() -> bool {
+    let runtime = crate::models::runtime_ready() || crate::ai::runtime_in_use().is_some();
+    runtime && crate::models::ready(crate::models::EXPRESSIONS)
 }
 
 /// Lets go of the models (they are being deleted). A look in progress keeps its own hold on them
@@ -430,6 +451,9 @@ mod tests {
         assert!(!e(0.9, CLOSED - 0.01).closed(), "a wink is not closed eyes");
         assert!(!e(0.1, 0.9).closed());
         assert!(!e(0.05, 0.1).closed());
+        // How shut a face's eyes are is its less shut eye's score.
+        assert_eq!(e(0.9, 0.3).shut(), 0.3);
+        assert_eq!(e(0.2, 0.7).shut(), 0.2);
     }
 
     #[test]
@@ -446,7 +470,7 @@ mod tests {
         assert!((r.cx - c.0).abs() < 1e-3 && (r.cy - c.1).abs() < 1e-3, "{} {}", r.cx, r.cy);
         // The box around a turned square is wider than the square: 100 (cos + sin) on each side.
         let boxed = 2.0 * half * (cos + sin);
-        assert!((r.side - ROI_SCALE * boxed).abs() < 1e-3, "{}", r.side);
+        assert!((r.side - MESH_ROI_SCALE * boxed).abs() < 1e-3, "{}", r.side);
         assert!((r.angle - angle).abs() < 1e-5);
     }
 
