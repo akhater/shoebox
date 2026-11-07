@@ -513,6 +513,22 @@ fn closed_eyes_are_read_with_the_measures() {
     assert_eq!((eyes(ids[0], true).closed, eyes(ids[1], true).closed), (0, 1));
     assert_eq!(quality.get(ids[1]).unwrap().eyes().map(|e| e.closed), Some(1));
 
+    // Turned a quarter clockwise, as the user turns a photo: its preview and
+    // its faces' boxes turn with it, and the original is read turned. Its
+    // eyes read as they did upright, from the preview and on a closer look.
+    let upright = (eyes(ids[1], false), eyes(ids[1], true));
+    shoebox_lib::turn::turn(&cat, &[(ids[1], 1)]).unwrap();
+    // Looked at for faces again (the turn asks for it): as found, the same face.
+    cat.db().execute("INSERT INTO face_scan (photo_id, model, faces) VALUES (?1, 'test', 1)", [ids[1]]).unwrap();
+    assert_eq!(quality.measure(&cat, &ids, &never, &|_, _| {}).unwrap(), 1);
+    assert!(quality.get(ids[1]).unwrap().close.is_none(), "the closer look was of the picture upright");
+    assert_eq!(quality.look_closer(&cat, &ids, &never, &|_, _| {}).unwrap(), 1);
+    let turned = (eyes(ids[1], false), eyes(ids[1], true));
+    for (upright, turned) in [(upright.0, turned.0), (upright.1, turned.1)] {
+        assert_eq!((turned.faces, turned.closed), (upright.faces, upright.closed), "{turned:?} vs {upright:?}");
+        assert!((turned.blink - upright.blink).abs() < 0.15, "{turned:?} vs {upright:?}");
+    }
+
     drop((quality, cat));
     let _ = std::fs::remove_dir_all(&base);
 }

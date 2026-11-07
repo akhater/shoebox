@@ -298,8 +298,9 @@ const RETRY: Duration = Duration::from_secs(60);
 pub fn shared() -> Option<Arc<Reader>> {
     let mut s = SHARED.lock().unwrap();
     if !crate::models::ready(crate::models::EXPRESSIONS) {
-        // Deleted, or being deleted: a reader loaded again after unload() lets go of the files too.
-        s.reader = None;
+        // Deleted, or being deleted: a reader loaded again after unload() lets go of the files too,
+        // and a load that failed is forgotten (files downloaded again get a fresh try).
+        *s = Shared::default();
         return None;
     }
     if let Some(reader) = s.reader.clone() {
@@ -314,8 +315,7 @@ pub fn shared() -> Option<Arc<Reader>> {
         // Gone wrong on the GPU since it was loaded: loaded again, checked again.
         s.reader = None;
     }
-    let runtime = crate::models::runtime_ready() || crate::ai::runtime_in_use().is_some();
-    if !runtime {
+    if !runtime_here() {
         return None;
     }
     if s.failed.is_some_and(|t| t.elapsed() < RETRY) {
@@ -334,6 +334,25 @@ pub fn shared() -> Option<Arc<Reader>> {
             None
         }
     }
+}
+
+fn runtime_here() -> bool {
+    crate::models::runtime_ready() || crate::ai::runtime_in_use().is_some()
+}
+
+/// Whether [`shared`] would give a reader, told without loading or checking anything: for a view,
+/// which must cost what it shows. A load or check in progress (the reader is busy) counts as
+/// usable; the next look at photos decides.
+pub fn usable() -> bool {
+    let Ok(s) = SHARED.try_lock() else { return true };
+    let files = || crate::models::ready(crate::models::EXPRESSIONS) && runtime_here();
+    usable_with(s.reader.is_some(), files, s.failed.is_some())
+}
+
+/// A reader is loaded, or the files and runtime are here (`files`, asked only when needed) and
+/// loading them hasn't failed since they came.
+fn usable_with(loaded: bool, files: impl FnOnce() -> bool, failed: bool) -> bool {
+    loaded || (!failed && files())
 }
 
 /// Lets go of the models (they are being deleted). A look in progress keeps its own hold on them
@@ -411,6 +430,16 @@ mod tests {
         }
         // The square's top-left corner is at (-45, -45) in the picture.
         assert_eq!(at(0, 0), [0.0; 3]);
+    }
+
+    #[test]
+    fn models_are_usable_when_loaded_or_here_and_not_failing() {
+        let never = || -> bool { panic!("files looked at while a reader is loaded") };
+        assert!(usable_with(true, never, false));
+        assert!(usable_with(true, never, true), "loaded since a failure");
+        assert!(usable_with(false, || true, false), "here, not tried yet");
+        assert!(!usable_with(false, || true, true), "here, but they failed to load");
+        assert!(!usable_with(false, || false, false), "not here");
     }
 
     #[test]

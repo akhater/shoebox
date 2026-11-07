@@ -885,19 +885,23 @@ fn measured_with(
 /// What decides whether a photo's measures still hold ([`stale`]).
 #[derive(Clone, Copy, Debug, Default)]
 struct Kept {
-    /// It has measures, of the picture its preview shows now.
+    /// It has measures.
     measured: bool,
+    /// They are of the picture its preview shows now.
     same_picture: bool,
-    /// They were taken before its faces were looked for, before the catalog
-    /// had its focus points, without the expression models.
+    /// They were taken before its faces were looked for.
     without_faces: bool,
+    /// They were taken before the catalog had its focus points.
     without_focus: bool,
+    /// They were taken without the expression models.
     without_eyes: bool,
-    /// Now its faces have been looked for, the catalog has its focus points,
-    /// it has faces, the expression models are here and load.
+    /// Its faces have been looked for now.
     looked: bool,
+    /// The catalog has its focus points now.
     pointed: bool,
+    /// It has faces.
     has_faces: bool,
+    /// The expression models can read faces now.
     models: bool,
 }
 
@@ -1183,7 +1187,10 @@ impl QualityIndex {
     ) -> Result<usize> {
         self.ready.wait()?;
         // Private photos' previews can only be read while their space is open.
-        let todo = self.pending(cat, &cat.shown_ids(ids)?)?;
+        // The models count as here only when they load (they run next anyway):
+        // models that fail to load send no photo to be measured again.
+        let models = crate::expression::shared().is_some();
+        let todo = self.pending(cat, &cat.shown_ids(ids)?, models)?;
         if todo.is_empty() {
             return Ok(0);
         }
@@ -1235,12 +1242,10 @@ impl QualityIndex {
 
     /// Those of `ids` [`Self::measure`] would measure (with a preview), in
     /// their order, with what their preview shows. Per photo, through
-    /// indexes: a view costs what it shows.
-    fn pending(&self, cat: &Catalog, ids: &[i64]) -> Result<Vec<(i64, String)>> {
+    /// indexes: a view costs what it shows. `models`: the expression models
+    /// can read faces now.
+    fn pending(&self, cat: &Catalog, ids: &[i64], models: bool) -> Result<Vec<(i64, String)>> {
         let mut todo = Vec::new();
-        // The models count as here only when they load: models that fail to
-        // load leave nothing to measure again, rather than the same photos each time.
-        let models = crate::expression::shared().is_some();
         for chunk in ids.chunks(500) {
             let (shown, looked, pointed, with_faces) = {
                 let db = cat.read()?;
@@ -1453,25 +1458,26 @@ impl QualityIndex {
         reader: Option<&Reader>,
     ) -> Result<()> {
         // A photo not measured from its preview yet is now, so it has a row.
-        let missing: Vec<Measured> = {
+        // Measured once the measures are let go: the models take a while.
+        let missing: Vec<&(i64, Measures)> = {
             let measured = self.measured.read().unwrap();
-            found
-                .iter()
-                .filter(|(id, _)| !measured.contains_key(id))
-                .filter_map(|(id, close)| {
-                    let img = cat.open_copy(&cat.data.preview_path(*id)).ok()?.to_rgb8();
-                    let m = measured_with(reader, &img, of(faces, id), of(points, id), close.slow_shutter);
-                    Some(Measured {
-                        id: *id,
-                        fingerprint: fingerprints.get(id)?.clone(),
-                        faces: faces.contains_key(id),
-                        focus: points.contains_key(id),
-                        eyes: reader.is_some(),
-                        m,
-                    })
-                })
-                .collect()
+            found.iter().filter(|(id, _)| !measured.contains_key(id)).collect()
         };
+        let missing: Vec<Measured> = missing
+            .into_iter()
+            .filter_map(|(id, close)| {
+                let img = cat.open_copy(&cat.data.preview_path(*id)).ok()?.to_rgb8();
+                let m = measured_with(reader, &img, of(faces, id), of(points, id), close.slow_shutter);
+                Some(Measured {
+                    id: *id,
+                    fingerprint: fingerprints.get(id)?.clone(),
+                    faces: faces.contains_key(id),
+                    focus: points.contains_key(id),
+                    eyes: reader.is_some(),
+                    m,
+                })
+            })
+            .collect();
         self.store_previews(&missing)?;
         {
             let mut db = self.db.lock().unwrap();
@@ -1519,7 +1525,9 @@ impl QualityIndex {
             (faces_of(&db, &list.ids)?, points_of(&db, &list.ids)?)
         };
         let vectors = search.vectors(&list.ids);
-        let to_measure = self.pending(cat, &list.ids)?.into_iter().map(|(id, _)| id).collect();
+        // Whether the models would read faces, told without loading them: a view costs what it shows.
+        let models = crate::expression::usable();
+        let to_measure = self.pending(cat, &list.ids, models)?.into_iter().map(|(id, _)| id).collect();
         let measured = self.measured.read().unwrap();
         let frames: Vec<FrameIn> = list
             .ids
