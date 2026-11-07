@@ -293,14 +293,15 @@
 //!                                         originals it couldn't read are listed under "unreadable", with why
 //!   shoebox-cli cull-accept [filters] [scope]   mark for deletion what Cull suggests rejecting
 //!                                         (frames not marked yet)
-//!   shoebox-cli eyes <photo-id> [--original]   what the expression models read on a photo's
+//!   shoebox-cli eyes <photo-id>... [--original]   what the expression models read on a photo's
 //!                                         faces, face by face: its "box" (0..1), its width in "px",
 //!                                         and its "read": "scored" with "blink" (the person's left
 //!                                         eye, then right; 0 open to 1 shut), "smile", "presence" and
 //!                                         "closed" (both eyes); or why it wasn't: "small", "noFace",
 //!                                         "noPoints", "failed". "eyes" sums them up as Cull keeps
 //!                                         them. From the preview; --original reads the original as
-//!                                         a closer look does (half size, read-only; its disk plugged in)
+//!                                         a closer look does (half size, read-only; its disk plugged in).
+//!                                         Several photos: one line of JSON each, or its "error"
 
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::db::stored_rel;
@@ -1160,14 +1161,24 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some("eyes") => {
-            // shoebox-cli eyes <photo-id> [--original]
+            // shoebox-cli eyes <photo-id>... [--original]
             let original = args[1..].iter().any(|a| a == "--original");
-            let id: i64 = args[1..]
-                .iter()
-                .find(|a| *a != "--original")
-                .ok_or_else(|| anyhow::anyhow!("eyes <photo-id> [--original]"))?
-                .parse()?;
-            println!("{}", serde_json::to_string_pretty(&cull::eyes_report(&cat, id, original)?)?);
+            let ids =
+                args[1..].iter().filter(|a| *a != "--original").map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+            match ids[..] {
+                [] => anyhow::bail!("eyes <photo-id>... [--original]"),
+                [id] => println!("{}", serde_json::to_string_pretty(&cull::eyes_report(&cat, id, original)?)?),
+                // One line per photo, as each is read; a photo that can't be read says why.
+                _ => {
+                    for id in ids {
+                        let line = match cull::eyes_report(&cat, id, original) {
+                            Ok(r) => serde_json::to_string(&r)?,
+                            Err(e) => serde_json::json!({ "id": id, "error": format!("{e:#}") }).to_string(),
+                        };
+                        println!("{line}");
+                    }
+                }
+            }
         }
         Some("delete-marked") => {
             let token = args.get(1).ok_or_else(|| anyhow::anyhow!("delete-marked <token> [volume-id...]"))?;
