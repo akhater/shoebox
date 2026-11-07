@@ -1187,10 +1187,13 @@ impl QualityIndex {
     ) -> Result<usize> {
         self.ready.wait()?;
         // Private photos' previews can only be read while their space is open.
-        // The models count as here only when they load (they run next anyway):
-        // models that fail to load send no photo to be measured again.
-        let models = crate::expression::shared().is_some();
-        let todo = self.pending(cat, &cat.shown_ids(ids)?, models)?;
+        // Whether the models can read faces is told without loading them: the
+        // viewer asks about one photo at a time, mostly with nothing to measure.
+        // They load below, once there is. Models that fail to load then leave
+        // the photos stored without eyes, and the failure kept makes them
+        // unusable (expression::usable), so nothing is sent to be measured
+        // again until their files change (`stale` with `models: false`).
+        let todo = self.pending(cat, &cat.shown_ids(ids)?, crate::expression::usable())?;
         if todo.is_empty() {
             return Ok(0);
         }
