@@ -5,15 +5,18 @@
 //! cropped around it, and a blendshapes model turns 146 of them into 52 scores, among them how
 //! closed each eye is and how much each side of the mouth smiles.
 //!
-//! This file starts with the geometry both models need and nothing else does: the square, levelled
-//! crop a face is shown to the mesh model in, and the way back from the crop to the picture.
-
-// The model run (added next to this geometry) is what uses these functions; until it lands only the
-// tests do.
-#![cfg_attr(not(test), allow(dead_code))]
+//! A face found by the face detector is cropped square and levelled around its eyes, the mesh
+//! model places its landmarks, they are brought back to the picture's pixels (as MediaPipe gives
+//! them), and the blendshapes model scores them. Faces too small to tell, or that the mesh model
+//! doesn't see as a face, are not scored.
 
 use crate::faces::bilinear;
+use anyhow::{Result, anyhow, bail};
 use image::RgbImage;
+use ort::session::Session;
+use ort::value::Tensor;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// A face found in a picture, in pixels of that picture. `kps` are InsightFace's five points in
 /// its order: the eye on the image's left (x, y), the eye on its right, the nose, the mouth's left
@@ -86,6 +89,217 @@ const SUBSET: [usize; 146] = [
     321, 323, 324, 332, 334, 336, 338, 356, 361, 362, 365, 373, 374, 375, 377, 378, 379, 380, 381, 382, 384, 385, 386,
     387, 388, 389, 390, 397, 398, 400, 402, 405, 409, 415, 454, 466, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477,
 ];
+
+/// Eyes this closed (the blendshapes' blink score, 0 open to 1 shut), both of them, are closed eyes.
+pub const CLOSED: f32 = 0.5;
+
+/// How sure the mesh model must be that it saw a face (0..1) for its landmarks to be read.
+const PRESENCE: f32 = 0.5;
+
+/// What a face's expression reads: how closed each eye is (MediaPipe's eyeBlinkLeft, then
+/// eyeBlinkRight), how much it smiles (both mouth corners' average), all 0..1, and how sure the mesh
+/// model was of a face.
+#[derive(Debug, Clone, Copy)]
+pub struct Expression {
+    pub blink: [f32; 2],
+    pub smile: f32,
+    pub presence: f32,
+}
+
+impl Expression {
+    /// Both eyes are closed: a wink, or one eye hidden, is not.
+    pub fn closed(&self) -> bool {
+        self.blink[0].min(self.blink[1]) >= CLOSED
+    }
+}
+
+/// What reading a face gave.
+#[derive(Debug, Clone, Copy)]
+pub enum Read {
+    Scored(Expression),
+    /// Narrower than [`MIN_FACE_PX`]: not read.
+    Small,
+    /// The mesh model saw no face there (a profile, a hidden face), or its points make no face.
+    NoFace,
+}
+
+/// What can be told before the models run: a face too small to read, or one without two eyes to
+/// level its crop by.
+fn unreadable(face: &Face) -> Option<Read> {
+    if face.bbox[2] - face.bbox[0] < MIN_FACE_PX {
+        return Some(Read::Small);
+    }
+    let k = &face.kps;
+    let eyes = (k[2] - k[0]).hypot(k[3] - k[1]);
+    if face.bbox.iter().chain(k).any(|v| !v.is_finite()) || eyes < 1.0 {
+        return Some(Read::NoFace);
+    }
+    None
+}
+
+/// The two models, loaded: the face mesh and the blendshapes. Can be used from several threads at
+/// once; each model runs one face at a time.
+pub struct Reader {
+    landmarks: Mutex<Session>,
+    blendshapes: Mutex<Session>,
+    mesh_in: String,
+    blend_in: String,
+    mesh_gpu: bool,
+    blend_gpu: bool,
+}
+
+impl Reader {
+    pub fn load() -> Result<Self> {
+        crate::models::require(crate::models::EXPRESSIONS)?;
+        let (landmarks, blendshapes) = crate::models::expression_models();
+        Self::with(crate::ai::session(&landmarks)?, crate::ai::session(&blendshapes)?)
+    }
+
+    /// From the sessions, each with whether it runs on the GPU. Inputs and outputs are taken by
+    /// position: the mesh's landmarks first, its face presence second.
+    fn with((landmarks, mesh_gpu): (Session, bool), (blendshapes, blend_gpu): (Session, bool)) -> Result<Self> {
+        let input =
+            |s: &Session, what| s.inputs.first().map(|i| i.name.clone()).ok_or_else(|| anyhow!("{what} has no input"));
+        if landmarks.outputs.len() < 2 {
+            bail!("the face mesh model has {} outputs, not landmarks and face presence", landmarks.outputs.len());
+        }
+        Ok(Self {
+            mesh_in: input(&landmarks, "the face mesh model")?,
+            blend_in: input(&blendshapes, "the blendshapes model")?,
+            landmarks: Mutex::new(landmarks),
+            blendshapes: Mutex::new(blendshapes),
+            mesh_gpu,
+            blend_gpu,
+        })
+    }
+
+    /// Where the models run, for the log.
+    fn on(&self) -> String {
+        let at = |gpu| if gpu { "GPU" } else { "CPU" };
+        if self.mesh_gpu == self.blend_gpu {
+            at(self.mesh_gpu).into()
+        } else {
+            format!("face mesh on the {}, blendshapes on the {}", at(self.mesh_gpu), at(self.blend_gpu))
+        }
+    }
+
+    /// False when a model on the GPU has gone wrong since it was loaded.
+    fn still_right(&self) -> bool {
+        let (landmarks, blendshapes) = crate::models::expression_models();
+        (!self.mesh_gpu || crate::ai::still_right(&landmarks, &mut self.landmarks.lock().unwrap()))
+            && (!self.blend_gpu || crate::ai::still_right(&blendshapes, &mut self.blendshapes.lock().unwrap()))
+    }
+
+    /// Reads a face of `img`, as the face detector found it there.
+    pub fn read(&self, img: &RgbImage, face: &Face) -> Result<Read> {
+        if let Some(r) = unreadable(face) {
+            return Ok(r);
+        }
+        let (points, presence) = self.landmarks(img, &roi(face))?;
+        // A logit that isn't a number gives no presence: no face.
+        if presence.is_nan() || presence < PRESENCE {
+            return Ok(Read::NoFace);
+        }
+        let s = self.blendshapes(points)?;
+        Ok(Read::Scored(Expression { blink: [s[9], s[10]], smile: (s[44] + s[45]) / 2.0, presence }))
+    }
+
+    /// The face's 146 landmarks the blendshapes model takes (x, y in picture pixels, as MediaPipe
+    /// gives it), and how sure the mesh model is that the crop holds a face (0..1).
+    fn landmarks(&self, img: &RgbImage, roi: &Roi) -> Result<(Vec<f32>, f32)> {
+        let t = Tensor::from_array(([1usize, CROP, CROP, 3], crop(img, roi)))?;
+        let (mesh, logit) = {
+            let mut s = self.landmarks.lock().unwrap();
+            let out = s.run(ort::inputs![self.mesh_in.as_str() => t])?;
+            let (_, mesh) = out[0].try_extract_tensor::<f32>()?;
+            let (_, logit) = out[1].try_extract_tensor::<f32>()?;
+            let logit = *logit.first().ok_or_else(|| anyhow!("the face mesh model gave no face presence"))?;
+            (mesh.to_vec(), logit)
+        };
+        if mesh.len() != 478 * 3 {
+            bail!("the face mesh model gave {} numbers, not 478 landmarks", mesh.len());
+        }
+        let points = SUBSET
+            .iter()
+            .flat_map(|&i| {
+                let (x, y) = to_picture(roi, mesh[i * 3], mesh[i * 3 + 1]);
+                [x, y]
+            })
+            .collect();
+        Ok((points, 1.0 / (1.0 + (-logit).exp())))
+    }
+
+    /// The 52 blendshape scores (0..1, in MediaPipe's order) of the 146 landmarks.
+    fn blendshapes(&self, points: Vec<f32>) -> Result<Vec<f32>> {
+        let t = Tensor::from_array(([1usize, SUBSET.len(), 2], points))?;
+        let mut s = self.blendshapes.lock().unwrap();
+        let out = s.run(ort::inputs![self.blend_in.as_str() => t])?;
+        let (_, scores) = out[0].try_extract_tensor::<f32>()?;
+        if scores.len() != 52 {
+            bail!("the blendshapes model gave {} scores, not 52", scores.len());
+        }
+        Ok(scores.to_vec())
+    }
+}
+
+/// The reader every look at photos shares, and when it was last checked on the GPU, or last failed
+/// to load.
+#[derive(Default)]
+struct Shared {
+    reader: Option<Arc<Reader>>,
+    checked: Option<Instant>,
+    failed: Option<Instant>,
+}
+
+static SHARED: Mutex<Shared> = Mutex::new(Shared { reader: None, checked: None, failed: None });
+
+/// How often a reader on the GPU is checked again, and a failed load tried again.
+const RETRY: Duration = Duration::from_secs(60);
+
+/// The models, loaded on first use and shared. None when they or the AI runtime aren't here
+/// (downloaded later, they load on the next call), or when loading them failed in the last minute
+/// (logged once a minute at most).
+pub fn shared() -> Option<Arc<Reader>> {
+    let mut s = SHARED.lock().unwrap();
+    if let Some(reader) = s.reader.clone() {
+        let on_gpu = reader.mesh_gpu || reader.blend_gpu;
+        if !on_gpu || s.checked.is_some_and(|t| t.elapsed() < RETRY) {
+            return Some(reader);
+        }
+        s.checked = Some(Instant::now());
+        if reader.still_right() {
+            return Some(reader);
+        }
+        // Gone wrong on the GPU since it was loaded: loaded again, checked again.
+        s.reader = None;
+    }
+    let runtime = crate::models::runtime_ready() || crate::ai::runtime_in_use().is_some();
+    if !runtime || !crate::models::ready(crate::models::EXPRESSIONS) {
+        return None;
+    }
+    if s.failed.is_some_and(|t| t.elapsed() < RETRY) {
+        return None;
+    }
+    match Reader::load() {
+        Ok(reader) => {
+            log::info!("expressions: models loaded ({})", reader.on());
+            let reader = Arc::new(reader);
+            *s = Shared { reader: Some(reader.clone()), checked: Some(Instant::now()), failed: None };
+            Some(reader)
+        }
+        Err(e) => {
+            log::warn!("expressions: couldn't load the models: {e:#}");
+            s.failed = Some(Instant::now());
+            None
+        }
+    }
+}
+
+/// Lets go of the models (they are being deleted). A look in progress keeps its own hold on them
+/// until it ends.
+pub fn unload() {
+    *SHARED.lock().unwrap() = Shared::default();
+}
 
 #[cfg(test)]
 mod tests {
@@ -163,5 +377,162 @@ mod tests {
         assert_eq!(SUBSET.len(), 146);
         assert!(SUBSET.iter().all(|&i| i < 478));
         assert!(SUBSET.windows(2).all(|w| w[0] < w[1]), "ascending, so no point twice");
+    }
+
+    #[test]
+    fn small_faces_are_not_read() {
+        // No model is needed to turn these away: none is loaded here.
+        assert!(matches!(unreadable(&face(63.0, 80.0, 0.0)), Some(Read::Small)));
+        assert!(unreadable(&face(64.0, 80.0, 0.0)).is_none());
+        // Eyes on top of each other, or not numbers, give no line to level the crop by.
+        let mut f = face(100.0, 100.0, 0.0);
+        (f.kps[2], f.kps[3]) = (f.kps[0] + 0.5, f.kps[1]);
+        assert!(matches!(unreadable(&f), Some(Read::NoFace)));
+        let mut f = face(100.0, 100.0, 0.0);
+        f.kps[1] = f32::NAN;
+        assert!(matches!(unreadable(&f), Some(Read::NoFace)));
+        let mut f = face(100.0, 100.0, 0.0);
+        f.bbox[2] = f32::INFINITY;
+        assert!(matches!(unreadable(&f), Some(Read::NoFace)));
+    }
+
+    #[test]
+    fn closed_needs_both_eyes() {
+        let e = |l: f32, r: f32| Expression { blink: [l, r], smile: 0.0, presence: 1.0 };
+        assert!(e(CLOSED, CLOSED).closed());
+        assert!(e(0.9, 0.95).closed());
+        assert!(!e(0.9, CLOSED - 0.01).closed(), "a wink is not closed eyes");
+        assert!(!e(0.1, 0.9).closed());
+        assert!(!e(0.05, 0.1).closed());
+    }
+
+    /// The test faces: CC0 portraits, boxes and points measured by hand (tests/fixtures/faces).
+    const OPEN: Face = Face {
+        bbox: [78.0, 95.0, 205.0, 255.0],
+        kps: [102.0, 152.0, 158.0, 150.0, 128.0, 185.0, 115.0, 213.0, 160.0, 212.0],
+    };
+    const SHUT: Face = Face {
+        bbox: [90.0, 70.0, 320.0, 400.0],
+        kps: [133.0, 140.0, 258.0, 176.0, 140.0, 235.0, 108.0, 295.0, 205.0, 320.0],
+    };
+
+    fn fixture(name: &str) -> RgbImage {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("faces");
+        image::open(path.join(name)).unwrap().to_rgb8()
+    }
+
+    /// The models, or none (with a note) when they or the runtime aren't here: CI has neither.
+    fn models() -> Option<Reader> {
+        if !crate::models::ready(crate::models::EXPRESSIONS) || !crate::models::runtime_ready() {
+            eprintln!("skipped: no expression models or AI runtime in {}", crate::paths::models_dir().display());
+            return None;
+        }
+        Some(Reader::load().unwrap())
+    }
+
+    fn scored(what: &str, r: Read) -> Expression {
+        let Read::Scored(e) = r else { panic!("{what}: {r:?}") };
+        eprintln!(
+            "{what}: blink L {:.3} R {:.3}, smile {:.3}, presence {:.3}",
+            e.blink[0], e.blink[1], e.smile, e.presence
+        );
+        e
+    }
+
+    fn min_blink(e: &Expression) -> f32 {
+        e.blink[0].min(e.blink[1])
+    }
+
+    #[test]
+    fn a_real_face_reads_open_eyes_and_a_smile() {
+        let Some(reader) = models() else { return };
+        let open = scored("open", reader.read(&fixture("eyes_open.jpg"), &OPEN).unwrap());
+        assert!(min_blink(&open) < 0.3 && !open.closed());
+        assert!(open.smile > 0.3, "she smiles");
+        assert!(open.presence > 0.5);
+    }
+
+    #[test]
+    fn a_real_face_reads_closed_eyes() {
+        let Some(reader) = models() else { return };
+        let shut = scored("closed", reader.read(&fixture("eyes_closed.jpg"), &SHUT).unwrap());
+        assert!(min_blink(&shut) > 0.5 && shut.closed());
+        assert!(shut.presence > 0.5);
+    }
+
+    /// The face and its points as image's rotate90 turns a picture `h` pixels tall: a quarter turn clockwise.
+    fn turned(f: &Face, h: f32) -> Face {
+        let turn = |x: f32, y: f32| (h - 1.0 - y, x);
+        let [x1, y1, x2, y2] = f.bbox;
+        let mut kps = f.kps;
+        for p in kps.chunks_mut(2) {
+            (p[0], p[1]) = turn(p[0], p[1]);
+        }
+        Face { bbox: [h - 1.0 - y2, x1, h - 1.0 - y1, x2], kps }
+    }
+
+    #[test]
+    fn a_turned_face_reads_as_upright() {
+        let Some(reader) = models() else { return };
+        for (name, face) in [("eyes_open.jpg", &OPEN), ("eyes_closed.jpg", &SHUT)] {
+            let img = fixture(name);
+            let upright = scored(name, reader.read(&img, face).unwrap());
+            let turned_img = image::imageops::rotate90(&img);
+            let turned = scored(
+                &format!("{name}, turned"),
+                reader.read(&turned_img, &turned(face, img.height() as f32)).unwrap(),
+            );
+            assert!((min_blink(&upright) - min_blink(&turned)).abs() < 0.15, "{name}");
+            assert!((upright.smile - turned.smile).abs() < 0.15, "{name}");
+        }
+    }
+
+    #[test]
+    fn blendshapes_take_points_at_any_scale_and_place() {
+        let Some(reader) = models() else { return };
+        for (name, face) in [("eyes_open.jpg", &OPEN), ("eyes_closed.jpg", &SHUT)] {
+            let (points, _) = reader.landmarks(&fixture(name), &roi(face)).unwrap();
+            let moved: Vec<f32> = points.chunks(2).flat_map(|p| [p[0] * 2.0 + 100.0, p[1] * 2.0 + 50.0]).collect();
+            let (a, b) = (reader.blendshapes(points).unwrap(), reader.blendshapes(moved).unwrap());
+            let off = a.iter().zip(&b).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+            eprintln!("{name}: scores at twice the size, moved, differ by at most {off:.4}");
+            assert!(off < 0.05);
+        }
+    }
+
+    #[test]
+    fn the_models_are_the_ones_expected() {
+        let Some(reader) = models() else { return };
+        assert_eq!(reader.mesh_in, "input_12");
+        assert_eq!(reader.blend_in, "serving_default_input_points:0");
+        let outputs = |s: &Mutex<Session>| s.lock().unwrap().outputs.iter().map(|o| o.name.clone()).collect::<Vec<_>>();
+        assert_eq!(outputs(&reader.landmarks)[..2], ["Identity", "Identity_1"]);
+        assert_eq!(outputs(&reader.blendshapes), ["StatefulPartitionedCall:0"]);
+    }
+
+    /// How long reading a face takes, on the CPU and (when it passes its check) the GPU.
+    #[test]
+    #[ignore = "timing, run by hand"]
+    fn time_a_read() {
+        let Some(gpu) = models() else { return };
+        let (landmarks, blendshapes) = crate::models::expression_models();
+        let cpu_session = |p: &std::path::Path| Session::builder().unwrap().commit_from_file(p).unwrap();
+        let cpu = Reader::with((cpu_session(&landmarks), false), (cpu_session(&blendshapes), false)).unwrap();
+        let img = fixture("eyes_open.jpg");
+        let mut readers = vec![("CPU", &cpu)];
+        if gpu.mesh_gpu || gpu.blend_gpu {
+            readers.push(("GPU", &gpu));
+        }
+        for (what, r) in readers {
+            for _ in 0..5 {
+                r.read(&img, &OPEN).unwrap();
+            }
+            let n = 50;
+            let t = std::time::Instant::now();
+            for _ in 0..n {
+                r.read(&img, &OPEN).unwrap();
+            }
+            eprintln!("{what}: {:.2} ms per face", t.elapsed().as_secs_f64() * 1000.0 / n as f64);
+        }
     }
 }
