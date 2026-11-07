@@ -164,13 +164,13 @@ folder instead.
    already scanned become part of it and are not read again.
 3. Repeat for each drive. Once scanned, a drive can be unplugged; when it is
    connected again, Shoebox notices and catches up on its own.
-4. For word search, people and sideways photos, open **Settings > AI models** and download the
+4. For word search, people, sideways photos and closed eyes, open **Settings > AI models** and download the
    models.
 
 ## AI models
 
-Word search, face recognition and finding sideways photos run entirely on
-your computer. The models
+Word search, face recognition, finding sideways photos and spotting closed
+eyes and smiles run entirely on your computer. The models
 are not bundled with the app: Shoebox downloads them on request from their
 original publishers and verifies each file against a pinned SHA-256 hash.
 
@@ -179,6 +179,7 @@ original publishers and verifies each file against a pinned SHA-256 hash.
 | Word search | CLIP ViT-B-32 (as packaged by Immich) | 581 MB |
 | Faces | InsightFace buffalo_l (as packaged by Immich) | 182 MB |
 | Sideways photos | Image orientation detector v2, EfficientNetV2 (Duarte Barbosa) | 81 MB |
+| Closed eyes and smiles (Cull) | MediaPipe Face Mesh V2 + Blendshapes (Google, Apache 2.0): the ONNX conversion by Fernando Tonon on Hugging Face of Google's `face_landmarker.task` | 6 MB |
 | AI runtime | Microsoft ONNX Runtime 1.22, on the GPU (DirectML, Windows only) or the CPU | |
 
 Download, verify or delete them in **Settings > AI models**, or with
