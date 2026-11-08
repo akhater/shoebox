@@ -1,0 +1,154 @@
+import { Columns3, X } from "lucide-react";
+import { memo, useMemo } from "react";
+import type { CullFrame, CullStack } from "../api";
+import { ComparePane } from "./ComparePane";
+import type { Spot } from "./CullPicture";
+import { FaceRows } from "./FaceRows";
+
+/**
+ * The frames compared: `n` of `order` (indices into a burst's frames) with
+ * `current` among them, from `from` on while `current` stays in view (null:
+ * from `current` on).
+ */
+export function compareSet(order: number[], current: number, from: number | null, n: number) {
+  const k = Math.min(n, order.length);
+  const p = Math.max(0, order.indexOf(current));
+  const start = Math.max(0, Math.min(Math.max(Math.min(from ?? p, p), p - k + 1), order.length - k));
+  return { from: start, frames: order.slice(start, start + k) };
+}
+
+/**
+ * Whether compare opens by itself on a shot: frames of a burst (not of a focus
+ * stack, all kept) with a face found in one of them at least. Its face rows
+ * are what compare adds to looking frame by frame, and people are what a
+ * burst is most often shot again for (eyes shut, expressions).
+ */
+export const opensItself = (s: CullStack) => s.kind === "shot" && s.frames.length > 1 && s.frames.some((f) => f.faces > 0);
+
+/**
+ * Cull's compare: frames of a burst side by side, each with what Cull says,
+ * at 100% together on the same spot; below, each face cut out of every frame.
+ * Marks, the frame looked at and 100% are Cull's own (CullView).
+ */
+export const CullCompare = memo(function CullCompare({
+  stack,
+  shown,
+  current,
+  isMarked,
+  zoom,
+  onLook,
+  onZoom,
+  onClose,
+}: {
+  stack: CullStack;
+  /** The frames compared, by index into the stack's. */
+  shown: number[];
+  /** The frame looked at (an index). */
+  current: number;
+  isMarked: (f: CullFrame) => boolean;
+  /** At 100%: where, for every frame. */
+  zoom: Spot | null;
+  /** Looks at a frame, by id. */
+  onLook: (id: number) => void;
+  onZoom: (s: Spot | null) => void;
+  onClose: () => void;
+}) {
+  const frames = useMemo(() => shown.map((i) => stack.frames[i]), [shown, stack]);
+  const starred = stack.frames.length > 1 && stack.kind !== "focus";
+  return (
+    <div className="cull-compare">
+      <button className="cull-compare-close" onClick={onClose} aria-label="Close compare" title="Close compare for this shoot (C or Esc)">
+        <X size={16} />
+      </button>
+      <div className="cull-panes">
+        {shown.map((i) => {
+          const f = stack.frames[i];
+          return (
+            <ComparePane
+              key={f.id}
+              frame={f}
+              number={i + 1}
+              total={stack.frames.length}
+              keeper={starred && i === stack.keeper}
+              marked={isMarked(f)}
+              current={i === current}
+              spot={zoom}
+              onLook={onLook}
+              onZoom={onZoom}
+            />
+          );
+        })}
+      </div>
+      <FaceRows frames={frames} current={stack.frames[current]?.id ?? null} onLook={onLook} />
+    </div>
+  );
+});
+
+/**
+ * Compare's switch, by the frames: its key on it, how to leave when on, and how
+ * many frames go side by side. A shot of one frame has nothing to compare.
+ */
+export const CompareSwitch = memo(function CompareSwitch({
+  on,
+  closed,
+  count,
+  frames,
+  selected,
+  onToggle,
+  onCount,
+}: {
+  on: boolean;
+  /** Closed where it would have opened by itself: says how to open it again. */
+  closed: boolean;
+  /** How many frames are compared (2 to 4). */
+  count: number;
+  /** How many frames the shot has. */
+  frames: number;
+  /** How many of them are selected. */
+  selected: number;
+  onToggle: () => void;
+  onCount: (n: number) => void;
+}) {
+  const shown = Math.min(count, frames);
+  return (
+    <span className={`cull-comparing ${on ? "on" : ""}`}>
+      {closed && <span className="cull-compare-note muted">Compare closed for this shoot · C opens it again</span>}
+      {on &&
+        (selected > 1 ? (
+          <span className="muted">Comparing the {selected} selected</span>
+        ) : (
+          <span className="cull-compare-count" role="group" aria-label="Frames side by side">
+            <span className="muted">Side by side</span>
+            {[2, 3, 4].map((n) => (
+              <button
+                key={n}
+                aria-pressed={n === shown}
+                disabled={n > frames}
+                onClick={() => onCount(n)}
+                title={n > frames ? `This shot has ${frames} frames` : `${n} frames side by side (${n})`}
+              >
+                {n}
+              </button>
+            ))}
+          </span>
+        ))}
+      <button
+        className={`btn small cull-compare-btn ${on ? "on" : "ghost"}`}
+        aria-pressed={on}
+        disabled={!on && frames < 2}
+        onClick={onToggle}
+        title={
+          on
+            ? "Close compare for this shoot (C or Esc)"
+            : frames < 2
+              ? "One frame in this shot: nothing to compare"
+              : "Frames side by side, with each face close up (C)"
+        }
+      >
+        {on ? <X size={14} /> : <Columns3 size={14} />}
+        {on ? "Close compare" : selected > 1 ? `Compare the ${selected} selected` : "Compare frames"}
+        <kbd>C</kbd>
+      </button>
+    </span>
+  );
+});

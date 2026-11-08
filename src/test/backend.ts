@@ -18,6 +18,7 @@ import type {
   PeopleCheck,
   Person,
   PhotoDetail,
+  PhotoFace,
   PhotoList,
   PhotoMoveAsk,
   PhotoMovePlan,
@@ -150,7 +151,13 @@ export function fakeBackend() {
   /** Names by password; an empty space's is forgotten once locked, as Shoebox does. */
   const names = new Map<string, string>();
   const status = () => ({ unlocked: open != null, photos: mine().size, name: (open != null && names.get(open)) || null });
-  let settings: Record<string, unknown> = { privateLockMinutes: 5, privateWarning: true, argentumPath: "" };
+  let settings: Record<string, unknown> = { privateLockMinutes: 5, privateWarning: true, argentumPath: "", askEyesModel: true };
+  /** AI models here (Settings > AI models); the runtime and Cull's eye model unless a test takes them away. */
+  const modelsHere = new Set(["runtime-gpu", "expressions"]);
+  const model = (id: string, size: number) => {
+    const here = modelsHere.has(id);
+    return { id, feature: id, name: id, about: "", publisher: "", licence: "", state: here ? "ready" : "missing", bytesHere: here ? size : 0, size, downloadBytes: here ? 0 : size, later: false, inUse: false };
+  };
   /** The Argentum found by itself. */
   let installedArgentum: string | null = "C:\\Apps\\Argentum\\Argentum.exe";
   /** Photos only on an unplugged disk. */
@@ -185,6 +192,10 @@ export function fakeBackend() {
   /** Photos Cull hasn't measured yet (a test sets them), with what it finds once asked (cull_flags). */
   const unmeasured = new Map<number, number>();
   const measuredAs = new Map<number, number>();
+  /** Bursts longer than the usual two frames (a test sets them): one shot each, its second frame the keeper. */
+  const bursts: number[][] = [];
+  /** The faces found in each photo (a test sets them). */
+  const facesIn = new Map<number, PhotoFace[]>();
   // The fourth photo of each source is blurry.
   const flagsOf = (id: number) => (unmeasured.has(id) ? 0 : (measuredAs.get(id) ?? (id % 10 === 4 ? 4 : 0)));
   let people: Person[] = [
@@ -346,6 +357,7 @@ export function fakeBackend() {
         h: 100,
         rev: 1,
         marked: marked.has(p.id),
+        faces: facesIn.get(p.id)?.length ?? 0,
         suggest: missed && suggest === "keep" ? "none" : suggest,
         reasons: missed ? [...reasons, "Focus missed: the camera focused here, but the sharpest part is elsewhere"] : reasons,
         problems: missed ? [...problems, "focusMissed"] : problems,
@@ -361,7 +373,13 @@ export function fakeBackend() {
     for (const p of ps) {
       const n = p.id % 10;
       const prev = stacks[stacks.length - 1];
-      if (n === 2 && prev?.frames[0].id === p.id - 1) {
+      const burst = bursts.find((b) => b.includes(p.id));
+      const k = burst?.indexOf(p.id) ?? -1;
+      if (k === 0) {
+        stacks.push({ frames: [frame(p, "reject", ["Same shot: frame 2 is better"])], keeper: 1, compared: "sharpest", closer: false, kind: "shot" });
+      } else if (k > 0) {
+        prev.frames.push(k === 1 ? frame(p, "keep", [`The best of these ${burst!.length} frames`]) : frame(p, "reject", ["Same shot: frame 2 is better"]));
+      } else if (n === 2 && prev?.frames[0].id === p.id - 1) {
         prev.frames[0] = { ...prev.frames[0], suggest: "reject", reasons: ["Same shot: frame 2 is better"] };
         prev.frames.push(frame(p, "keep", ["The best of these 2 frames"]));
         prev.keeper = 1;
@@ -557,6 +575,8 @@ export function fakeBackend() {
         return facets(a.scope as Scope);
       case "get_photo":
         return detail(a.id as number);
+      case "faces_in_photos":
+        return (a.photoIds as number[]).flatMap((id) => facesIn.get(id) ?? []);
       case "photo_faces":
       case "tags_on":
       case "tags_all":
@@ -751,6 +771,19 @@ export function fakeBackend() {
         return /argentum/i.test(a.path as string) ? a.path : null;
       case "open_argentum_page":
         return null;
+      case "models_list":
+        return { dir: "models", runtimeReady: modelsHere.has("runtime-gpu"), models: [model("runtime-gpu", 18_000_000), model("expressions", 6_015_685)] };
+      case "model_progress":
+        return null;
+      case "model_download": {
+        // Downloaded at once: half, then all of it.
+        const id = a.id as string;
+        const total = id === "expressions" ? 6_015_685 : 18_000_000;
+        modelsHere.add(id);
+        setTimeout(() => void emit("model-download", { id, done: total / 2, total, finished: false, error: null, queued: [] }), 20);
+        setTimeout(() => void emit("model-download", { id, done: total, total, finished: true, error: null, queued: [] }), 150);
+        return null;
+      }
       case "get_settings":
         return { ...settings };
       case "save_settings":
@@ -868,9 +901,14 @@ export function fakeBackend() {
     foundIn,
     /** Photos private under a password (its space), as a test sets them. */
     privateIn: (password: string, ids: number[]) => spaces.set(password, new Set([...(spaces.get(password) ?? []), ...ids])),
+    /** An AI model taken out of models\ ("expressions", "runtime-gpu"). */
+    withoutModel: (id: string) => modelsHere.delete(id),
     /** The private photos of a password now. */
     privateOf: (password: string) => [...(spaces.get(password) ?? [])].sort(),
     focusMissed,
+    /** Makes these photos one shot in Cull, the second the keeper. */
+    burst: (ids: number[]) => bursts.push(ids),
+    facesIn,
     /** What Cull says it couldn't read. */
     unreadableOriginals: (u: Shoot["unreadable"]) => {
       unreadable = u;

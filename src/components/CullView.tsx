@@ -4,13 +4,10 @@ import {
   memo,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
-  type ReactNode,
-  type RefObject,
 } from "react";
 import {
   cull,
@@ -23,14 +20,12 @@ import {
   type CullFrame,
   type CullStack,
   type Filters,
-  type Focus,
   type Scope,
   type Shoot,
 } from "../api";
+import { compareSet, CompareSwitch, CullCompare, opensItself } from "./CullCompare";
+import { clickedSpot, firstSpot, missedPoints, OnPicture, Zoomed, type Spot } from "./CullPicture";
 import { FocusPoints } from "./FocusPoints";
-
-/** Where the photo is looked at, at 100%: the point in the middle of the screen, 0..1 of the photo. */
-type Spot = { x: number; y: number };
 
 /** Where Z looks at 100% first, in words. */
 const firstLook = (f: CullFrame) => (f.focusPoints.length ? "where the camera focused" : f.focus ? "on the face" : "the middle");
@@ -42,9 +37,6 @@ const comparedAt: Record<CullStack["compared"], string> = {
   sharpest: "sharpest edges",
 };
 
-/** The camera's points, drawn on a frame whose focus missed them: where "the camera focused here" is. */
-const missedPoints = (f: CullFrame): Focus | null =>
-  f.problems.includes("focusMissed") && f.focusPoints.length ? { mode: null, points: f.focusPoints } : null;
 
 interface Props {
   scope: Scope;
@@ -59,6 +51,17 @@ interface Props {
 
 /** A row of the shots list, px. */
 const ROW = 76;
+
+/** How many frames compare shows, remembered (2 to 4). */
+const COMPARE_COUNT = "shoebox.cullCompare";
+const comparedCount = () => {
+  try {
+    const n = Number(localStorage.getItem(COMPARE_COUNT));
+    return n >= 2 && n <= 4 ? n : 3;
+  } catch {
+    return 3;
+  }
+};
 
 /** A click that adds to a selection, or extends it. */
 const howClicked = (e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) =>
@@ -80,7 +83,8 @@ const range = (a: number, b: number) => Array.from({ length: Math.abs(b - a) + 1
  * each frame says what Cull suggests and why. A reject is a mark for
  * deletion: nothing is deleted here. Z or a click shows the frame at 100%
  * from its original (Z where the camera focused, else on the main face), and
- * the next frame at the same spot, to compare sharpness.
+ * the next frame at the same spot, to compare sharpness. C compares frames
+ * side by side, with their faces (CullCompare).
  */
 export const CullView = memo(function CullView({ scope, filters, title, onClose, onChanged, onError }: Props) {
   const [shoot, setShoot] = useState<Shoot | null>(null);
@@ -98,6 +102,21 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
   // Selected frames (of the shot shown), and selected shots: X and P act on them all.
   const [selFrames, setSelFrames] = useState<Set<number>>(() => new Set());
   const [selShots, setSelShots] = useState<Set<number>>(() => new Set());
+  // Compare: frames side by side, how many. "auto": open where it helps (`opensItself`), until
+  // closed; then shut for the rest of the shoot, until opened again.
+  const [mode, setMode] = useState<"auto" | "on" | "off">("auto");
+  const [count, setCount] = useState(comparedCount);
+  const chooseCount = useCallback((n: number) => {
+    setCount(n);
+    try {
+      localStorage.setItem(COMPARE_COUNT, String(n));
+    } catch {
+      /* not remembered */
+    }
+  }, []);
+  const comparing = useRef(false);
+  const toggleCompare = useCallback(() => setMode(comparing.current ? "off" : "on"), []);
+  const closeCompare = useCallback(() => setMode("off"), []);
 
   // Only the latest answer counts.
   const seq = useRef(0);
@@ -107,6 +126,8 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
       .shoot(scope, filters)
       .then((s) => {
         if (n !== seq.current) return;
+        // Opened: on the first shot's keeper from the first frame drawn (compare opens there).
+        if (atId.current == null) setAt({ stack: 0, frame: s.stacks[0]?.keeper ?? 0 });
         setShoot(s);
         setFailed(null);
         setMine(new Map());
@@ -157,6 +178,22 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
 
   const stack: CullStack | undefined = stacks[Math.min(at.stack, stacks.length - 1)];
   const frame = stack?.frames[Math.min(at.frame, stack.frames.length - 1)];
+  const compare = !!stack && stack.frames.length > 1 && (mode === "on" || (mode === "auto" && opensItself(stack)));
+  comparing.current = compare;
+
+  // The frames compared: those selected (up to 4), else `count` from the one looked at on. They stay
+  // while the one looked at moves among them, and slide when it goes past them.
+  const compared = useRef<{ key: string; from: number }>({ key: "", from: 0 });
+  const shown = useMemo(() => {
+    if (!compare || !stack) return null;
+    const selected = stack.frames.flatMap((f, i) => (selFrames.has(f.id) ? [i] : []));
+    const order = selected.length > 1 ? selected : stack.frames.map((_, i) => i);
+    const key = `${at.stack}|${selected.length > 1 ? selected.join(",") : ""}`;
+    const last = compared.current;
+    const set = compareSet(order, at.frame, last.key === key ? last.from : null, selected.length > 1 ? 4 : count);
+    compared.current = { key, from: set.from };
+    return { order, frames: set.frames };
+  }, [compare, stack, at, selFrames, count]);
 
   /** Goes to a frame (and stays on it when the shoot is reloaded). Another shot drops the frames selected. */
   const go = useCallback(
@@ -228,14 +265,35 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
     if (at.frame > 0) go(at.stack, at.frame - 1);
     else if (at.stack > 0) go(at.stack - 1, stacks[at.stack - 1].frames.length - 1);
   }, [at, stacks, go]);
+  /** The next or previous frame: among those selected while they are compared. */
+  const step = useCallback(
+    (by: 1 | -1) => {
+      if (shown && selFrames.size > 1) {
+        const to = shown.order[shown.order.indexOf(at.frame) + by];
+        if (to != null) go(at.stack, to);
+      } else if (by > 0) next();
+      else previous();
+    },
+    [shown, selFrames, at, go, next, previous],
+  );
+  /** Looks at a frame of the shot shown, by id (the selection stays). */
+  const lookAt = useCallback(
+    (id: number) => {
+      const i = stack?.frames.findIndex((f) => f.id === id) ?? -1;
+      if (i >= 0) go(at.stack, i);
+    },
+    [stack, at.stack, go],
+  );
 
-  /** The frames X and P act on: those selected, else those of the shots selected, else the one shown. */
+  /** The frames X and P act on: those selected, else those of the shots selected, else the one shown
+   *  (the one looked at, when comparing). */
   const targets = useCallback((): CullFrame[] => {
     if (!stack || !frame) return [];
+    if (compare) return [frame];
     if (selFrames.size) return stack.frames.filter((f) => selFrames.has(f.id));
     if (selShots.size) return [...selShots].sort((a, b) => a - b).flatMap((s) => stacks[s]?.frames ?? []);
     return [frame];
-  }, [stack, frame, selFrames, selShots, stacks]);
+  }, [stack, frame, compare, selFrames, selShots, stacks]);
   const several = selFrames.size > 0 || selShots.size > 0;
   const clearSelection = useCallback(() => {
     setSelFrames(new Set());
@@ -252,10 +310,10 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
         fr.map((f) => f.id),
         marked,
       );
-      if (several) clearSelection();
-      else if (marked || !reject) next();
+      if (several && !compare) clearSelection();
+      else if (marked || !reject) step(1);
     },
-    [targets, isMarked, mark, several, clearSelection, next],
+    [targets, isMarked, mark, several, compare, clearSelection, step],
   );
 
   const clickFrame = useCallback(
@@ -295,15 +353,11 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
   );
 
   // 100%: Z toggles it, where the camera focused (else on the main face, or the middle); a click on the photo goes there.
-  const zoomOn = useCallback(() => setZoom(frame?.focus ? { x: frame.focus[0], y: frame.focus[1] } : { x: 0.5, y: 0.5 }), [frame]);
+  const zoomOn = useCallback(() => frame && setZoom(firstSpot(frame)), [frame]);
   const clickPhoto = (e: ReactMouseEvent<HTMLDivElement>) => {
-    const img = e.currentTarget.querySelector("img");
-    const r = img?.getBoundingClientRect();
-    if (!r || !r.width || !r.height) return zoomOn();
-    const x = (e.clientX - r.left) / r.width;
-    const y = (e.clientY - r.top) / r.height;
-    if (x < 0 || x > 1 || y < 0 || y > 1) return zoomOn();
-    setZoom({ x, y });
+    const spot = clickedSpot(e);
+    if (spot) setZoom(spot);
+    else zoomOn();
   };
 
   // At 100%, the frames before and after are read ahead (kept a while by the browser).
@@ -320,9 +374,10 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
       if (e.key === "Escape") {
-        // A selection first, then 100%, then Cull itself.
+        // A selection first, then 100%, then compare, then Cull itself.
         if (several) clearSelection();
         else if (zoom) setZoom(null);
+        else if (compare) setMode("off");
         else onClose();
         e.preventDefault();
         return;
@@ -337,10 +392,10 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       switch (e.key) {
         case "ArrowRight":
-          next();
+          step(1);
           break;
         case "ArrowLeft":
-          previous();
+          step(-1);
           break;
         case "ArrowDown":
           goStack(at.stack + 1);
@@ -374,6 +429,17 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
           if (zoom) setZoom(null);
           else zoomOn();
           break;
+        case "c":
+        case "C":
+          if (!compare && stack.frames.length < 2) return;
+          toggleCompare();
+          break;
+        case "2":
+        case "3":
+        case "4":
+          if (!compare) return;
+          chooseCount(Number(e.key));
+          break;
         default:
           return;
       }
@@ -381,7 +447,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [stack, at, stacks, zoom, several, next, previous, goStack, act, accept, zoomOn, clearSelection, onClose]);
+  }, [stack, at, stacks, zoom, several, compare, step, goStack, act, accept, zoomOn, clearSelection, chooseCount, toggleCompare, onClose]);
 
   if (failed) {
     return (
@@ -426,7 +492,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
   const missed = missedPoints(frame);
   const lookable = shoot.canLookCloser.length;
   const chosen = targets();
-  const n = several ? ` ${fmtNum(chosen.length)}` : "";
+  const n = several && !compare ? ` ${fmtNum(chosen.length)}` : "";
   return (
     <div className="cull">
       <div className="cull-head">
@@ -434,7 +500,12 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
           <b>{fmtNum(stacks.length)}</b> shots · {fmtNum(shoot.photos)} photos ·{" "}
           <span className="cull-count rejected">{fmtNum(counts.marked)} rejected</span>
         </span>
-        {several && <span className="cull-selected">{fmtNum(chosen.length)} selected · X or P for all · Esc to clear</span>}
+        {several &&
+          (compare ? (
+            <span className="cull-selected">Comparing the frames selected · Esc to clear</span>
+          ) : (
+            <span className="cull-selected">{fmtNum(chosen.length)} selected · X or P for all · Esc to clear</span>
+          ))}
         {shoot.measured < shoot.photos && (
           <span className="muted">
             <LoaderCircle size={13} className="spinning" /> Measuring: {fmtNum(shoot.measured)} of {fmtNum(shoot.photos)}
@@ -489,7 +560,18 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
       <div className="cull-body">
         <ShotList stacks={stacks} current={at.stack} selected={selShots} isMarked={isMarked} onClick={clickShot} />
         <div className="cull-main">
-          {zoom ? (
+          {shown ? (
+            <CullCompare
+              stack={stack}
+              shown={shown.frames}
+              current={at.frame}
+              isMarked={isMarked}
+              zoom={zoom}
+              onLook={lookAt}
+              onZoom={setZoom}
+              onClose={closeCompare}
+            />
+          ) : zoom ? (
             <Zoomed frame={frame} points={missed} spot={zoom} onMove={setZoom} onExit={() => setZoom(null)} />
           ) : (
             <div
@@ -530,7 +612,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
             </div>
             <div className="cull-actions">
               <button
-                className={`btn small ${!several && marked ? "danger" : "ghost"}`}
+                className={`btn small ${!n && marked ? "danger" : "ghost"}`}
                 onClick={() => act(true)}
                 title="Reject: mark for deletion (X or Delete)"
               >
@@ -539,6 +621,15 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
               <button className="btn small ghost" onClick={() => act(false)} title="Keep: not for the trash (P or K)">
                 <Check size={14} /> Keep{n}
               </button>
+              <CompareSwitch
+                on={compare}
+                closed={mode === "off" && opensItself(stack)}
+                count={count}
+                frames={stack.frames.length}
+                selected={selFrames.size}
+                onToggle={toggleCompare}
+                onCount={chooseCount}
+              />
               <span className="grow" />
               <button
                 className="btn small ghost"
@@ -558,7 +649,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
               return (
                 <button
                   key={f.id}
-                  className={`cull-frame ${fm ? "rejected" : ""} ${i === at.frame ? "current" : ""} ${selFrames.has(f.id) ? "selected" : ""}`}
+                  className={`cull-frame ${fm ? "rejected" : ""} ${i === at.frame ? "current" : ""} ${selFrames.has(f.id) ? "selected" : ""} ${shown?.frames.includes(i) ? "compared" : ""}`}
                   onClick={(e) => clickFrame(i, e)}
                   title={f.reasons.join(" · ")}
                 >
@@ -578,136 +669,15 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
             })}
           </div>
           <div className="cull-keys muted small">
-            ← → frames · ↑ ↓ shots · X reject · P or K keep · Enter accept the shot · Z or click: 100% (drag to move, ← → keep
-            the spot) · Ctrl or Shift click: several · Esc back
+            {compare
+              ? "← → frames · ↑ ↓ shots · X reject · P or K keep the frame looked at · 2 3 4 how many · Z or click it: all at 100% (drag moves all) · click a face: its frame · × or C or Esc: close"
+              : "← → frames · ↑ ↓ shots · X reject · P or K keep · Enter accept the shot · Z or click: 100% (drag to move, ← → keep the spot) · C compare · Ctrl or Shift click: several · Esc back"}
           </div>
         </div>
       </div>
     </div>
   );
 });
-
-/**
- * The frame at 100%, from its original (disk plugged in), `spot` in the
- * middle; drag to move, a click without dragging goes back.
- */
-function Zoomed({
-  frame,
-  points,
-  spot,
-  onMove,
-  onExit,
-}: {
-  frame: CullFrame;
-  /** Drawn over the photo. */
-  points: Focus | null;
-  spot: Spot;
-  onMove: (s: Spot) => void;
-  onExit: () => void;
-}) {
-  const box = useRef<HTMLDivElement>(null);
-  const [boxSize, setBoxSize] = useState({ w: 0, h: 0 });
-  // The original's size once its picture is here (for this frame).
-  const [size, setSize] = useState<{ id: number; w: number; h: number } | null>(null);
-  const drag = useRef<{ x: number; y: number; spot: Spot; moved: boolean } | null>(null);
-  const reachable = frame.state === 2;
-
-  useEffect(() => {
-    const el = box.current;
-    if (!el) return;
-    const measure = () => setBoxSize({ w: el.clientWidth, h: el.clientHeight });
-    measure();
-    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
-    ro?.observe(el);
-    return () => ro?.disconnect();
-  }, []);
-
-  const shown = size?.id === frame.id ? size : null;
-  // The original at 100%, the spot looked at in the middle.
-  const placed = shown ? { left: boxSize.w / 2 - spot.x * shown.w, top: boxSize.h / 2 - spot.y * shown.h } : undefined;
-  const down = (e: ReactMouseEvent) => {
-    drag.current = { x: e.clientX, y: e.clientY, spot, moved: false };
-    const move = (m: MouseEvent) => {
-      const g = drag.current;
-      if (!g) return;
-      const dx = m.clientX - g.x;
-      const dy = m.clientY - g.y;
-      if (Math.abs(dx) + Math.abs(dy) > 3) g.moved = true;
-      if (g.moved && shown) {
-        onMove({
-          x: Math.min(1, Math.max(0, g.spot.x - dx / shown.w)),
-          y: Math.min(1, Math.max(0, g.spot.y - dy / shown.h)),
-        });
-      }
-    };
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      if (drag.current && !drag.current.moved) onExit();
-      drag.current = null;
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-
-  return (
-    <div className={`cull-zoom ${shown ? "ready" : ""}`} ref={box} onMouseDown={reachable ? down : onExit}>
-      {!shown && <img className="cull-zoom-wait" src={previewUrl(frame.id, frame.rev)} alt="" draggable={false} />}
-      {reachable && (
-        <img
-          key={frame.id}
-          className="cull-zoom-full"
-          src={fullUrl(frame.id, 0, frame.rev)}
-          alt=""
-          draggable={false}
-          onLoad={(e) => setSize({ id: frame.id, w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
-          style={placed}
-        />
-      )}
-      {placed && points && (
-        <div className="cull-on-picture" style={{ ...placed, width: shown?.w, height: shown?.h }}>
-          <FocusPoints focus={points} />
-        </div>
-      )}
-      {!shown && (
-        <span className="cull-zoom-note">
-          {reachable ? (
-            <>
-              <LoaderCircle size={13} className="spinning" /> Reading the original at 100%…
-            </>
-          ) : (
-            "The disk with this photo is unplugged: 100% needs the original. Click to go back."
-          )}
-        </span>
-      )}
-    </div>
-  );
-}
-
-/** A box over `picture` where `.cull-photo` fits it, for what is drawn on the photo;
- *  hidden until the picture is in. */
-function OnPicture({ picture, children }: { picture: RefObject<HTMLImageElement | null>; children: ReactNode }) {
-  const [box, setBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
-  useLayoutEffect(() => {
-    const el = picture.current;
-    if (!el) return;
-    const measure = () => setBox({ left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth, height: el.offsetHeight });
-    measure();
-    el.addEventListener("load", measure);
-    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
-    ro?.observe(el);
-    if (el.parentElement) ro?.observe(el.parentElement);
-    return () => {
-      el.removeEventListener("load", measure);
-      ro?.disconnect();
-    };
-  }, [picture]);
-  return (
-    <div className="cull-on-picture" style={box?.width ? box : { visibility: "hidden" }}>
-      {children}
-    </div>
-  );
-}
 
 /** The shots of the shoot, the current one in view; only those on screen are drawn. */
 const ShotList = memo(function ShotList({

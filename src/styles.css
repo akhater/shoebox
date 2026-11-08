@@ -1857,8 +1857,8 @@ button.link:hover {
 }
 .person-face {
   position: relative;
-  width: 112px;
-  height: 112px;
+  width: 100px;
+  height: 100px;
   padding: 0;
   border: 2px solid transparent;
   border-radius: 50%;
@@ -3575,6 +3575,236 @@ button.link:hover {
 .cull-selected {
   color: var(--accent);
 }
+/* Cull compare: frames side by side (the one looked at outlined), what Cull
+   says under each; each face cut out of every frame below, in the same columns. */
+/* Compare's switch, by Reject and Keep: its key on it; on, how many frames side by side. */
+.cull-comparing {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 6px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+  font-size: 12px;
+}
+.cull-compare-btn kbd,
+.cull-compare-count button {
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+}
+.cull-compare-btn kbd {
+  margin-left: 2px;
+  padding: 2px 5px;
+}
+.cull-compare-btn.on kbd {
+  color: inherit;
+  border-color: currentColor;
+}
+.cull-compare-note {
+  font-size: 12px;
+}
+.cull-compare-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.cull-compare-count > .muted {
+  margin-right: 4px;
+}
+.cull-compare-count button {
+  min-width: 24px;
+  padding: 4px 7px;
+  cursor: pointer;
+  color: var(--text);
+}
+.cull-compare-count button:hover:not(:disabled) {
+  background: var(--hover);
+}
+.cull-compare-count button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.cull-compare-count button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.cull-compare {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* Closes compare: on the last frame's corner, over the picture. */
+.cull-compare-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(16, 17, 20, 0.72);
+  color: var(--text);
+  cursor: pointer;
+}
+.cull-compare-close:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.cull-panes {
+  flex: 1;
+  min-height: 160px;
+  display: flex;
+  gap: 8px;
+}
+.cull-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.cull-pane-pic {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  border-radius: var(--radius);
+}
+.cull-pane.current .cull-pane-pic {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.cull-pane-photo {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0d0e10;
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+}
+.cull-pane.current .cull-pane-photo {
+  cursor: zoom-in;
+}
+.cull-pane-photo img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.cull-pane.rejected .cull-pane-photo img {
+  filter: grayscale(0.7) brightness(0.45);
+}
+.cull-pane-pic .cull-keeper {
+  left: 8px;
+  top: 8px;
+}
+.cull-pane-pic .cull-stamp {
+  top: 8px;
+  right: 8px;
+  padding: 3px 9px;
+  font-size: 12px;
+}
+.cull-pane-says {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 2px;
+  font-size: 12px;
+  min-width: 0;
+}
+.cull-frame.compared:not(.current) {
+  border-color: rgba(232, 163, 61, 0.4);
+}
+.cull-faces {
+  flex: none;
+  max-height: 42%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: opacity 0.15s;
+}
+/* The faces of the frames compared before, until the new ones are here:
+   not clickable, then dimmed. */
+.cull-faces.stale {
+  pointer-events: none;
+  opacity: 0.35;
+  transition-delay: 0.15s;
+}
+.cull-face-row {
+  position: relative;
+  display: flex;
+  gap: 8px;
+}
+.cull-face {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+button.cull-face {
+  cursor: pointer;
+}
+.cull-face-crop {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: #0d0e10;
+  overflow: hidden;
+}
+.cull-face.none .cull-face-crop {
+  background: none;
+  border: 1px dashed var(--border);
+}
+button.cull-face:hover .cull-face-crop {
+  border-color: var(--border);
+}
+.cull-face.current .cull-face-crop,
+button.cull-face.current:hover .cull-face-crop {
+  border-color: var(--accent);
+}
+.cull-face-crop img {
+  position: absolute;
+  max-width: none;
+  max-height: none;
+}
+.cull-face-full {
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.cull-face-full.in {
+  opacity: 1;
+}
+.cull-face-name {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--raised);
+  font-size: 12px;
+  pointer-events: none;
+}
 .cull-unreadable {
   display: inline-flex;
   align-items: center;
@@ -4051,4 +4281,11 @@ button.link:hover {
 }
 .move-check input {
   accent-color: var(--accent);
+}
+/* Opening Cull without the closed-eyes model: what it adds, and its download. */
+.eyes-ask {
+  width: 480px;
+}
+.eyes-ask .modal-head h2 svg {
+  color: var(--accent);
 }

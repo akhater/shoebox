@@ -1349,6 +1349,9 @@ pub async fn model_delete(state: State<'_, AppState>, id: String) -> Res<u64> {
                 upright.unload();
             }
         }
+        if id == models::EXPRESSIONS {
+            crate::expression::unload(); // a look at photos in progress lets go when it ends
+        }
         let freed = models::delete(&id);
         if in_use {
             ai.kick(); // the other feature carries on

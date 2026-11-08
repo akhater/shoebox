@@ -9,7 +9,10 @@
 //! The pinned hashes are the publishers' own: Hugging Face lists them (the
 //! orientation detector is published there too, the same file), and
 //! Microsoft's packages were hashed once (their library inside too, which is
-//! what sits in `models\`).
+//! what sits in `models\`). The closed-eyes and smiles models are Google's
+//! (MediaPipe), converted to ONNX and published on Hugging Face; their
+//! weights were checked against Google's release, and the files are pinned
+//! to a Hugging Face commit as well as a hash.
 
 use crate::paths::{self, models_dir};
 use anyhow::{Context, Result, anyhow, bail};
@@ -22,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const CLIP: &str = "clip";
 pub const FACES: &str = "faces";
 pub const UPRIGHT: &str = "upright";
+pub const EXPRESSIONS: &str = "expressions";
 pub const RUNTIME_GPU: &str = "runtime-gpu";
 pub const RUNTIME_CPU: &str = "runtime-cpu";
 
@@ -108,6 +112,30 @@ const UPRIGHT_FILES: &[FileSpec] = &[FileSpec {
         "https://github.com/duartebarbosadev/deep-image-orientation-detection/releases/download/v2/orientation_model_v2_0.9882.onnx",
     ),
 }];
+
+/// Google's MediaPipe Face Landmarker (`face_landmarker.task`, float16 v1,
+/// Apache 2.0), converted to ONNX with tf2onnx by Fernando Tonon, who publishes
+/// the two models on Hugging Face. Every weight was checked equal to Google's.
+/// The face mesh finds 478 points on a face; the blendshapes model turns 146 of
+/// them into 52 scores, among them blinking and smiling.
+const EXPRESSION_FILES: &[FileSpec] = &[
+    FileSpec {
+        path: "expressions/face_landmarks.onnx",
+        size: 4_920_979,
+        sha256: "d16e5a55e6a480284d468ee32469692464049518c311662ab3956681de31e3e9",
+        source: Source::Url(
+            "https://huggingface.co/fernandotonon/QtMeshEditor-facemesh-onnx/resolve/32714088ed9830a98df6ee653ad406a3b83ef014/face_landmarks.onnx",
+        ),
+    },
+    FileSpec {
+        path: "expressions/face_blendshapes.onnx",
+        size: 1_094_706,
+        sha256: "37cf54d3ccf671f8936427437a1a0b627799e16f20439de3cc35aa189ad40c66",
+        source: Source::Url(
+            "https://huggingface.co/fernandotonon/QtMeshEditor-faceblendshapes-onnx/resolve/495864b0bae88b0b926b8da8cb85f9022ceaa402/face_blendshapes.onnx",
+        ),
+    },
+];
 
 /// ONNX Runtime 1.22.0 (what the `ort` binding expects), for this system.
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -263,6 +291,18 @@ const MODELS: &[ModelSpec] = &[
         licence: "MIT",
         dir: Some("orientation"),
         files: UPRIGHT_FILES,
+        later: false,
+    },
+    ModelSpec {
+        id: EXPRESSIONS,
+        feature: "Closed eyes and smiles",
+        name: "MediaPipe Face Mesh V2 + Blendshapes",
+        about: "Finds closed eyes and smiles on the faces Shoebox found, so Cull can flag blinks and keep the frame \
+                with open eyes.",
+        publisher: "Google MediaPipe, converted to ONNX by Fernando Tonon (Hugging Face)",
+        licence: "Apache 2.0",
+        dir: Some("expressions"),
+        files: EXPRESSION_FILES,
         later: false,
     },
     ModelSpec {
@@ -441,6 +481,13 @@ pub fn upright_model() -> PathBuf {
     full_path(&models_dir(), UPRIGHT_FILES[0].path)
 }
 
+/// Where the face landmarks and blendshapes models (see expression.rs) are,
+/// once here: the landmarks first, then the blendshapes.
+pub fn expression_models() -> (PathBuf, PathBuf) {
+    let dir = models_dir();
+    (full_path(&dir, EXPRESSION_FILES[0].path), full_path(&dir, EXPRESSION_FILES[1].path))
+}
+
 /// Every file of this model is here.
 pub fn ready(id: &str) -> bool {
     let dir = models_dir();
@@ -452,7 +499,7 @@ pub fn runtime_ready() -> bool {
 }
 
 pub const RUNTIME_MISSING: &str = if !RUNTIME_PUBLISHED {
-    "AI features (word search, faces, sideways photos) aren't available on this system yet: no ONNX Runtime is published for it."
+    "AI features (word search, faces, sideways photos and Cull's eye check) aren't available on this system yet: no ONNX Runtime is published for it."
 } else if cfg!(windows) {
     "The AI runtime isn't here. Download it in Settings > AI models (or: shoebox-cli models download runtime-gpu)."
 } else {

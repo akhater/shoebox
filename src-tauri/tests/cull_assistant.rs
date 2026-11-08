@@ -405,3 +405,249 @@ fn the_camera_focus_point_leads_cull() {
     drop((quality, search, cat));
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Measures kept by a Shoebox from before Cull read eyes still open: the
+/// column saying whether the expression models were here is added.
+#[test]
+fn measures_kept_before_eyes_still_open() {
+    let base = std::env::temp_dir().join("shoebox-cull-eyes-column");
+    let _ = std::fs::remove_dir_all(&base);
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data.clone()).unwrap();
+    rusqlite::Connection::open(data.root.join("quality.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE quality (photo_id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL, version INTEGER NOT NULL,
+                                   faces INTEGER NOT NULL, preview TEXT NOT NULL, close TEXT,
+                                   focus INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+    let quality = QualityIndex::open(&cat).unwrap();
+    let has_eyes: bool = rusqlite::Connection::open(data.root.join("quality.db"))
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM pragma_table_info('quality') WHERE name = 'eyes'", [], |r| r.get(0))
+        .unwrap();
+    assert!(has_eyes);
+
+    drop((quality, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Measures kept by a Shoebox from before Cull read eyes are still Cull's,
+/// closer looks included (an unplugged disk can't give them again). A photo
+/// with faces is measured again from its preview once the expression models
+/// are here, keeping its closer look; one without faces never is.
+#[test]
+fn measures_kept_before_eyes_keep_their_closer_looks() {
+    let base = std::env::temp_dir().join("shoebox-cull-eyes-kept");
+    let _ = std::fs::remove_dir_all(&base);
+    let photos = base.join("photos");
+    std::fs::create_dir_all(&photos).unwrap();
+    squares(&photos.join("IMG_0001.JPG"), 2000, 1333, 0.0);
+    squares_of(&photos.join("IMG_0002.JPG"), 2000, 1333, 0.0, 50);
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data.clone()).unwrap();
+    let root = cat.add_root(&photos).unwrap();
+    scan_root(&cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
+    let (with_face, without) = (id_of(&cat, "IMG_0001.JPG"), id_of(&cat, "IMG_0002.JPG"));
+    // Both looked at for faces: one found in the first, none in the second.
+    {
+        let db = cat.db();
+        db.execute(
+            "INSERT INTO faces (photo_id, x1, y1, x2, y2, kps, score)
+             VALUES (?1, 0.4, 0.3, 0.6, 0.6, '0.45,0.4,0.55,0.4,0.5,0.45,0.46,0.52,0.54,0.52', 0.9)",
+            [with_face],
+        )
+        .unwrap();
+        for (id, faces) in [(with_face, 1), (without, 0)] {
+            db.execute("INSERT INTO face_scan (photo_id, model, faces) VALUES (?1, 'test', ?2)", [id, faces]).unwrap();
+        }
+    }
+    // As that Shoebox kept them: version 2, no eyes anywhere, each looked at closer.
+    let shown: std::collections::HashMap<i64, String> = cat.preview_ready().unwrap().into_iter().collect();
+    {
+        let conn = rusqlite::Connection::open(data.root.join("quality.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE quality (photo_id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL, version INTEGER NOT NULL,
+                                   faces INTEGER NOT NULL, preview TEXT NOT NULL, close TEXT,
+                                   focus INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+        for id in [with_face, without] {
+            conn.execute(
+                "INSERT INTO quality (photo_id, fingerprint, version, faces, preview, close, focus)
+                 VALUES (?1, ?2, 2, 1, '{\"long\":1080,\"sharpest\":0.6,\"mean\":0.5}',
+                         '{\"long\":2000,\"full\":2000,\"sharpest\":1.1,\"mean\":0.5}', 0)",
+                rusqlite::params![id, shown[&id]],
+            )
+            .unwrap();
+        }
+    }
+
+    let quality = QualityIndex::open(&cat).unwrap();
+    let closer = |id: i64| quality.get(id).and_then(|q| q.close).map(|c| (c.long, c.eyes));
+    for id in [with_face, without] {
+        assert_eq!(closer(id), Some((2000, None)), "photo {id}: {:?}", quality.get(id));
+        assert_eq!(quality.get(id).unwrap().eyes(), None);
+    }
+    let search = SearchIndex::open(&cat).unwrap();
+    let scope = Scope::Root { id: root };
+    let shoot = || quality.shoot(&cat, &search, &scope, &Filters::default()).unwrap();
+    // Measured again for its eyes only when the models can read them, and only the photo with a face.
+    let models = shoebox_lib::expression::usable();
+    let opened = shoot();
+    assert_eq!(opened.closer, 2);
+    assert_eq!(opened.to_measure, if models { vec![with_face] } else { vec![] });
+    let never = AtomicBool::new(false);
+    assert_eq!(quality.measure(&cat, &[with_face, without], &never, &|_, _| {}).unwrap(), usize::from(models));
+    for id in [with_face, without] {
+        assert_eq!(closer(id).map(|c| c.0), Some(2000), "photo {id}: its closer look stays");
+    }
+    assert!(shoot().to_measure.is_empty());
+
+    // Opened again: all still there, nothing to measure.
+    drop(quality);
+    let quality = QualityIndex::open(&cat).unwrap();
+    let asked = std::cell::Cell::new(0);
+    quality.index_pending(&cat, &never, &|_| asked.set(asked.get() + 1)).unwrap();
+    assert_eq!(asked.get(), 0, "nothing new to measure");
+    for id in [with_face, without] {
+        assert_eq!(quality.get(id).and_then(|q| q.close).map(|c| c.long), Some(2000), "photo {id}");
+    }
+
+    drop((quality, search, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// With the expression models here, a photo's faces are read for closed eyes
+/// as it is measured: from its preview, and again on a closer look. Two CC0
+/// portraits (tests/fixtures/faces), their faces put in the catalog by hand
+/// where the face detector would find them. Skipped with a note when the
+/// models or the AI runtime aren't here (CI has neither).
+#[test]
+fn closed_eyes_are_read_with_the_measures() {
+    use shoebox_lib::models;
+    if !models::ready(models::EXPRESSIONS) || !models::runtime_ready() {
+        eprintln!("skipped: no expression models or AI runtime in {}", shoebox_lib::paths::models_dir().display());
+        return;
+    }
+    let base = std::env::temp_dir().join("shoebox-cull-eyes");
+    let _ = std::fs::remove_dir_all(&base);
+    let photos = base.join("photos");
+    std::fs::create_dir_all(&photos).unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("faces");
+    // Each face's box and five points (eyes, nose, mouth corners), in px, measured by hand.
+    let faces = [
+        (
+            "eyes_open.jpg",
+            [78.0, 95.0, 205.0, 255.0],
+            [102.0, 152.0, 158.0, 150.0, 128.0, 185.0, 115.0, 213.0, 160.0, 212.0],
+        ),
+        (
+            "eyes_closed_smiling.jpg",
+            [50.0, 80.0, 185.0, 240.0],
+            [80.0, 145.0, 147.0, 146.0, 113.0, 175.0, 90.0, 198.0, 145.0, 198.0],
+        ),
+    ];
+    for (name, ..) in &faces {
+        std::fs::copy(fixtures.join(name), photos.join(name)).unwrap();
+    }
+
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data).unwrap();
+    let root = cat.add_root(&photos).unwrap();
+    let r = scan_root(&cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
+    assert_eq!((r.photos_added, r.errors), (2, 0), "{r:?}");
+    let mut ids = Vec::new();
+    for (name, bbox, kps) in &faces {
+        let id = id_of(&cat, name);
+        // As the faces table keeps them: 0..1 of the picture (its preview is the photo: never enlarged).
+        let (w, h) = image::image_dimensions(fixtures.join(name)).unwrap();
+        let at = |i: usize, v: f32| v as f64 / if i.is_multiple_of(2) { w } else { h } as f64;
+        let kps: Vec<String> = kps.iter().enumerate().map(|(i, &v)| format!("{:.4}", at(i, v))).collect();
+        let db = cat.db();
+        db.execute(
+            "INSERT INTO faces (photo_id, x1, y1, x2, y2, kps, score) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0.9)",
+            rusqlite::params![id, at(0, bbox[0]), at(1, bbox[1]), at(2, bbox[2]), at(3, bbox[3]), kps.join(",")],
+        )
+        .unwrap();
+        db.execute("INSERT INTO face_scan (photo_id, model, faces) VALUES (?1, 'test', 1)", [id]).unwrap();
+        ids.push(id);
+    }
+
+    let quality = QualityIndex::open(&cat).unwrap();
+    let never = AtomicBool::new(false);
+    assert_eq!(quality.measure(&cat, &ids, &never, &|_, _| {}).unwrap(), 2);
+    let eyes = |id: i64, close: bool| {
+        let q = quality.get(id).unwrap();
+        let m = if close { q.close.unwrap() } else { q.preview };
+        let eyes = m.eyes.unwrap_or_else(|| panic!("photo {id}: no eyes read: {q:?}"));
+        eprintln!("photo {id}{}: {eyes:?}", if close { ", closer" } else { "" });
+        eyes
+    };
+    let (open, shut) = (eyes(ids[0], false), eyes(ids[1], false));
+    assert_eq!((open.faces, open.closed), (1, 0), "{open:?}");
+    assert_eq!((shut.faces, shut.closed), (1, 1), "{shut:?}");
+    assert!(open.smile > 0.3 && shut.smile > 0.3, "both smile");
+    // Measured with the models: nothing to measure again.
+    assert_eq!(quality.measure(&cat, &ids, &never, &|_, _| {}).unwrap(), 0);
+
+    // A closer look reads them again, on the original.
+    assert_eq!(quality.look_closer(&cat, &ids, &never, &|_, _| {}).unwrap(), 2);
+    assert_eq!((eyes(ids[0], true).closed, eyes(ids[1], true).closed), (0, 1));
+    assert_eq!(quality.get(ids[1]).unwrap().eyes().map(|e| e.closed), Some(1));
+
+    // Turned a quarter clockwise, as the user turns a photo: its preview and
+    // its faces' boxes turn with it, and the original is read turned. Its
+    // eyes read as they did upright, from the preview and on a closer look.
+    let upright = (eyes(ids[1], false), eyes(ids[1], true));
+    shoebox_lib::turn::turn(&cat, &[(ids[1], 1)]).unwrap();
+    // Looked at for faces again (the turn asks for it): as found, the same face.
+    cat.db().execute("INSERT INTO face_scan (photo_id, model, faces) VALUES (?1, 'test', 1)", [ids[1]]).unwrap();
+    assert_eq!(quality.measure(&cat, &ids, &never, &|_, _| {}).unwrap(), 1);
+    assert!(quality.get(ids[1]).unwrap().close.is_none(), "the closer look was of the picture upright");
+    assert_eq!(quality.look_closer(&cat, &ids, &never, &|_, _| {}).unwrap(), 1);
+    let turned = (eyes(ids[1], false), eyes(ids[1], true));
+    for (upright, turned) in [(upright.0, turned.0), (upright.1, turned.1)] {
+        assert_eq!((turned.faces, turned.closed), (upright.faces, upright.closed), "{turned:?} vs {upright:?}");
+        assert!((turned.blink - upright.blink).abs() < 0.15, "{turned:?} vs {upright:?}");
+    }
+
+    drop((quality, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn each_frame_says_how_many_faces_were_found_in_it() {
+    let base = std::env::temp_dir().join("shoebox-cull-faces");
+    let _ = std::fs::remove_dir_all(&base);
+    let photos = base.join("photos");
+    std::fs::create_dir_all(&photos).unwrap();
+    squares(&photos.join("IMG_0001.JPG"), 2000, 1333, 0.0);
+    squares_of(&photos.join("IMG_0002.JPG"), 2000, 1333, 0.0, 50);
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data).unwrap();
+    let root = cat.add_root(&photos).unwrap();
+    scan_root(&cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
+    let (one, two) = (id_of(&cat, "IMG_0001.JPG"), id_of(&cat, "IMG_0002.JPG"));
+    // Two faces in the second, a small one among them.
+    for (x1, x2) in [(0.1, 0.3), (0.6, 0.62)] {
+        cat.db()
+            .execute(
+                "INSERT INTO faces (photo_id, x1, y1, x2, y2, kps, score) VALUES (?1, ?2, 0.2, ?3, 0.5, '', 0.9)",
+                rusqlite::params![two, x1, x2],
+            )
+            .unwrap();
+    }
+    let quality = QualityIndex::open(&cat).unwrap();
+    let search = SearchIndex::open(&cat).unwrap();
+    let shoot = quality.shoot(&cat, &search, &Scope::Root { id: root }, &Filters::default()).unwrap();
+    let faces: Vec<(i64, usize)> = shoot.stacks.iter().flat_map(|s| &s.frames).map(|f| (f.id, f.faces)).collect();
+    assert_eq!(faces, [(one, 0), (two, 2)]);
+    drop((quality, search, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}
