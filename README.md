@@ -51,7 +51,8 @@ unplugged in a drawer; plug one in and Shoebox picks up where it left off.
   It only suggests: you reject, take back, or accept its suggestions in one
   key. A shoot is measured from its previews when you open it, so unplugged
   drives too; with the drive connected it looks closer at the originals and
-  finds what is only soft at 100%.
+  finds what is only soft at 100%. Compare shows 2 to 4 frames of a burst
+  side by side, zoomed together, with each face cropped from every frame.
 - **Turn photos** with R and Shift+R, in the grid or the viewer. Only Shoebox's
   copies turn, never the files; faces keep their names. **Sideways** lists the
   photos an AI model finds sideways or upside down (an old camera without an
