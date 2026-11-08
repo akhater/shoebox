@@ -28,8 +28,16 @@ pub struct Face {
 }
 
 /// Faces narrower than this (the box's width, in pixels of the picture read) are not read: their
-/// eyes are a few pixels tall, too few to tell open from closed.
-pub const MIN_FACE_PX: f32 = 64.0;
+/// eyes are a few pixels tall, too few to tell open from closed. A closer look reads them on the
+/// original, where they are several times wider.
+///
+/// Measured on two shoots by reading the same faces shrunk to each width and comparing with a
+/// reading of them at full size (the original's, or the preview's at 128 px and more; about 8,800
+/// reads). Every verdict (no face, open, closed) agrees 92-99% at every width, open faces being most
+/// of them. On faces whose reference is lidded (blink 0.4 and more), the ones a closed call is about,
+/// the verdict agrees 48% under 48 px, 66% at 48-64, 69% at 64-80, 80% at 80-96 and 93% from 96 px;
+/// and open faces read closed 2-5% of the time under 80 px against 0.4-0.5% above.
+pub const MIN_FACE_PX: f32 = 96.0;
 
 /// The mesh model's input is a square of this many pixels.
 const CROP: usize = 256;
@@ -120,7 +128,15 @@ const SUBSET: [usize; 146] = [
 ];
 
 /// Eyes this closed (the blendshapes' blink score, 0 open to 1 shut), both of them, are closed eyes.
-pub const CLOSED: f32 = 0.5;
+///
+/// Set from about 800 faces of two shoots checked by eye, among them every face whose less shut eye
+/// read over 0.3. Fully closed eyes read 0.6-0.7 on frontal faces; a laughing squint or eyes caught
+/// half shut 0.3-0.55. Eyes looking down, and sunglasses, read like closed eyes (0.4-0.9) and are
+/// most of what any threshold flags; the share of flags that are closed eyes stays about the same
+/// (17-19%) from 0.45 to 0.6, while the number of flags falls. From 0.5 to 0.55 the flags fall from
+/// 100 to 69 (false ones 83 to 56), losing 4 of 17 closed faces; 0.6 loses a clearly closed frontal
+/// face that reads 0.62/0.596.
+pub const CLOSED: f32 = 0.55;
 
 /// How sure the mesh model must be that it saw a face (0..1) for its landmarks to be read.
 const PRESENCE: f32 = 0.5;
@@ -137,7 +153,10 @@ pub struct Expression {
 
 impl Expression {
     /// How shut the face's eyes are, 0..1: its less shut eye's score, so a wink, or one eye
-    /// hidden, reads as open.
+    /// hidden, reads as open. On the faces checked by eye, the mean of both eyes, or a rule on the
+    /// more shut eye, found a few more closed eyes (the far eye of a face turned aside reads low)
+    /// but flagged more faces that weren't closed for each one found: eyes looking down,
+    /// sunglasses, and turned faces whose near eye reads 0.5-0.9 open.
     pub fn shut(&self) -> f32 {
         self.blink[0].min(self.blink[1])
     }
@@ -456,8 +475,8 @@ mod tests {
     #[test]
     fn small_faces_are_not_read() {
         // No model is needed to turn these away: none is loaded here.
-        assert!(matches!(unreadable(&face(63.0, 80.0, 0.0)), Some(Read::Small)));
-        assert!(unreadable(&face(64.0, 80.0, 0.0)).is_none());
+        assert!(matches!(unreadable(&face(MIN_FACE_PX - 1.0, 80.0, 0.0)), Some(Read::Small)));
+        assert!(unreadable(&face(MIN_FACE_PX, 80.0, 0.0)).is_none());
         // Eyes on top of each other, or not numbers, give no line to level the crop by.
         let mut f = face(100.0, 100.0, 0.0);
         (f.kps[2], f.kps[3]) = (f.kps[0] + 0.5, f.kps[1]);
