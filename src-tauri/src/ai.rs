@@ -123,12 +123,15 @@ pub fn gpu_check() -> Result<Vec<GpuCheck>> {
     }
     let dir = crate::paths::models_dir();
     let faces = dir.join("faces").join("buffalo_l");
+    let (landmarks, blendshapes) = crate::models::expression_models();
     let models = [
         ("orientation", crate::models::upright_model()),
         ("clip-visual", clip_visual()),
         ("clip-text", clip_dir().join("textual").join("model.onnx")),
         ("face-detection", faces.join("detection").join("model.onnx")),
         ("face-recognition", faces.join("recognition").join("model.onnx")),
+        ("face-landmarks", landmarks),
+        ("face-blendshapes", blendshapes),
     ];
     Ok(models
         .into_iter()

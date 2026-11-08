@@ -430,6 +430,8 @@ export interface Settings {
   privateWarning: boolean;
   /** The Argentum to open photos in, when it isn't where its installers put it. Empty: found by itself. */
   argentumPath: string;
+  /** Opening Cull without the closed-eyes model asks to download it; off once "Don't ask again" was ticked. */
+  askEyesModel: boolean;
 }
 
 /** What became of a photo handed to Argentum. */
@@ -695,7 +697,16 @@ const deletedFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", tim
 export const fmtDeleted = (ts: number) => deletedFmt.format(new Date(ts * 1000));
 
 /** What Cull can find wrong with a photo; `bit` is its bit in PhotoList.flags. */
-export type Problem = "empty" | "dark" | "blurry" | "soft" | "faceSoft" | "blown" | "bright" | "focusMissed";
+export type Problem =
+  | "empty"
+  | "dark"
+  | "blurry"
+  | "soft"
+  | "faceSoft"
+  | "blown"
+  | "bright"
+  | "focusMissed"
+  | "eyesClosed";
 export const PROBLEMS: { problem: Problem; bit: number; label: string }[] = [
   { problem: "empty", bit: 1, label: "Nothing in it" },
   { problem: "dark", bit: 2, label: "Very dark" },
@@ -705,6 +716,7 @@ export const PROBLEMS: { problem: Problem; bit: number; label: string }[] = [
   { problem: "blown", bit: 32, label: "Highlights blown" },
   { problem: "bright", bit: 64, label: "Very bright" },
   { problem: "focusMissed", bit: 128, label: "Focus missed" },
+  { problem: "eyesClosed", bit: 256, label: "Eyes closed" },
 ];
 export const problemsOf = (flags: number) => PROBLEMS.filter((p) => flags & p.bit);
 /** The problems about sharpness: what the camera's focus confirmation can't tell. */

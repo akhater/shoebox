@@ -10,6 +10,7 @@ mod answers_kept;
 mod argentum;
 mod catalog_memory;
 mod catalog_move;
+mod cli_eyes;
 mod cli_faces_reset;
 mod cull_assistant;
 mod damaged_files;

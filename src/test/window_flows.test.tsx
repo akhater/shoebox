@@ -768,6 +768,100 @@ describe("Cull", () => {
     expect(tile(host, 203).querySelector(".badge.problem")!.getAttribute("title")).toBe("Very dark");
     localStorage.removeItem("shoebox.showProblems");
   });
+
+  test("a photo whose only problem is closed eyes has a badge of its own", async () => {
+    const be = fakeBackend();
+    be.unmeasured(203, 256); // eyes closed, once measured
+    const host = await renderApp();
+    await click(problemsToggle(host));
+    await wait(400);
+    const eyes = tile(host, 203).querySelector(".badge.problem")!;
+    expect(eyes.getAttribute("title")).toBe("Eyes closed");
+    expect(eyes.classList.contains("eyes")).toBe(true);
+    expect(tile(host, 204).querySelector(".badge.problem")!.classList.contains("eyes")).toBe(false);
+    localStorage.removeItem("shoebox.showProblems");
+  });
+});
+
+describe("asking for Cull's eye model", () => {
+  const ask = (host: HTMLElement) => host.querySelector<HTMLElement>(".eyes-ask");
+  const openCull = async (host: HTMLElement) => {
+    await click(sidebarItem(host, "Trip"));
+    await wait(100);
+    await click(byText(host, ".toolbar button", "Cull"));
+    await wait(100);
+  };
+  const leaveCull = async () => {
+    await key(document.body, "Escape");
+    await wait(100);
+  };
+
+  test("opening Cull without it asks, Download shows its progress, then Cull doesn't ask again", async () => {
+    const be = fakeBackend();
+    be.withoutModel("expressions");
+    const host = await renderApp();
+    await openCull(host);
+    expect(title(host)).toBe("Cull · Trip");
+    expect(ask(host)!.textContent).toMatch(/Check eyes in Cull?/);
+    expect(ask(host)!.textContent).toMatch(/Settings > AI models/);
+    // The model only: the runtime is here.
+    expect(byText(ask(host)!, "button", /^Download/).textContent).toBe("Download (5.7 MB)");
+    await click(byText(ask(host)!, "button", /^Download/));
+    await wait(80);
+    expect(be.calls.filter((c) => c.cmd === "model_download").map((c) => c.args)).toEqual([{ id: "expressions" }]);
+    expect(ask(host)!.querySelector(".model-progress")!.textContent).toMatch(/of 5.7 MB/);
+    await wait(150);
+    expect(ask(host)!.textContent).toMatch(/Downloaded and checked/);
+    await click(byText(ask(host)!, "button", "Close"));
+    await wait(30);
+    expect(ask(host)).toBeNull();
+    // Cull is still open, and asks no more now that the model is here.
+    expect(title(host)).toBe("Cull · Trip");
+    await leaveCull();
+    await openCull(host);
+    expect(ask(host)).toBeNull();
+    expect(be.calls.filter((c) => c.cmd === "save_settings")).toHaveLength(0);
+  });
+
+  test("Not now asks again next time; Don't ask again is remembered in the settings", async () => {
+    const be = fakeBackend();
+    be.withoutModel("expressions");
+    be.withoutModel("runtime-gpu");
+    const host = await renderApp();
+    await openCull(host);
+    // No runtime either: both are downloaded.
+    expect(ask(host)!.textContent).toMatch(/and an AI runtime/);
+    await click(byText(ask(host)!, "button", "Not now"));
+    await wait(30);
+    expect(ask(host)).toBeNull();
+    expect(title(host)).toBe("Cull · Trip");
+    await leaveCull();
+
+    await openCull(host);
+    await click(byText(ask(host)!, "label", /Don't ask again/).querySelector("input")!);
+    // Escape closes the question, not Cull.
+    await key(document.body, "Escape");
+    await wait(50);
+    expect(ask(host)).toBeNull();
+    expect(title(host)).toBe("Cull · Trip");
+    expect(be.calls.filter((c) => c.cmd === "save_settings").at(-1)?.args.settings).toMatchObject({
+      askEyesModel: false,
+      privateLockMinutes: 5,
+    });
+    expect(be.calls.filter((c) => c.cmd === "model_download")).toHaveLength(0);
+    await leaveCull();
+    await openCull(host);
+    expect(ask(host)).toBeNull();
+  });
+
+  test("with the model here, Cull never asks", async () => {
+    const be = fakeBackend();
+    const host = await renderApp();
+    await openCull(host);
+    expect(title(host)).toBe("Cull · Trip");
+    expect(ask(host)).toBeNull();
+    expect(be.calls.filter((c) => c.cmd === "model_download")).toHaveLength(0);
+  });
 });
 
 describe("the viewer", () => {

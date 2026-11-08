@@ -1,4 +1,4 @@
-import { Focus, ImageOff, Layers, LockKeyhole, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
+import { EyeClosed, Focus, ImageOff, Layers, LockKeyhole, Trash, Trash2, TriangleAlert, Unplug } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   BIN,
@@ -486,6 +486,8 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                 const marked = list.marked[t.index] === 1;
                 const inBin = state === 0 ? p.binned?.get(id) : undefined;
                 const problems = problemsOf(flagsAt(t.index));
+                // Closed eyes alone get their own glyph: the focus one would say the photo is soft.
+                const eyesOnly = problems.length === 1 && problems[0].problem === "eyesClosed";
                 const turn = ((((p.turned?.get(id) ?? 0) + (p.previewTurn && selected.has(id) ? p.previewTurn : 0)) % 4) + 4) % 4;
                 const frames = list.frames?.[t.index] ?? 1;
                 return (
@@ -603,10 +605,10 @@ export const PhotoGrid = memo(function PhotoGrid(p: Props) {
                     )}
                     {p.showProblems && problems.length > 0 && !marked && (
                       <span
-                        className={`badge problem ${list.fresh[t.index] === 1 ? "after-new" : ""}`}
+                        className={`badge problem ${eyesOnly ? "eyes" : ""} ${list.fresh[t.index] === 1 ? "after-new" : ""}`}
                         title={problems.map((x) => x.label).join(" · ")}
                       >
-                        <Focus size={13} />
+                        {eyesOnly ? <EyeClosed size={13} /> : <Focus size={13} />}
                       </span>
                     )}
                     {p.showType && list.ext[t.index] && (

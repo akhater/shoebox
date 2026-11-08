@@ -277,18 +277,38 @@
 //!                                         5,000 photos: a folder or a day): bursts gathered in
 //!                                         stacks, each frame's problems, and Cull's suggestion
 //!                                         (keep, reject, none) with the reasons; "keeper" is the
-//!                                         sharpest frame, "compared" where: "face", else
+//!                                         sharpest frame (with its eyes open, when the expression
+//!                                         models read them; of frames as sharp, the one smiling
+//!                                         clearly more), "compared" where: "face", else
 //!                                         "focusPoint" (where the camera focused, when it is sharp
 //!                                         in one frame at least), else "sharpest"; "focus" is where
 //!                                         to look at 100% first: on "focusPoints", where the
 //!                                         camera focused (when its file says), else on the
 //!                                         largest face; "focusMissed" = soft there while
-//!                                         something else is sharp. --closer first
+//!                                         something else is sharp; "eyesClosed" = a face's eyes
+//!                                         closed. Here it is burst-relative: a frame of a burst
+//!                                         carries it only when it has a face closed and its eyes
+//!                                         read at least the margin more closed than the least
+//!                                         closed of its other captures (a look down that lasts
+//!                                         through the burst isn't flagged), and is then rejected
+//!                                         for a frame with open eyes; a frame with no other capture
+//!                                         whose eyes were read is flagged as read, and left to
+//!                                         you. `measure` reports it per photo,
+//!                                         as read, so the two can differ for one photo. --closer first
 //!                                         looks closer at the originals plugged in (read at half
 //!                                         size, read-only), which shows a photo only soft at 100%;
 //!                                         originals it couldn't read are listed under "unreadable", with why
 //!   shoebox-cli cull-accept [filters] [scope]   mark for deletion what Cull suggests rejecting
 //!                                         (frames not marked yet)
+//!   shoebox-cli eyes <photo-id>... [--original]   what the expression models read on a photo's
+//!                                         faces, face by face: its "box" (0..1), its width in "px",
+//!                                         and its "read": "scored" with "blink" (the person's left
+//!                                         eye, then right; 0 open to 1 shut), "smile", "presence" and
+//!                                         "closed" (both eyes); or why it wasn't: "small", "noFace",
+//!                                         "noPoints", "failed". "eyes" sums them up as Cull keeps
+//!                                         them. From the preview; --original reads the original as
+//!                                         a closer look does (half size, read-only; its disk plugged in).
+//!                                         Several photos: one line of JSON each, or its "error"
 
 use shoebox_lib::catalog::{Catalog, Filters, Scope, Sort};
 use shoebox_lib::db::stored_rel;
@@ -1147,6 +1167,26 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::json!({ "marked": organize::mark(&cat, &rejects, true)? }));
             }
         }
+        Some("eyes") => {
+            // shoebox-cli eyes <photo-id>... [--original]
+            let original = args[1..].iter().any(|a| a == "--original");
+            let ids =
+                args[1..].iter().filter(|a| *a != "--original").map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
+            match ids[..] {
+                [] => anyhow::bail!("eyes <photo-id>... [--original]"),
+                [id] => println!("{}", serde_json::to_string_pretty(&cull::eyes_report(&cat, id, original)?)?),
+                // One line per photo, as each is read; a photo that can't be read says why.
+                _ => {
+                    for id in ids {
+                        let line = match cull::eyes_report(&cat, id, original) {
+                            Ok(r) => serde_json::to_string(&r)?,
+                            Err(e) => serde_json::json!({ "id": id, "error": format!("{e:#}") }).to_string(),
+                        };
+                        println!("{line}");
+                    }
+                }
+            }
+        }
         Some("delete-marked") => {
             let token = args.get(1).ok_or_else(|| anyhow::anyhow!("delete-marked <token> [volume-id...]"))?;
             let mut disks = args[2..].iter().map(|a| a.parse()).collect::<Result<Vec<i64>, _>>()?;
@@ -1229,7 +1269,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         _ => eprintln!(
-            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope] | missing | forget-missing <id>... | --in-bin | --all | turn right|left|half|back <id>... | sideways | upright-check [--again] | sideways-accept <id>... | --all | sideways-leave <id>... | --all | upright-eval <folder> [limit] | gpu-check"
+            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope] | eyes <id>... [--original] | missing | forget-missing <id>... | --in-bin | --all | turn right|left|half|back <id>... | sideways | upright-check [--again] | sideways-accept <id>... | --all | sideways-leave <id>... | --all | upright-eval <folder> [limit] | gpu-check"
         ),
     }
     Ok(())

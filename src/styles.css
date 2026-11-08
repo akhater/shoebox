@@ -4052,3 +4052,10 @@ button.link:hover {
 .move-check input {
   accent-color: var(--accent);
 }
+/* Opening Cull without the closed-eyes model: what it adds, and its download. */
+.eyes-ask {
+  width: 480px;
+}
+.eyes-ask .modal-head h2 svg {
+  color: var(--accent);
+}

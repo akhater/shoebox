@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { CircleStop, Cpu, Download, FolderOpen, Gpu, Package, ScanFace, Search, Trash2 } from "lucide-react";
+import { CircleStop, Cpu, Download, FolderOpen, Gpu, Package, ScanEye, ScanFace, Search, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { fmtBytes, modelsApi, type ModelProgress, type ModelStatus, type ModelsOverview } from "../api";
 import { TurnPhotoIcon } from "./TurnControl";
@@ -8,6 +8,7 @@ const ICONS: Record<string, (p: { size?: number; className?: string }) => ReactN
   clip: Search,
   faces: ScanFace,
   upright: TurnPhotoIcon,
+  expressions: ScanEye,
   "runtime-gpu": Gpu,
   "runtime-cpu": Cpu,
 };
@@ -97,11 +98,13 @@ export function ModelsTab() {
       return "New photos won't get faces until it's downloaded again. Your people and their names stay.";
     if (m.id === "upright")
       return "New photos aren't looked at for being sideways until it's downloaded again. Photos you turned stay turned.";
+    if (m.id === "expressions")
+      return "Cull stops checking eyes until it's downloaded again. Photos you marked stay marked.";
     if (ready(other(m.id)))
       return m.id === "runtime-gpu"
         ? "Shoebox then runs the models on the processor, which is slower."
         : "Nothing changes: the graphics-card runtime is used while it's here.";
-    return "Word search, faces and sideways photos stop until an AI runtime is downloaded again.";
+    return "Word search, faces, sideways photos and Cull's eye check stop until an AI runtime is downloaded again.";
   };
 
   const row = (m: ModelStatus) => {
@@ -199,7 +202,7 @@ export function ModelsTab() {
         Shoebox's AI runs on this computer, never in the cloud. The models don't come with the app: download the ones
         you want from their publishers. Each file is checked (SHA-256) before it's used.
       </small>
-      {!o.runtimeReady && <p className="note warn">Word search, faces and sideways photos need an AI runtime: download one below.</p>}
+      {!o.runtimeReady && <p className="note warn">Word search, faces, sideways photos and Cull's eye check need an AI runtime: download one below.</p>}
 
       <div className="model-group">
         <span className="field-label">Features</span>
