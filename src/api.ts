@@ -430,6 +430,8 @@ export interface Settings {
   privateWarning: boolean;
   /** The Argentum to open photos in, when it isn't where its installers put it. Empty: found by itself. */
   argentumPath: string;
+  /** Opening Cull without the closed-eyes model asks to download it; off once "Don't ask again" was ticked. */
+  askEyesModel: boolean;
 }
 
 /** What became of a photo handed to Argentum. */

@@ -32,6 +32,9 @@ pub struct Settings {
     /// The Argentum to open photos in, when it isn't where its installers put
     /// it. Empty: found by itself (see argentum.rs).
     pub argentum_path: String,
+    /// Opening Cull without the closed-eyes model asks to download it. Off once
+    /// "Don't ask again" was ticked: Settings > AI models still has it.
+    pub ask_eyes_model: bool,
 }
 
 impl Default for Settings {
@@ -47,6 +50,7 @@ impl Default for Settings {
             private_lock_minutes: 5,
             private_warning: true,
             argentum_path: String::new(),
+            ask_eyes_model: true,
         }
     }
 }
@@ -76,5 +80,19 @@ impl Settings {
         self.catalog_map_mb = self.catalog_map_mb.min(32_768);
         self.private_lock_minutes = self.private_lock_minutes.clamp(1, 240);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_eyes_model_is_asked_for_until_turned_off() {
+        // Settings saved before the question existed ask it.
+        let old: Settings = serde_json::from_str(r#"{"previewSize": 1080}"#).unwrap();
+        assert!(old.ask_eyes_model);
+        let off: Settings = serde_json::from_str(r#"{"askEyesModel": false}"#).unwrap();
+        assert!(!off.sanitized().ask_eyes_model);
     }
 }
