@@ -23,7 +23,7 @@ import {
   type Scope,
   type Shoot,
 } from "../api";
-import { compareSet, CullCompare } from "./CullCompare";
+import { compareSet, CompareSwitch, CullCompare } from "./CullCompare";
 import { clickedSpot, firstSpot, missedPoints, OnPicture, Zoomed, type Spot } from "./CullPicture";
 import { FocusPoints } from "./FocusPoints";
 
@@ -113,6 +113,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
       /* not remembered */
     }
   }, []);
+  const toggleCompare = useCallback(() => setCompare((c) => !c), []);
 
   // Only the latest answer counts.
   const seq = useRef(0);
@@ -423,6 +424,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
           break;
         case "c":
         case "C":
+          if (!compare && stack.frames.length < 2) return;
           setCompare((c) => !c);
           break;
         case "2":
@@ -611,6 +613,14 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
               <button className="btn small ghost" onClick={() => act(false)} title="Keep: not for the trash (P or K)">
                 <Check size={14} /> Keep{n}
               </button>
+              <CompareSwitch
+                on={compare}
+                count={count}
+                frames={stack.frames.length}
+                selected={selFrames.size}
+                onToggle={toggleCompare}
+                onCount={chooseCount}
+              />
               <span className="grow" />
               <button
                 className="btn small ghost"

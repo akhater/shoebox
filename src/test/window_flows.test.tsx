@@ -773,6 +773,73 @@ describe("Cull", () => {
     expect(title(host)).toBe("Trip");
   });
 
+  test("a button by the frames turns compare on and off, says its key and sets how many; a shot of one frame has nothing to compare", async () => {
+    fakeBackend();
+    const host = await renderApp();
+    await openCull(host, "Trip");
+    const button = () => host.querySelector<HTMLButtonElement>(".cull-compare-btn")!;
+    const picker = () => host.querySelector<HTMLElement>(".cull-compare-count");
+    const sizes = () => [...picker()!.querySelectorAll("button")].map((b) => [b.textContent, b.getAttribute("aria-pressed"), b.disabled]);
+
+    // One frame shown: the button says what it does and its key, nothing else.
+    expect(button().getAttribute("aria-pressed")).toBe("false");
+    expect(button().textContent).toBe("Compare framesC");
+    expect(button().querySelector("kbd")!.textContent).toBe("C");
+    expect(button().disabled).toBe(false);
+    expect(picker()).toBeNull();
+
+    // On: the burst's two frames, the button says how to leave, and how many is offered (3 and 4: more than the burst).
+    await click(button());
+    expect(panes(host)).toEqual([301, 302]);
+    expect(button().getAttribute("aria-pressed")).toBe("true");
+    expect(button().textContent).toBe("One frameC");
+    expect(sizes()).toEqual([
+      ["2", "true", false],
+      ["3", "false", true],
+      ["4", "false", true],
+    ]);
+    // Off again, by the button or by C; the key and the button are one switch.
+    await click(button());
+    expect(host.querySelector(".cull-pane")).toBeNull();
+    expect(cullPhoto(host)).toBe(302);
+    expect(picker()).toBeNull();
+    await key(document.body, "c");
+    expect(button().getAttribute("aria-pressed")).toBe("true");
+    await key(document.body, "c");
+    expect(button().getAttribute("aria-pressed")).toBe("false");
+
+    // A shot of one frame: nothing to compare, by the button or by C.
+    await key(document.body, "ArrowDown");
+    expect(cullPhoto(host)).toBe(303);
+    expect(button().disabled).toBe(true);
+    expect(button().title).toBe("One frame in this shot: nothing to compare");
+    await key(document.body, "c");
+    expect(host.querySelector(".cull-pane")).toBeNull();
+  });
+
+  test("how many frames are compared is picked on screen too, and kept", async () => {
+    const be = fakeBackend();
+    be.burst([301, 302, 303, 304]);
+    const host = await renderApp();
+    await openCull(host, "Trip");
+    await click(host.querySelector(".cull-compare-btn")!);
+    expect(panes(host)).toEqual([302, 303, 304]);
+    const size = (n: number) => [...host.querySelectorAll<HTMLButtonElement>(".cull-compare-count button")].find((b) => b.textContent === String(n))!;
+    expect(size(3).getAttribute("aria-pressed")).toBe("true");
+    await click(size(4));
+    expect(panes(host)).toEqual([301, 302, 303, 304]);
+    expect(size(4).getAttribute("aria-pressed")).toBe("true");
+    expect(localStorage.getItem("shoebox.cullCompare")).toBe("4");
+    await click(size(2));
+    // The window stays where it was while the frame looked at is in it.
+    expect(panes(host)).toEqual([301, 302]);
+    // Frames selected are compared instead: the picker says so.
+    await click(host.querySelectorAll(".cull-frame")[3], { ctrlKey: true });
+    expect(panes(host)).toEqual([302, 304]);
+    expect(host.querySelector(".cull-compare-count")).toBeNull();
+    expect(host.querySelector(".cull-comparing")!.textContent).toContain("the 2 selected");
+  });
+
   test("2, 3 and 4 say how many frames are compared; frames selected are compared instead", async () => {
     const be = fakeBackend();
     be.burst([301, 302, 303, 304]);

@@ -1,3 +1,4 @@
+import { Columns3, X } from "lucide-react";
 import { memo, useMemo } from "react";
 import type { CullFrame, CullStack } from "../api";
 import { ComparePane } from "./ComparePane";
@@ -67,5 +68,70 @@ export const CullCompare = memo(function CullCompare({
       </div>
       <FaceRows frames={frames} current={stack.frames[current]?.id ?? null} onLook={onLook} />
     </div>
+  );
+});
+
+/**
+ * Compare's switch, by the frames: its key on it, how to leave when on, and how
+ * many frames go side by side. A shot of one frame has nothing to compare.
+ */
+export const CompareSwitch = memo(function CompareSwitch({
+  on,
+  count,
+  frames,
+  selected,
+  onToggle,
+  onCount,
+}: {
+  on: boolean;
+  /** How many frames are compared (2 to 4). */
+  count: number;
+  /** How many frames the shot has. */
+  frames: number;
+  /** How many of them are selected. */
+  selected: number;
+  onToggle: () => void;
+  onCount: (n: number) => void;
+}) {
+  const shown = Math.min(count, frames);
+  return (
+    <span className={`cull-comparing ${on ? "on" : ""}`}>
+      {on &&
+        (selected > 1 ? (
+          <span className="muted">Comparing the {selected} selected</span>
+        ) : (
+          <span className="cull-compare-count" role="group" aria-label="Frames side by side">
+            <span className="muted">Side by side</span>
+            {[2, 3, 4].map((n) => (
+              <button
+                key={n}
+                aria-pressed={n === shown}
+                disabled={n > frames}
+                onClick={() => onCount(n)}
+                title={n > frames ? `This shot has ${frames} frames` : `${n} frames side by side (${n})`}
+              >
+                {n}
+              </button>
+            ))}
+          </span>
+        ))}
+      <button
+        className={`btn small cull-compare-btn ${on ? "on" : "ghost"}`}
+        aria-pressed={on}
+        disabled={!on && frames < 2}
+        onClick={onToggle}
+        title={
+          on
+            ? "Back to one frame (C or Esc)"
+            : frames < 2
+              ? "One frame in this shot: nothing to compare"
+              : "Frames side by side, with each face close up (C)"
+        }
+      >
+        {on ? <X size={14} /> : <Columns3 size={14} />}
+        {on ? "One frame" : selected > 1 ? `Compare the ${selected} selected` : "Compare frames"}
+        <kbd>C</kbd>
+      </button>
+    </span>
   );
 });

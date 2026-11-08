@@ -3577,6 +3577,61 @@ button.link:hover {
 }
 /* Cull compare: frames side by side (the one looked at outlined), what Cull
    says under each; each face cut out of every frame below, in the same columns. */
+/* Compare's switch, by Reject and Keep: its key on it; on, how many frames side by side. */
+.cull-comparing {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 6px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+  font-size: 12px;
+}
+.cull-compare-btn kbd,
+.cull-compare-count button {
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+}
+.cull-compare-btn kbd {
+  margin-left: 2px;
+  padding: 2px 5px;
+}
+.cull-compare-btn.on kbd {
+  color: inherit;
+  border-color: currentColor;
+}
+.cull-compare-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.cull-compare-count > .muted {
+  margin-right: 4px;
+}
+.cull-compare-count button {
+  min-width: 24px;
+  padding: 4px 7px;
+  cursor: pointer;
+  color: var(--text);
+}
+.cull-compare-count button:hover:not(:disabled) {
+  background: var(--hover);
+}
+.cull-compare-count button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.cull-compare-count button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
 .cull-compare {
   flex: 1;
   min-height: 0;
