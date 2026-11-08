@@ -499,7 +499,7 @@ pub fn runtime_ready() -> bool {
 }
 
 pub const RUNTIME_MISSING: &str = if !RUNTIME_PUBLISHED {
-    "AI features (word search, faces, sideways photos) aren't available on this system yet: no ONNX Runtime is published for it."
+    "AI features (word search, faces, sideways photos and Cull's eye check) aren't available on this system yet: no ONNX Runtime is published for it."
 } else if cfg!(windows) {
     "The AI runtime isn't here. Download it in Settings > AI models (or: shoebox-cli models download runtime-gpu)."
 } else {

@@ -342,7 +342,11 @@ pub fn shared() -> Option<Arc<Reader>> {
     if s.failed.is_some_and(|t| t.elapsed() < RETRY) {
         return None;
     }
-    match Reader::load() {
+    // A load that panics counts as a failed one: without this, `failed` stays unset and every call
+    // would panic again.
+    let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(Reader::load))
+        .unwrap_or_else(|_| Err(anyhow!("loading the models panicked")));
+    match loaded {
         Ok(reader) => {
             log::info!("expressions: models loaded ({})", reader.on());
             let reader = Arc::new(reader);

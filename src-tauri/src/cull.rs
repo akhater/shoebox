@@ -2148,9 +2148,12 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
     let shake: Vec<f32> = looks.iter().map(|m| m.as_ref().map_or(0.0, |m| m.shake(all_close).min(1.0))).collect();
     // Eyes too are weighed on one kind of look: a closer look can read a
     // face the preview shows too small, and with only some frames looked at
-    // closer, that face alone could choose the keeper.
+    // closer, that face alone could choose the keeper. The originals count
+    // only when each of them read eyes.
+    let close_eyes =
+        all_close && frames.iter().all(|f| f.quality.is_some_and(|q| q.close.is_some_and(|c| c.eyes.is_some())));
     let eyes: Vec<Option<Eyes>> =
-        frames.iter().map(|f| f.quality.and_then(|q| if all_close { q.eyes() } else { q.preview.eyes })).collect();
+        frames.iter().map(|f| f.quality.and_then(|q| if close_eyes { q.eyes() } else { q.preview.eyes })).collect();
     // In a burst, closed eyes count only as a change from the other frames
     // ([`BLINK_MARGIN`]): a look down reads the same in all of them. Frames
     // of one capture don't count against each other, and with no other frame
@@ -3050,6 +3053,18 @@ mod tests {
         let s = &suggest(frames)[0];
         assert_eq!((s.closer, s.keeper), (true, 1), "{:?}", s.frames);
         assert_eq!(s.frames[0].problems, [Problem::EyesClosed]);
+        // Every frame looked at closer, but one closer look read no eyes: a
+        // face only the sharper frame's original read, closed, has nothing to
+        // be compared with. The previews are compared.
+        let mut frames = vec![with_eyes(1, 0.2, 1, 0, 0.3), with_eyes(2, 0.4, 1, 0, 0.3)];
+        for (i, f) in frames.iter_mut().enumerate() {
+            let q = f.quality.as_mut().unwrap();
+            let eyes = (i == 0).then_some(Eyes { faces: 2, closed: 1, blink: 0.9, smile: 0.3 });
+            q.close = Some(Measures { long: 3000, eyes, ..q.preview });
+        }
+        let s = &suggest(frames)[0];
+        assert_eq!((s.closer, s.keeper), (true, 0), "{:?}", s.frames);
+        assert!(s.frames[0].problems.is_empty(), "{:?}", s.frames);
     }
 
     #[test]

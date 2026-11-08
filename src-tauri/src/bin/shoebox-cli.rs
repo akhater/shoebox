@@ -287,12 +287,13 @@
 //!                                         largest face; "focusMissed" = soft there while
 //!                                         something else is sharp; "eyesClosed" = a face's eyes
 //!                                         closed. Here it is burst-relative: a frame of a burst
-//!                                         carries it only when its eyes read clearly more closed
-//!                                         than the least closed of the burst's other captures (a
-//!                                         look down that lasts through the burst isn't flagged),
-//!                                         and is then rejected
-//!                                         for a frame with open eyes; a lone frame is flagged as
-//!                                         read, and left to you. `measure` reports it per photo,
+//!                                         carries it only when it has more faces closed than the
+//!                                         least closed of its other captures, or reads at least
+//!                                         the margin more closed (a look down that lasts through
+//!                                         the burst isn't flagged), and is then rejected for a
+//!                                         frame with open eyes; a frame with no other capture
+//!                                         whose eyes were read is flagged as read, and left to
+//!                                         you. `measure` reports it per photo,
 //!                                         as read, so the two can differ for one photo. --closer first
 //!                                         looks closer at the originals plugged in (read at half
 //!                                         size, read-only), which shows a photo only soft at 100%;
