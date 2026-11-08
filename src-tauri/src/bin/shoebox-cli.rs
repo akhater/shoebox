@@ -286,8 +286,14 @@
 //!                                         camera focused (when its file says), else on the
 //!                                         largest face; "focusMissed" = soft there while
 //!                                         something else is sharp; "eyesClosed" = a face's eyes
-//!                                         closed (left to you alone, rejected in a burst with a
-//!                                         frame whose eyes are open). --closer first
+//!                                         closed. Here it is burst-relative: a frame of a burst
+//!                                         carries it only when its eyes read clearly more closed
+//!                                         than the least closed of the burst's other captures (a
+//!                                         look down that lasts through the burst isn't flagged),
+//!                                         and is then rejected
+//!                                         for a frame with open eyes; a lone frame is flagged as
+//!                                         read, and left to you. `measure` reports it per photo,
+//!                                         as read, so the two can differ for one photo. --closer first
 //!                                         looks closer at the originals plugged in (read at half
 //!                                         size, read-only), which shows a photo only soft at 100%;
 //!                                         originals it couldn't read are listed under "unreadable", with why
@@ -1262,7 +1268,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         _ => eprintln!(
-            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope] | eyes <id> [--original] | missing | forget-missing <id>... | --in-bin | --all | turn right|left|half|back <id>... | sideways | upright-check [--again] | sideways-accept <id>... | --all | sideways-leave <id>... | --all | upright-eval <folder> [limit] | gpu-check"
+            "usage: shoebox-cli add <folder> | scan [root-id] | stats | version | photo <id> | gear | gear-rename camera|lens <name> <new> | gear-split camera|lens <name> | find-lenses | lens <file> | models [download|delete|verify] <id> | mark <id>... | unmark <id>... | unmark --all | marked | delete-marked <token> [volume-id...] | quality | measure <id>... | cull [filters] [scope] [--closer] | cull-accept [filters] [scope] | eyes <id>... [--original] | missing | forget-missing <id>... | --in-bin | --all | turn right|left|half|back <id>... | sideways | upright-check [--again] | sideways-accept <id>... | --all | sideways-leave <id>... | --all | upright-eval <folder> [limit] | gpu-check"
         ),
     }
     Ok(())

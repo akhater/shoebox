@@ -35,8 +35,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// Version of how photos are measured: photos measured by an older one are
-/// measured again. 3: faces' eyes and smiles are read too ([`Eyes`]).
-pub const QUALITY_VERSION: i64 = 3;
+/// measured again, and their closer looks dropped. Reading eyes and smiles
+/// ([`Eyes`]) didn't change it: a closer look can't be taken again while its
+/// disk is unplugged, so measures from before are kept, and photos with faces
+/// are measured again from their previews once the expression models are here
+/// (`eyes` in quality.db), keeping their closer looks.
+pub const QUALITY_VERSION: i64 = 2;
 
 /// Cull works on a shoot, not a whole archive: views bigger than this ask
 /// for a folder or a day instead.
@@ -87,11 +91,12 @@ const SAME_FRAMING_AS_FIRST: f32 = 0.8;
 const SAME_SHOT_GAP: i64 = 30;
 /// Without CLIP descriptions: frames of one burst, within a second.
 const BURST_GAP: i64 = 1;
-/// Of the frames of a shot within this much of the best one's score (edge
-/// blur in thousandths of the long edge, and what counts against a frame:
-/// [`stack_of`]), as sharp to the eye, the one smiling the most is kept when
-/// it smiles this much more (0..1) than the best one.
+/// Frames of a shot within this much of the best one's score (edge blur in
+/// thousandths of the long edge, and what counts against a frame:
+/// [`stack_of`]) are as sharp to the eye: a smile can choose among them.
 const TIE: f32 = 0.15;
+/// Of frames as sharp to the eye ([`TIE`]), one smiling this much more
+/// (0..1) than the best one is kept instead.
 const SMILE_MARGIN: f32 = 0.2;
 /// Closed eyes in a burst are a blink only when the frame's eyes read this
 /// much more closed (0..1) than the least closed frame's, or with more faces
@@ -2141,7 +2146,11 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
     // Shake short of a problem counts too: of frames all shaken a little,
     // the steadiest is kept.
     let shake: Vec<f32> = looks.iter().map(|m| m.as_ref().map_or(0.0, |m| m.shake(all_close).min(1.0))).collect();
-    let eyes: Vec<Option<Eyes>> = frames.iter().map(|f| f.quality.and_then(|q| q.eyes())).collect();
+    // Eyes too are weighed on one kind of look: a closer look can read a
+    // face the preview shows too small, and with only some frames looked at
+    // closer, that face alone could choose the keeper.
+    let eyes: Vec<Option<Eyes>> =
+        frames.iter().map(|f| f.quality.and_then(|q| if all_close { q.eyes() } else { q.preview.eyes })).collect();
     // In a burst, closed eyes count only as a change from the other frames
     // ([`BLINK_MARGIN`]): a look down reads the same in all of them. Frames
     // of one capture don't count against each other, and with no other frame
@@ -2152,7 +2161,7 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
             let least = (0..frames.len())
                 .filter(|&j| capture[j] != capture[i])
                 .filter_map(|j| eyes[j])
-                .min_by(|a, b| (a.closed, a.blink).partial_cmp(&(b.closed, b.blink)).unwrap());
+                .min_by(|a, b| a.closed.cmp(&b.closed).then(a.blink.total_cmp(&b.blink)));
             least.is_none_or(|l| e.closed > l.closed || e.blink >= l.blink + BLINK_MARGIN)
         })
         .collect();
@@ -2177,11 +2186,12 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
     };
     let best = (0..frames.len()).min_by(|a, b| score(*a).total_cmp(&score(*b))).unwrap_or(0);
     // Frames as sharp to the eye: the one smiling clearly more is kept, when
-    // the best one's faces were read too.
+    // the best one's faces were read too. Another version of the best's own
+    // capture is the same moment: it can't win on a smile.
     let smile = |i: usize| eyes[i].map(|e| e.smile);
     let smiling = smile(best).and_then(|least| {
         (0..frames.len())
-            .filter(|&i| score(i) <= score(best) + TIE)
+            .filter(|&i| capture[i] != capture[best] && score(i) <= score(best) + TIE)
             .filter_map(|i| Some((i, smile(i)?)))
             .filter(|&(_, s)| s >= least + SMILE_MARGIN)
             .max_by(|a, b| a.1.total_cmp(&b.1))
@@ -2957,6 +2967,89 @@ mod tests {
         let s = &suggest(vec![named(1, "IMG_0001.CR2"), named(2, "IMG_0001.JPG")])[0];
         assert!(s.frames.iter().all(|f| f.problems == [Problem::EyesClosed]), "{:?}", s.frames);
         assert!(s.frames.iter().all(|f| f.suggest == Suggest::None), "{:?}", s.frames);
+    }
+
+    /// Frame `id` of a burst read as [`with_eyes`] (one face), named `name` and taken at `taken`.
+    fn named_eyes(id: i64, name: &str, taken: i64, blur: f32, closed: u8, smile: f32) -> FrameIn {
+        let mut f = with_eyes(id, blur, 1, closed, smile);
+        (f.taken, f.row.name) = (taken, Some(name.into()));
+        f
+    }
+
+    #[test]
+    fn a_capture_read_closed_loses_to_open_eyes_of_another() {
+        // A RAW and its JPEG, both read closed, then the next frame of the
+        // burst with open eyes: both versions are judged against it.
+        let s = &suggest(vec![
+            named_eyes(1, "IMG_0001.CR2", 100, 0.2, 1, 0.3),
+            named_eyes(2, "IMG_0001.JPG", 100, 0.25, 1, 0.3),
+            named_eyes(3, "IMG_0002.CR2", 101, 0.5, 0, 0.3),
+        ])[0];
+        assert_eq!((s.frames.len(), s.keeper), (3, 2), "{:?}", s.frames);
+        for f in &s.frames[..2] {
+            assert_eq!((f.suggest, &f.problems[..]), (Suggest::Reject, &[Problem::EyesClosed][..]), "{f:?}");
+            assert_eq!(f.reasons, ["Same shot: frame 3 is better", "Eyes closed"]);
+        }
+        assert_eq!(s.frames[2].suggest, Suggest::Keep);
+        assert_eq!(s.frames[2].reasons, ["The best of these 2 frames"]);
+    }
+
+    #[test]
+    fn a_smile_is_weighed_against_other_captures_only() {
+        // The JPEG of the best frame smiles more (it is the same moment, read
+        // again): the RAW stays the keeper, and no one is "Smiling".
+        let s = &suggest(vec![
+            named_eyes(1, "IMG_0001.CR2", 100, 0.30, 0, 0.1),
+            named_eyes(2, "IMG_0001.JPG", 100, 0.35, 0, 0.5),
+            named_eyes(3, "IMG_0002.CR2", 101, 0.60, 0, 0.1),
+        ])[0];
+        assert_eq!(s.keeper, 0, "{:?}", s.frames);
+        assert_eq!(s.frames[0].reasons, ["The best of these 2 frames"]);
+        assert_eq!(s.frames[1].reasons, ["Another version of the same frame"]);
+        assert!(s.frames.iter().all(|f| !f.reasons.iter().any(|r| r == "Smiling")), "{:?}", s.frames);
+    }
+
+    #[test]
+    fn eyes_closed_not_a_blink_still_win_on_a_smile() {
+        // Lidded alike through the burst (not a blink): the frame smiling
+        // clearly more, as sharp to the eye, is kept, and nothing says Eyes closed.
+        let lidded = |id: i64, blur: f32, blink: f32, smile: f32| {
+            let mut f = with_blink(id, blur, 1, 1, blink);
+            f.quality.as_mut().unwrap().preview.eyes.as_mut().unwrap().smile = smile;
+            f
+        };
+        let s = &suggest(vec![lidded(1, 0.30, 0.60, 0.1), lidded(2, 0.40, 0.62, 0.5)])[0];
+        assert_eq!(s.keeper, 1, "{:?}", s.frames);
+        assert_eq!(s.frames[1].reasons, ["The best of these 2 frames", "Smiling"]);
+        assert!(s.frames.iter().all(|f| f.problems.is_empty()), "{:?}", s.frames);
+    }
+
+    #[test]
+    fn a_burst_weighs_eyes_on_the_looks_it_compares() {
+        // Only the sharper frame was looked at closer (a closer look stopped
+        // halfway): its original showed a background face with closed eyes,
+        // too small on the preview to read. The previews are compared, eyes too.
+        let mut sharp = with_eyes(1, 0.2, 1, 0, 0.3);
+        let q = sharp.quality.as_mut().unwrap();
+        q.close = Some(Measures {
+            long: 3000,
+            eyes: Some(Eyes { faces: 2, closed: 1, blink: 0.9, smile: 0.3 }),
+            ..q.preview
+        });
+        let s = &suggest(vec![sharp, with_eyes(2, 0.4, 1, 0, 0.3)])[0];
+        assert_eq!((s.closer, s.keeper), (false, 0), "{:?}", s.frames);
+        assert!(s.frames[0].problems.is_empty(), "{:?}", s.frames);
+        // Every frame looked at closer: the originals' eyes count.
+        let mut frames = vec![with_eyes(1, 0.2, 1, 0, 0.3), with_eyes(2, 0.4, 1, 0, 0.3)];
+        for (i, f) in frames.iter_mut().enumerate() {
+            let q = f.quality.as_mut().unwrap();
+            let eyes =
+                if i == 0 { Eyes { faces: 2, closed: 1, blink: 0.9, smile: 0.3 } } else { q.preview.eyes.unwrap() };
+            q.close = Some(Measures { long: 3000, eyes: Some(eyes), ..q.preview });
+        }
+        let s = &suggest(frames)[0];
+        assert_eq!((s.closer, s.keeper), (true, 1), "{:?}", s.frames);
+        assert_eq!(s.frames[0].problems, [Problem::EyesClosed]);
     }
 
     #[test]

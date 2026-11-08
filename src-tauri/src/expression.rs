@@ -16,7 +16,7 @@ use anyhow::{Result, anyhow, bail};
 use image::RgbImage;
 use ort::session::Session;
 use ort::value::Tensor;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 /// A face found in a picture, in pixels of that picture. `kps` are InsightFace's five points in
@@ -306,6 +306,8 @@ struct Shared {
     failed: Option<Instant>,
 }
 
+/// A load that panics poisons it: it is used all the same (its state is always written whole), so the
+/// eye check, and the rest of Cull's measuring with it, goes on.
 static SHARED: Mutex<Shared> = Mutex::new(Shared { reader: None, checked: None, failed: None });
 
 /// How often a reader on the GPU is checked again, and a failed load tried again.
@@ -315,7 +317,7 @@ const RETRY: Duration = Duration::from_secs(60);
 /// (downloaded later, they load on the next call), or when loading them failed in the last minute
 /// (logged once a minute at most).
 pub fn shared() -> Option<Arc<Reader>> {
-    let mut s = SHARED.lock().unwrap();
+    let mut s = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
     if !crate::models::ready(crate::models::EXPRESSIONS) {
         // Deleted, or being deleted: a reader loaded again after unload() lets go of the files too,
         // and a load that failed is forgotten (files downloaded again get a fresh try).
@@ -363,7 +365,11 @@ fn runtime_here() -> bool {
 /// which must cost what it shows. A load or check in progress (the reader is busy) counts as
 /// usable; the next look at photos decides.
 pub fn usable() -> bool {
-    let Ok(s) = SHARED.try_lock() else { return true };
+    let s = match SHARED.try_lock() {
+        Ok(s) => s,
+        Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(TryLockError::WouldBlock) => return true,
+    };
     let files = || crate::models::ready(crate::models::EXPRESSIONS) && runtime_here();
     usable_with(s.reader.is_some(), files, s.failed.map(|t| t.elapsed()))
 }
@@ -378,7 +384,7 @@ fn usable_with(loaded: bool, files: impl FnOnce() -> bool, failed: Option<Durati
 /// Lets go of the models (they are being deleted). A look in progress keeps its own hold on them
 /// until it ends.
 pub fn unload() {
-    *SHARED.lock().unwrap() = Shared::default();
+    *SHARED.lock().unwrap_or_else(PoisonError::into_inner) = Shared::default();
 }
 
 #[cfg(test)]
@@ -463,6 +469,22 @@ mod tests {
         assert!(usable_with(false, || true, long_ago), "failed a while ago: tried again");
         assert!(!usable_with(false, || false, None), "not here");
         assert!(!usable_with(false, || false, long_ago), "not here");
+    }
+
+    /// A load that panicked (holding the shared reader's lock) leaves the lock poisoned: the next
+    /// looks at photos go on, and whether the models are usable is still told by what is here.
+    #[test]
+    fn a_panicking_load_doesnt_stop_the_next_looks() {
+        let _ = std::thread::spawn(|| {
+            let _held = SHARED.lock();
+            panic!("a load that panics");
+        })
+        .join();
+        assert!(SHARED.is_poisoned());
+        let here = crate::models::ready(crate::models::EXPRESSIONS) && runtime_here();
+        assert_eq!(shared().is_some(), here);
+        unload();
+        assert_eq!(usable(), here);
     }
 
     #[test]
