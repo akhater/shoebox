@@ -351,6 +351,7 @@ export function fakeBackend() {
         h: 100,
         rev: 1,
         marked: marked.has(p.id),
+        faces: facesIn.get(p.id)?.length ?? 0,
         suggest: missed && suggest === "keep" ? "none" : suggest,
         reasons: missed ? [...reasons, "Focus missed: the camera focused here, but the sharpest part is elsewhere"] : reasons,
         problems: missed ? [...problems, "focusMissed"] : problems,

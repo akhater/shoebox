@@ -3606,6 +3606,9 @@ button.link:hover {
   color: inherit;
   border-color: currentColor;
 }
+.cull-compare-note {
+  font-size: 12px;
+}
 .cull-compare-count {
   display: inline-flex;
   align-items: center;
@@ -3633,11 +3636,32 @@ button.link:hover {
   cursor: default;
 }
 .cull-compare {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+/* Closes compare: on the last frame's corner, over the picture. */
+.cull-compare-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(16, 17, 20, 0.72);
+  color: var(--text);
+  cursor: pointer;
+}
+.cull-compare-close:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 .cull-panes {
   flex: 1;

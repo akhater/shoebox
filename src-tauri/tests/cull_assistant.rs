@@ -405,3 +405,35 @@ fn the_camera_focus_point_leads_cull() {
     drop((quality, search, cat));
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn each_frame_says_how_many_faces_were_found_in_it() {
+    let base = std::env::temp_dir().join("shoebox-cull-faces");
+    let _ = std::fs::remove_dir_all(&base);
+    let photos = base.join("photos");
+    std::fs::create_dir_all(&photos).unwrap();
+    squares(&photos.join("IMG_0001.JPG"), 2000, 1333, 0.0);
+    squares_of(&photos.join("IMG_0002.JPG"), 2000, 1333, 0.0, 50);
+    let data = DataDir { root: base.join("catalog") };
+    data.ensure().unwrap();
+    let cat = Catalog::open(data).unwrap();
+    let root = cat.add_root(&photos).unwrap();
+    scan_root(&cat, root, &AtomicBool::new(false), false, &|_| {}).unwrap();
+    let (one, two) = (id_of(&cat, "IMG_0001.JPG"), id_of(&cat, "IMG_0002.JPG"));
+    // Two faces in the second, a small one among them.
+    for (x1, x2) in [(0.1, 0.3), (0.6, 0.62)] {
+        cat.db()
+            .execute(
+                "INSERT INTO faces (photo_id, x1, y1, x2, y2, kps, score) VALUES (?1, ?2, 0.2, ?3, 0.5, '', 0.9)",
+                rusqlite::params![two, x1, x2],
+            )
+            .unwrap();
+    }
+    let quality = QualityIndex::open(&cat).unwrap();
+    let search = SearchIndex::open(&cat).unwrap();
+    let shoot = quality.shoot(&cat, &search, &Scope::Root { id: root }, &Filters::default()).unwrap();
+    let faces: Vec<(i64, usize)> = shoot.stacks.iter().flat_map(|s| &s.frames).map(|f| (f.id, f.faces)).collect();
+    assert_eq!(faces, [(one, 0), (two, 2)]);
+    drop((quality, search, cat));
+    let _ = std::fs::remove_dir_all(&base);
+}

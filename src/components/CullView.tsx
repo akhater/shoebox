@@ -23,7 +23,7 @@ import {
   type Scope,
   type Shoot,
 } from "../api";
-import { compareSet, CompareSwitch, CullCompare } from "./CullCompare";
+import { compareSet, CompareSwitch, CullCompare, opensItself } from "./CullCompare";
 import { clickedSpot, firstSpot, missedPoints, OnPicture, Zoomed, type Spot } from "./CullPicture";
 import { FocusPoints } from "./FocusPoints";
 
@@ -102,8 +102,9 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
   // Selected frames (of the shot shown), and selected shots: X and P act on them all.
   const [selFrames, setSelFrames] = useState<Set<number>>(() => new Set());
   const [selShots, setSelShots] = useState<Set<number>>(() => new Set());
-  // Compare: frames side by side, how many.
-  const [compare, setCompare] = useState(false);
+  // Compare: frames side by side, how many. "auto": open where it helps (`opensItself`), until
+  // closed; then shut for the rest of the shoot, until opened again.
+  const [mode, setMode] = useState<"auto" | "on" | "off">("auto");
   const [count, setCount] = useState(comparedCount);
   const chooseCount = useCallback((n: number) => {
     setCount(n);
@@ -113,7 +114,9 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
       /* not remembered */
     }
   }, []);
-  const toggleCompare = useCallback(() => setCompare((c) => !c), []);
+  const comparing = useRef(false);
+  const toggleCompare = useCallback(() => setMode(comparing.current ? "off" : "on"), []);
+  const closeCompare = useCallback(() => setMode("off"), []);
 
   // Only the latest answer counts.
   const seq = useRef(0);
@@ -123,6 +126,8 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
       .shoot(scope, filters)
       .then((s) => {
         if (n !== seq.current) return;
+        // Opened: on the first shot's keeper from the first frame drawn (compare opens there).
+        if (atId.current == null) setAt({ stack: 0, frame: s.stacks[0]?.keeper ?? 0 });
         setShoot(s);
         setFailed(null);
         setMine(new Map());
@@ -173,6 +178,8 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
 
   const stack: CullStack | undefined = stacks[Math.min(at.stack, stacks.length - 1)];
   const frame = stack?.frames[Math.min(at.frame, stack.frames.length - 1)];
+  const compare = !!stack && stack.frames.length > 1 && (mode === "on" || (mode === "auto" && opensItself(stack)));
+  comparing.current = compare;
 
   // The frames compared: those selected (up to 4), else `count` from the one looked at on. They stay
   // while the one looked at moves among them, and slide when it goes past them.
@@ -370,7 +377,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
         // A selection first, then 100%, then compare, then Cull itself.
         if (several) clearSelection();
         else if (zoom) setZoom(null);
-        else if (compare) setCompare(false);
+        else if (compare) setMode("off");
         else onClose();
         e.preventDefault();
         return;
@@ -425,7 +432,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
         case "c":
         case "C":
           if (!compare && stack.frames.length < 2) return;
-          setCompare((c) => !c);
+          toggleCompare();
           break;
         case "2":
         case "3":
@@ -440,7 +447,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [stack, at, stacks, zoom, several, compare, step, goStack, act, accept, zoomOn, clearSelection, chooseCount, onClose]);
+  }, [stack, at, stacks, zoom, several, compare, step, goStack, act, accept, zoomOn, clearSelection, chooseCount, toggleCompare, onClose]);
 
   if (failed) {
     return (
@@ -562,6 +569,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
               zoom={zoom}
               onLook={lookAt}
               onZoom={setZoom}
+              onClose={closeCompare}
             />
           ) : zoom ? (
             <Zoomed frame={frame} points={missed} spot={zoom} onMove={setZoom} onExit={() => setZoom(null)} />
@@ -615,6 +623,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
               </button>
               <CompareSwitch
                 on={compare}
+                closed={mode === "off" && opensItself(stack)}
                 count={count}
                 frames={stack.frames.length}
                 selected={selFrames.size}
@@ -661,7 +670,7 @@ export const CullView = memo(function CullView({ scope, filters, title, onClose,
           </div>
           <div className="cull-keys muted small">
             {compare
-              ? "← → frames · ↑ ↓ shots · X reject · P or K keep the frame looked at · 2 3 4 how many · Z or click it: all at 100% (drag moves all) · click a face: its frame · C or Esc: one frame"
+              ? "← → frames · ↑ ↓ shots · X reject · P or K keep the frame looked at · 2 3 4 how many · Z or click it: all at 100% (drag moves all) · click a face: its frame · × or C or Esc: close"
               : "← → frames · ↑ ↓ shots · X reject · P or K keep · Enter accept the shot · Z or click: 100% (drag to move, ← → keep the spot) · C compare · Ctrl or Shift click: several · Esc back"}
           </div>
         </div>

@@ -316,9 +316,9 @@ describe("Cull's compared frames and faces", () => {
   const openCompare = async (host: HTMLElement) => {
     await click(sidebarItem(host, "Fast"));
     await wait(100);
+    // Bursts with people: compared from the start.
     await click(byText(host, ".toolbar button", "Cull"));
     await wait(100);
-    await key(document.body, "c");
   };
   const paneIds = (host: HTMLElement) => [...host.querySelectorAll<HTMLElement>(".cull-pane")].map((p) => Number(p.dataset.frame));
   const faceIds = (host: HTMLElement) =>

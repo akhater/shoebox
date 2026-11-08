@@ -792,7 +792,7 @@ describe("Cull", () => {
     await click(button());
     expect(panes(host)).toEqual([301, 302]);
     expect(button().getAttribute("aria-pressed")).toBe("true");
-    expect(button().textContent).toBe("One frameC");
+    expect(button().textContent).toBe("Close compareC");
     expect(sizes()).toEqual([
       ["2", "true", false],
       ["3", "false", true],
@@ -815,6 +815,43 @@ describe("Cull", () => {
     expect(button().title).toBe("One frame in this shot: nothing to compare");
     await key(document.body, "c");
     expect(host.querySelector(".cull-pane")).toBeNull();
+  });
+
+  test("a burst with people is compared from the start; × closes compare for the rest of the shoot, a note says C opens it again", async () => {
+    const be = fakeBackend();
+    be.burst([301, 302]);
+    be.burst([303, 304]);
+    const face = (photoId: number) => ({ id: photoId * 10, photoId, personId: null, name: null, bbox: [0.4, 0.2, 0.5, 0.4] as [number, number, number, number] });
+    be.facesIn.set(302, [face(302)]);
+    be.facesIn.set(304, [face(304)]);
+    const host = await renderApp();
+    await openCull(host, "Trip");
+    const button = () => host.querySelector<HTMLButtonElement>(".cull-compare-btn")!;
+    const note = () => host.querySelector(".cull-compare-note")?.textContent ?? null;
+    expect(panes(host)).toEqual([301, 302]);
+    expect(button().getAttribute("aria-pressed")).toBe("true");
+    expect(note()).toBeNull();
+
+    // Closed with its ×: one frame, and a note where it would have opened.
+    await click(host.querySelector(".cull-compare-close")!);
+    expect(host.querySelector(".cull-pane")).toBeNull();
+    expect(cullPhoto(host)).toBe(302);
+    expect(note()).toBe("Compare closed for this shoot · C opens it again");
+    // The next burst with people stays as one frame too.
+    await key(document.body, "ArrowDown");
+    expect(cullPhoto(host)).toBe(304);
+    expect(host.querySelector(".cull-pane")).toBeNull();
+    expect(note()).not.toBeNull();
+    // C opens it again (here and on); Esc closes it for the shoot again.
+    await key(document.body, "c");
+    expect(panes(host)).toEqual([303, 304]);
+    expect(note()).toBeNull();
+    await key(document.body, "ArrowUp");
+    expect(panes(host)).toEqual([301, 302]);
+    await key(document.body, "Escape");
+    expect(host.querySelector(".cull-pane")).toBeNull();
+    expect(note()).not.toBeNull();
+    expect(title(host)).toBe("Cull · Trip");
   });
 
   test("how many frames are compared is picked on screen too, and kept", async () => {
@@ -918,8 +955,8 @@ describe("Cull", () => {
     be.facesIn.set(302, [face(1, 302, [0.1, 0.1, 0.2, 0.3], 7), face(2, 302, [0.55, 0.2, 0.75, 0.5])]);
     be.facesIn.set(303, [face(4, 303, [0.4, 0.1, 0.5, 0.3], 7), face(3, 303, [0.57, 0.21, 0.77, 0.51])]);
     const host = await renderApp();
+    // A burst with people: compared from the start.
     await openCull(host, "Trip");
-    await key(document.body, "c");
     await wait(50);
     expect(be.calls.filter((c) => c.cmd === "faces_in_photos").map((c) => c.args.photoIds)).toEqual([[302, 303, 304]]);
     const rows = [...host.querySelectorAll<HTMLElement>(".cull-face-row")];
