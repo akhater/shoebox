@@ -93,6 +93,11 @@ const BURST_GAP: i64 = 1;
 /// it smiles this much more (0..1) than the best one.
 const TIE: f32 = 0.15;
 const SMILE_MARGIN: f32 = 0.2;
+/// Closed eyes in a burst are a blink only when the frame's eyes read this
+/// much more closed (0..1) than the least closed frame's, or with more faces
+/// closed: looking down reads alike in every frame, a blink is a change
+/// between frames. Measured on real bursts.
+const BLINK_MARGIN: f32 = 0.3;
 
 /// What one look at a photo found. Blur is a Gaussian sigma, in pixels of
 /// the picture measured (`long` px on its long edge).
@@ -2118,8 +2123,13 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
     if frames.first().is_some_and(|f| f.stack.is_some()) {
         return focus_stack_of(frames);
     }
-    let found: Vec<Vec<Found>> =
+    let mut found: Vec<Vec<Found>> =
         frames.iter().map(|f| f.quality.map(|q| problems(&q, &f.shot)).unwrap_or_default()).collect();
+    // Versions of one capture (a RAW and its camera JPEG or an export) are
+    // one frame to Cull: they share the verdict of the best of them.
+    let capture: Vec<usize> =
+        (0..frames.len()).map(|i| (0..i).find(|&j| same_capture(&frames[j], &frames[i])).unwrap_or(i)).collect();
+    let n = capture.iter().enumerate().filter(|(i, c)| i == *c).count();
     // Frames compare on their faces, else where the camera focused, else on
     // their sharpest part ([`Compared::of`]); on the originals when each was
     // looked at closer.
@@ -2132,11 +2142,33 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
     // the steadiest is kept.
     let shake: Vec<f32> = looks.iter().map(|m| m.as_ref().map_or(0.0, |m| m.shake(all_close).min(1.0))).collect();
     let eyes: Vec<Option<Eyes>> = frames.iter().map(|f| f.quality.and_then(|q| q.eyes())).collect();
+    // In a burst, closed eyes count only as a change from the other frames
+    // ([`BLINK_MARGIN`]): a look down reads the same in all of them. Frames
+    // of one capture don't count against each other, and with no other frame
+    // read, closed eyes stand as they are.
+    let blinking: Vec<bool> = (0..frames.len())
+        .map(|i| {
+            let Some(e) = eyes[i].filter(|e| e.closed > 0) else { return false };
+            let least = (0..frames.len())
+                .filter(|&j| capture[j] != capture[i])
+                .filter_map(|j| eyes[j])
+                .min_by(|a, b| (a.closed, a.blink).partial_cmp(&(b.closed, b.blink)).unwrap());
+            least.is_none_or(|l| e.closed > l.closed || e.blink >= l.blink + BLINK_MARGIN)
+        })
+        .collect();
+    for (i, found) in found.iter_mut().enumerate() {
+        if !blinking[i] {
+            found.retain(|p| p.problem != Problem::EyesClosed);
+        }
+    }
     // Closed eyes count as a major problem here, alone left to the user: a
     // sharp frame with open eyes is kept. Each further face with its eyes
     // closed counts a little more: of a group, the frame with the fewest
     // blinks. Faces not read count for nothing.
-    let blinks = |i: usize| eyes[i].filter(|e| e.closed > 0).map_or(0.0, |e| 5.0 + f32::from(e.closed - 1));
+    let blinks = |i: usize| match eyes[i] {
+        Some(e) if blinking[i] => 5.0 + f32::from(e.closed - 1),
+        _ => 0.0,
+    };
     let score = |i: usize| -> f32 {
         let major = found[i].iter().filter(|p| p.problem.major()).count() as f32;
         let minor = found[i].iter().filter(|p| !p.problem.major() && p.problem != Problem::EyesClosed).count() as f32;
@@ -2156,11 +2188,6 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
             .map(|(i, _)| i)
     });
     let keeper = smiling.unwrap_or(best);
-    // Versions of one capture (a RAW and its camera JPEG or an export) are
-    // one frame to Cull: they share the verdict of the best of them.
-    let capture: Vec<usize> =
-        (0..frames.len()).map(|i| (0..i).find(|&j| same_capture(&frames[j], &frames[i])).unwrap_or(i)).collect();
-    let n = capture.iter().enumerate().filter(|(i, c)| i == *c).count();
     let kept = capture[keeper];
     let keeper_major = found[keeper].iter().any(|p| p.problem.major());
     let keeper_minor = !found[keeper].is_empty() && !keeper_major;
@@ -2826,9 +2853,15 @@ mod tests {
     /// Frame `id` of a burst, `blur` sharp, its `faces` read: `closed` of them
     /// with their eyes closed, smiling `smile` on average.
     fn with_eyes(id: i64, blur: f32, faces: u8, closed: u8, smile: f32) -> FrameIn {
+        let mut f = with_blink(id, blur, faces, closed, if closed > 0 { 0.9 } else { 0.1 });
+        f.quality.as_mut().unwrap().preview.eyes.as_mut().unwrap().smile = smile;
+        f
+    }
+
+    /// The same, with the eyes' blink score given.
+    fn with_blink(id: i64, blur: f32, faces: u8, closed: u8, blink: f32) -> FrameIn {
         let mut f = frame(id, 100 + id, None, blur);
-        let blink = if closed > 0 { 0.9 } else { 0.1 };
-        f.quality.as_mut().unwrap().preview.eyes = Some(Eyes { faces, closed, blink, smile });
+        f.quality.as_mut().unwrap().preview.eyes = Some(Eyes { faces, closed, blink, smile: 0.3 });
         f
     }
 
@@ -2867,13 +2900,41 @@ mod tests {
 
     #[test]
     fn every_frame_blinking_keeps_the_sharpest() {
+        // Closed alike in every frame: not a blink, so the sharpest is kept clean.
         let s =
             &suggest(vec![with_eyes(1, 0.5, 1, 1, 0.3), with_eyes(2, 0.2, 1, 1, 0.3), with_eyes(3, 0.4, 1, 1, 0.3)])[0];
         assert_eq!(s.keeper, 1, "{:?}", s.frames);
         let suggests: Vec<Suggest> = s.frames.iter().map(|f| f.suggest).collect();
         assert_eq!(suggests, [Suggest::Reject, Suggest::Keep, Suggest::Reject]);
-        assert_eq!(s.frames[1].reasons, ["The best of these 3 frames", "Eyes closed"]);
-        assert_eq!(s.frames[0].reasons, ["Same shot: frame 2 is better", "Eyes closed"]);
+        assert_eq!(s.frames[1].reasons, ["The best of these 3 frames"]);
+        assert_eq!(s.frames[0].reasons, ["Same shot: frame 2 is better"]);
+        assert!(s.frames.iter().all(|f| f.problems.is_empty()), "{:?}", s.frames);
+    }
+
+    #[test]
+    fn looking_down_through_a_burst_flags_no_one() {
+        let s = &suggest(vec![
+            with_blink(1, 0.5, 1, 1, 0.70),
+            with_blink(2, 0.2, 1, 1, 0.62),
+            with_blink(3, 0.4, 1, 1, 0.75),
+        ])[0];
+        assert_eq!(s.keeper, 1, "{:?}", s.frames);
+        assert!(s.frames.iter().all(|f| !f.problems.contains(&Problem::EyesClosed)), "{:?}", s.frames);
+        assert!(s.frames.iter().all(|f| !f.reasons.iter().any(|r| r.starts_with("Eyes closed"))), "{:?}", s.frames);
+    }
+
+    #[test]
+    fn a_clear_blink_stands_out_of_a_lidded_burst() {
+        let s = &suggest(vec![
+            with_blink(1, 0.5, 1, 1, 0.60),
+            with_blink(2, 0.2, 1, 1, 0.95),
+            with_blink(3, 0.4, 1, 1, 0.62),
+        ])[0];
+        assert_eq!(s.keeper, 2, "{:?}", s.frames);
+        assert_eq!(s.frames[1].suggest, Suggest::Reject);
+        assert_eq!(s.frames[1].problems, [Problem::EyesClosed]);
+        assert_eq!(s.frames[1].reasons, ["Same shot: frame 3 is better", "Eyes closed"]);
+        assert!(s.frames[0].problems.is_empty() && s.frames[2].problems.is_empty(), "{:?}", s.frames);
     }
 
     #[test]
@@ -2881,8 +2942,21 @@ mod tests {
         // Four faces: two blink in the sharper frame, one in the other.
         let s = &suggest(vec![with_eyes(1, 0.2, 4, 2, 0.3), with_eyes(2, 0.5, 4, 1, 0.3)])[0];
         assert_eq!(s.keeper, 1, "{:?}", s.frames);
-        assert_eq!(s.frames[1].reasons, ["The best of these 2 frames", "Eyes closed: 1 of 4 faces"]);
+        assert_eq!(s.frames[1].reasons, ["The best of these 2 frames"]);
         assert_eq!(s.frames[0].reasons, ["Same shot: frame 2 is better", "Eyes closed: 2 of 4 faces"]);
+    }
+
+    #[test]
+    fn versions_of_one_capture_are_not_a_burst_for_blinks() {
+        // A RAW and its JPEG, both read closed: a lone frame, flagged as it would be alone.
+        let named = |id: i64, name: &str| {
+            let mut f = with_eyes(id, 0.3, 1, 1, 0.0);
+            (f.taken, f.row.name) = (100, Some(name.into()));
+            f
+        };
+        let s = &suggest(vec![named(1, "IMG_0001.CR2"), named(2, "IMG_0001.JPG")])[0];
+        assert!(s.frames.iter().all(|f| f.problems == [Problem::EyesClosed]), "{:?}", s.frames);
+        assert!(s.frames.iter().all(|f| f.suggest == Suggest::None), "{:?}", s.frames);
     }
 
     #[test]
