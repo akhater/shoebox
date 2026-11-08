@@ -104,7 +104,7 @@ export function ModelsTab() {
       return m.id === "runtime-gpu"
         ? "Shoebox then runs the models on the processor, which is slower."
         : "Nothing changes: the graphics-card runtime is used while it's here.";
-    return "Word search, faces and sideways photos stop until an AI runtime is downloaded again.";
+    return "Word search, faces, sideways photos and Cull's eye check stop until an AI runtime is downloaded again.";
   };
 
   const row = (m: ModelStatus) => {
@@ -202,7 +202,7 @@ export function ModelsTab() {
         Shoebox's AI runs on this computer, never in the cloud. The models don't come with the app: download the ones
         you want from their publishers. Each file is checked (SHA-256) before it's used.
       </small>
-      {!o.runtimeReady && <p className="note warn">Word search, faces and sideways photos need an AI runtime: download one below.</p>}
+      {!o.runtimeReady && <p className="note warn">Word search, faces, sideways photos and Cull's eye check need an AI runtime: download one below.</p>}
 
       <div className="model-group">
         <span className="field-label">Features</span>

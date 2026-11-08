@@ -768,6 +768,19 @@ describe("Cull", () => {
     expect(tile(host, 203).querySelector(".badge.problem")!.getAttribute("title")).toBe("Very dark");
     localStorage.removeItem("shoebox.showProblems");
   });
+
+  test("a photo whose only problem is closed eyes has a badge of its own", async () => {
+    const be = fakeBackend();
+    be.unmeasured(203, 256); // eyes closed, once measured
+    const host = await renderApp();
+    await click(problemsToggle(host));
+    await wait(400);
+    const eyes = tile(host, 203).querySelector(".badge.problem")!;
+    expect(eyes.getAttribute("title")).toBe("Eyes closed");
+    expect(eyes.classList.contains("eyes")).toBe(true);
+    expect(tile(host, 204).querySelector(".badge.problem")!.classList.contains("eyes")).toBe(false);
+    localStorage.removeItem("shoebox.showProblems");
+  });
 });
 
 describe("the viewer", () => {
