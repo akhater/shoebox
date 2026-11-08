@@ -740,6 +740,8 @@ export interface CullFrame {
   rev: number;
   /** Marked for deletion. */
   marked: boolean;
+  /** Faces found in it, of any size. */
+  faces: number;
   suggest: "keep" | "reject" | "none";
   /** Why, the first one the main reason. */
   reasons: string[];

@@ -15,6 +15,14 @@ Newest first. Same format and versioning as Argentum.
   looking down reads the same. The grid shows them with their own badge.
   Faces too small on the preview are read from the original when Cull looks
   closer. Headless: `shoebox-cli eyes <photo id>`.
+- **Compare the frames of a burst side by side.** In Cull, Compare frames
+  (or C) shows 2, 3 or 4 frames next to each other, and opens by itself for
+  bursts with people in them; × or C closes it for the rest of the shoot.
+  Z or a click puts every frame at 100% on the same spot, and dragging one
+  moves them all. Under the frames, each face is cropped from every frame,
+  to compare eyes and expressions at a glance; a click on a face goes to
+  its frame. Cull also counts the faces found in each frame (in
+  `shoebox-cli cull` too).
 
 ## 26.45.3 - 2026-11-05
 

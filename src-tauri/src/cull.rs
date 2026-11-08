@@ -1687,6 +1687,7 @@ impl QualityIndex {
                         h: list.h[i],
                         rev: list.rev[i],
                         marked: list.marked[i] == 1,
+                        faces: of(&faces, id).len(),
                         focus: first_look(&points, of(&faces, id)),
                         focus_points: points,
                         ..Default::default()
@@ -2011,6 +2012,8 @@ pub struct FrameRow {
     pub rev: i64,
     /// Marked for deletion.
     pub marked: bool,
+    /// Faces found in it, of any size (the window compares bursts with people).
+    pub faces: usize,
     pub suggest: Suggest,
     /// Why, in words, the first one the main reason.
     pub reasons: Vec<String>,
