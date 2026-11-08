@@ -151,7 +151,13 @@ export function fakeBackend() {
   /** Names by password; an empty space's is forgotten once locked, as Shoebox does. */
   const names = new Map<string, string>();
   const status = () => ({ unlocked: open != null, photos: mine().size, name: (open != null && names.get(open)) || null });
-  let settings: Record<string, unknown> = { privateLockMinutes: 5, privateWarning: true, argentumPath: "" };
+  let settings: Record<string, unknown> = { privateLockMinutes: 5, privateWarning: true, argentumPath: "", askEyesModel: true };
+  /** AI models here (Settings > AI models); the runtime and Cull's eye model unless a test takes them away. */
+  const modelsHere = new Set(["runtime-gpu", "expressions"]);
+  const model = (id: string, size: number) => {
+    const here = modelsHere.has(id);
+    return { id, feature: id, name: id, about: "", publisher: "", licence: "", state: here ? "ready" : "missing", bytesHere: here ? size : 0, size, downloadBytes: here ? 0 : size, later: false, inUse: false };
+  };
   /** The Argentum found by itself. */
   let installedArgentum: string | null = "C:\\Apps\\Argentum\\Argentum.exe";
   /** Photos only on an unplugged disk. */
@@ -765,6 +771,19 @@ export function fakeBackend() {
         return /argentum/i.test(a.path as string) ? a.path : null;
       case "open_argentum_page":
         return null;
+      case "models_list":
+        return { dir: "models", runtimeReady: modelsHere.has("runtime-gpu"), models: [model("runtime-gpu", 18_000_000), model("expressions", 6_015_685)] };
+      case "model_progress":
+        return null;
+      case "model_download": {
+        // Downloaded at once: half, then all of it.
+        const id = a.id as string;
+        const total = id === "expressions" ? 6_015_685 : 18_000_000;
+        modelsHere.add(id);
+        setTimeout(() => void emit("model-download", { id, done: total / 2, total, finished: false, error: null, queued: [] }), 20);
+        setTimeout(() => void emit("model-download", { id, done: total, total, finished: true, error: null, queued: [] }), 150);
+        return null;
+      }
       case "get_settings":
         return { ...settings };
       case "save_settings":
@@ -882,6 +901,8 @@ export function fakeBackend() {
     foundIn,
     /** Photos private under a password (its space), as a test sets them. */
     privateIn: (password: string, ids: number[]) => spaces.set(password, new Set([...(spaces.get(password) ?? []), ...ids])),
+    /** An AI model taken out of models\ ("expressions", "runtime-gpu"). */
+    withoutModel: (id: string) => modelsHere.delete(id),
     /** The private photos of a password now. */
     privateOf: (password: string) => [...(spaces.get(password) ?? [])].sort(),
     focusMissed,

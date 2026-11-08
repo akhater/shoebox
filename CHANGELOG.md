@@ -4,6 +4,18 @@ Newest first. Same format and versioning as Argentum.
 
 ## 26.45.4 - unreleased
 
+### Added
+
+- **Cull spots closed eyes.** With the closed-eyes model downloaded (6 MB,
+  in Settings > AI models; Cull offers it when it opens without it, with
+  "Don't ask again"), Cull reads each face's eyes and smile. In a burst, a
+  frame where someone blinks is suggested as a reject and the sharp frame
+  with open eyes is kept; of frames as sharp, the one with the bigger smile.
+  Closed eyes on a photo outside a burst are flagged and left to you, since
+  looking down reads the same. The grid shows them with their own badge.
+  Faces too small on the preview are read from the original when Cull looks
+  closer. Headless: `shoebox-cli eyes <photo id>`.
+
 ## 26.45.3 - 2026-11-05
 
 ### Fixed

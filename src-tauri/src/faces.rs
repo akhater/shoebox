@@ -274,7 +274,7 @@ fn similarity(kps: &[f32; 10]) -> (f32, f32, f32, f32) {
     (a, b, mu - (a * mx - b * my), mv - (b * mx + a * my))
 }
 
-fn bilinear(img: &RgbImage, x: f32, y: f32) -> [f32; 3] {
+pub(crate) fn bilinear(img: &RgbImage, x: f32, y: f32) -> [f32; 3] {
     let (w, h) = img.dimensions();
     if x < 0.0 || y < 0.0 || x > (w - 1) as f32 || y > (h - 1) as f32 {
         return [0.0; 3];

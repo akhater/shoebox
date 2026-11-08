@@ -61,6 +61,8 @@ import {
   type Overview,
   type Merged,
   type MissingPhoto,
+  modelsApi,
+  type ModelsOverview,
   type Moved,
   type Person,
   type PhotoList,
@@ -91,6 +93,7 @@ import {
 } from "./api";
 import { CalendarView } from "./components/CalendarView";
 import { CullView } from "./components/CullView";
+import { EyesModelAsk, eyesMissing } from "./components/EyesModelAsk";
 import { DatesCheckDialog, movedText } from "./components/DatesCheckDialog";
 import { FixDatesDialog } from "./components/FixDatesDialog";
 import { DeleteDialog } from "./components/DeleteDialog";
@@ -747,6 +750,24 @@ export default function App() {
     refresh();
   });
   const lockPrivate = useLatest(() => run(privateApi.lock().then(privateChanged)));
+  // Opening Cull without the closed-eyes model: asked to download it, unless "Don't ask again".
+  const [eyesAsk, setEyesAsk] = useState<ModelsOverview | null>(null);
+  useEffect(() => {
+    if (view !== "cull") return;
+    let live = true;
+    api
+      .settings()
+      .then((st) => (st.askEyesModel === false ? null : Promise.all([modelsApi.list(), modelsApi.progress()])))
+      .then((got) => live && got && eyesMissing(...got) && setEyesAsk(got[0]))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [view]);
+  const eyesAskDone = useLatest((quiet: boolean) => {
+    setEyesAsk(null);
+    if (quiet) run(api.settings().then((st) => api.saveSettings({ ...st, askEyesModel: false })));
+  });
   // A password just opened a space: the warning, unless it has photos and was turned off.
   const privateOpened = useLatest((s: PrivateStatus) => {
     privateChanged(s);
@@ -2611,6 +2632,7 @@ export default function App() {
           onClose={() => setPrivateAsk(null)}
         />
       )}
+      {eyesAsk && <EyesModelAsk models={eyesAsk} onDone={eyesAskDone} />}
       {privateNotice && (
         <PrivateNotice photos={privateNotice.photos} onDone={privateNoticeDone} onRetry={privateRetry} />
       )}
