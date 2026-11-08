@@ -99,9 +99,9 @@ const TIE: f32 = 0.15;
 /// (0..1) than the best one is kept instead.
 const SMILE_MARGIN: f32 = 0.2;
 /// Closed eyes in a burst are a blink only when the frame's eyes read this
-/// much more closed (0..1) than the least closed frame's, or with more faces
-/// closed: looking down reads alike in every frame, a blink is a change
-/// between frames. Measured on real bursts.
+/// much more closed (0..1) than the least closed frame's: looking down reads
+/// alike in every frame, even when another frame reads just under the closed
+/// threshold, and a blink is a change between frames. Measured on real bursts.
 const BLINK_MARGIN: f32 = 0.3;
 
 /// What one look at a photo found. Blur is a Gaussian sigma, in pixels of
@@ -2154,8 +2154,10 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
         all_close && frames.iter().all(|f| f.quality.is_some_and(|q| q.close.is_some_and(|c| c.eyes.is_some())));
     let eyes: Vec<Option<Eyes>> =
         frames.iter().map(|f| f.quality.and_then(|q| if close_eyes { q.eyes() } else { q.preview.eyes })).collect();
-    // In a burst, closed eyes count only as a change from the other frames
-    // ([`BLINK_MARGIN`]): a look down reads the same in all of them. Frames
+    // In a burst, closed eyes count only as a change from the other frames:
+    // a frame blinks when its eyes read [`BLINK_MARGIN`] more closed than the
+    // least closed of the others', since a look down reads the same in all of
+    // them, whether or not another frame crosses the closed threshold. Frames
     // of one capture don't count against each other, and with no other frame
     // read, closed eyes stand as they are.
     let blinking: Vec<bool> = (0..frames.len())
@@ -2164,8 +2166,8 @@ fn stack_of(frames: Vec<FrameIn>) -> Stack {
             let least = (0..frames.len())
                 .filter(|&j| capture[j] != capture[i])
                 .filter_map(|j| eyes[j])
-                .min_by(|a, b| a.closed.cmp(&b.closed).then(a.blink.total_cmp(&b.blink)));
-            least.is_none_or(|l| e.closed > l.closed || e.blink >= l.blink + BLINK_MARGIN)
+                .min_by(|a, b| a.blink.total_cmp(&b.blink));
+            least.is_none_or(|l| e.blink >= l.blink + BLINK_MARGIN)
         })
         .collect();
     for (i, found) in found.iter_mut().enumerate() {
@@ -2937,6 +2939,14 @@ mod tests {
     }
 
     #[test]
+    fn looking_down_beside_a_frame_just_open_flags_no_one() {
+        // The other frame reads just under the closed threshold: still the same look down.
+        let s = &suggest(vec![with_blink(1, 0.2, 1, 1, 0.62), with_blink(2, 0.5, 1, 0, 0.50)])[0];
+        assert_eq!(s.keeper, 0, "{:?}", s.frames);
+        assert!(s.frames.iter().all(|f| !f.problems.contains(&Problem::EyesClosed)), "{:?}", s.frames);
+    }
+
+    #[test]
     fn a_clear_blink_stands_out_of_a_lidded_burst() {
         let s = &suggest(vec![
             with_blink(1, 0.5, 1, 1, 0.60),
@@ -2951,9 +2961,9 @@ mod tests {
     }
 
     #[test]
-    fn a_group_burst_keeps_the_fewest_blinks() {
-        // Four faces: two blink in the sharper frame, one in the other.
-        let s = &suggest(vec![with_eyes(1, 0.2, 4, 2, 0.3), with_eyes(2, 0.5, 4, 1, 0.3)])[0];
+    fn a_group_burst_keeps_a_frame_without_blinks() {
+        // Four faces: two blink in the sharper frame, none in the other.
+        let s = &suggest(vec![with_blink(1, 0.2, 4, 2, 0.9), with_blink(2, 0.5, 4, 0, 0.2)])[0];
         assert_eq!(s.keeper, 1, "{:?}", s.frames);
         assert_eq!(s.frames[1].reasons, ["The best of these 2 frames"]);
         assert_eq!(s.frames[0].reasons, ["Same shot: frame 2 is better", "Eyes closed: 2 of 4 faces"]);
