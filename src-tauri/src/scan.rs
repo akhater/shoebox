@@ -6,6 +6,9 @@
 //! 3. Read: new or changed files are fingerprinted. Known content is just linked
 //!    (that's how moves and copies keep their photo); unknown content is read
 //!    and gets its preview and thumbnail.
+//! 4. Folders: those gone from the disk with nothing left in them (photos
+//!    moved elsewhere, or taken out of the catalog) leave it, after a complete
+//!    walk. A folder still holding missing photos stays.
 //!
 //! Argentum sidecars listed on the way are read when new or changed (see
 //! edits.rs); those gone are forgotten with step 2's rule.
@@ -246,6 +249,13 @@ pub fn scan_root(
 
     // 3. Read.
     read_all(cat, &jobs, cancel, &mut progress, on_progress, &mut report)?;
+
+    // 4. Folders left with nothing in them and gone from the disk (after the
+    // read: photos found elsewhere only leave their old folder when linked).
+    let still_there = cat.mount_of(root.volume_id).as_deref() == Some(mount.as_str()) && base.is_dir();
+    if !report.cancelled && still_there {
+        drop_gone_folders(&cat.db(), &mount, root.volume_id, &root.rel_path, &errored)?;
+    }
 
     if !report.cancelled {
         cat.db().execute(
@@ -663,6 +673,43 @@ fn mark_missing(db: &Connection, volume_id: i64, root_rel: &str, scan_id: i64, e
         n += 1;
     }
     tx.commit()?;
+    Ok(n)
+}
+
+/// Catalog folders under `root_rel` that hold no file, missing or not, in them
+/// or below (their photos went elsewhere, or were taken out of the catalog),
+/// and that the disk says aren't there any more: dropped, so the sidebar stops
+/// listing them. Only after a complete walk. A folder under one that couldn't
+/// be read, or one the system can't answer about, stays. Returns how many went.
+fn drop_gone_folders(db: &Connection, mount: &str, volume_id: i64, root_rel: &str, errored: &[String]) -> Result<u64> {
+    let rows: Vec<(i64, String, bool)> = db
+        .prepare(&format!(
+            "SELECT fo.id, fo.rel_path, EXISTS (SELECT 1 FROM files f WHERE f.folder_id = fo.id)
+               FROM folders fo WHERE fo.volume_id = ?1 AND {}",
+            under_sql("fo", 2)
+        ))?
+        .query_map(params![volume_id, root_rel], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let holding: Vec<&str> = rows.iter().filter(|(_, _, has)| *has).map(|(_, rel, _)| rel.as_str()).collect();
+    let tx = db.unchecked_transaction()?;
+    let mut n = 0;
+    for (id, rel, _) in rows.iter().filter(|(_, _, has)| !has) {
+        if holding.iter().any(|h| db::is_under(h, rel)) || errored.iter().any(|e| db::is_under(rel, e)) {
+            continue;
+        }
+        match std::fs::symlink_metadata(volumes::join(mount, rel)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => continue,
+        }
+        n += tx.execute(
+            "DELETE FROM folders WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM files f WHERE f.folder_id = ?1)",
+            [id],
+        )? as u64;
+    }
+    tx.commit()?;
+    if n > 0 {
+        log::info!("scan: {n} folder(s) gone from the disk with nothing left in them, taken out of the catalog");
+    }
     Ok(n)
 }
 

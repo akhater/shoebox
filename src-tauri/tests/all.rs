@@ -19,6 +19,7 @@ mod dates;
 mod days;
 mod edited_previews;
 mod edits;
+mod empty_folders;
 mod faces_by_date;
 mod faces_saved;
 mod failed_photos;
