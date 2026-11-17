@@ -2,7 +2,23 @@
 
 Newest first. Same format and versioning as Argentum.
 
-## 26.45.5 - unreleased
+## 26.47.2 - unreleased
+
+## 26.47.1 - 2026-11-17
+
+### Fixed
+
+- **Folders deleted outside Shoebox leave the sidebar.** A folder deleted
+  in Explorer after its photos had moved elsewhere (or been removed from
+  the catalog) stayed in the sidebar for good, and Show in Explorer said
+  it isn't there any more. A rescan now takes out folders that are gone
+  from the disk with nothing left in them. Empty folders still on the disk
+  stay, and so do folders holding missing photos until those are removed
+  from the catalog.
+- **Some phone DNGs no longer come out white.** Linear DNGs with a 2x2
+  black-level pattern of three samples per pixel are read correctly
+  instead of clipping to white, and 9-15-bit JPEG XL DNGs give their
+  picture or an error instead of crashing the reader.
 
 ## 26.45.4 - 2026-11-08
 
