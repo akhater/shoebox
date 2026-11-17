@@ -63,8 +63,9 @@ unicode-normalization = "0.1"
 # Culling: deleted photos go to the Recycle Bin (only organize.rs may use it).
 trash = "5"
 # AI: same ONNX Runtime binding as Argentum. The runtime DLL is loaded at run
-# time from models (never linked or downloaded at build time).
-ort = { version = "=2.0.0-rc.10", features = ["ndarray", "load-dynamic"] }
+# time from models (never linked or downloaded at build time): ort's default
+# features would download it and copy it next to the build output.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "tracing", "load-dynamic"] }
 ndarray = "0.16"
 tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
 # Downloads AI models from their publishers (Settings > AI models), with the
@@ -95,7 +96,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
 ] }
 # Runs the AI models on any DirectX 12 GPU (Intel Arc, AMD, NVIDIA).
-ort = { version = "=2.0.0-rc.10", features = ["directml"] }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["directml"] }
 
 [profile.dev]
 opt-level = 1
