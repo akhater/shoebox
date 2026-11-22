@@ -4295,7 +4295,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 [[package]]
 name = "rawler"
 version = "0.7.1"
-source = "git+https://github.com/akhater/RapidRAW-DngLab.git?rev=dc8b144ace0de9b519ce2812f505028684be6fa6#dc8b144ace0de9b519ce2812f505028684be6fa6"
+source = "git+https://github.com/akhater/RapidRAW-DngLab.git?rev=8b7378a4dcaf833891126aef365948fbbb0e7e73#8b7378a4dcaf833891126aef365948fbbb0e7e73"
 dependencies = [
  "backtrace",
  "bitstream-io",
